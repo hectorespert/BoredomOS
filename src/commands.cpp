@@ -24,6 +24,10 @@ void disableCommand(CmdParser *myParser) {
   enabled = false;
 }
 
+void pingCommand(CmdParser *myParser) {
+  Serial.println("OK");
+}
+
 void TaskCommands(void *pvParameters)
 {
   (void) pvParameters;
@@ -55,6 +59,7 @@ void TaskCommands(void *pvParameters)
   if (enabled)
   {
     Serial.println("Debug console enabled");
+    cmdCallback.addCmd("ping", &pingCommand);
   }
 
   while (enabled)
