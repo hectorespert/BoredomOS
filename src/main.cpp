@@ -6,20 +6,28 @@
 #define PRIORITY_HIGH 2
 #define PRIORITY_HIGHEST 3
 
+/**
+ * Task functions
+ */
+extern void TaskInitLed(void *pvParameters);
 
-extern void TaskInitLed(void *pvParameters); 
+extern void TaskCommands(void *pvParameters); 
 
 /**
    Task handlers
 */
-TaskHandle_t taskTaskInitLedHandler;
+TaskHandle_t taskInitLedHandler;
+
+TaskHandle_t taskCommandsHandler;
 
 void setup() {
 
   /**
      Create tasks
   */
-  xTaskCreate(TaskInitLed, "InitLed", 64, NULL, PRIORITY_HIGHEST,  &taskTaskInitLedHandler);
+  xTaskCreate(TaskInitLed, "InitLed", 64, NULL, PRIORITY_HIGHEST,  &taskInitLedHandler);
+
+  xTaskCreate(TaskCommands, "Commands", 128, NULL, PRIORITY_LOWEST,  &taskCommandsHandler);
 
 }
 
