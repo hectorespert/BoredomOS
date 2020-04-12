@@ -5,25 +5,6 @@
 #include <CmdCallback.hpp>
 #include <CmdParser.hpp>
 
-#define INIT_COUNT 40 // 10 seconds
-
-CmdCallback<3> cmdCallback;
-
-CmdBuffer<32> buffer;
-CmdParser parser;
-
-boolean enabled = false;
-
-void enableCommand(CmdParser *myParser) { 
-  Serial.println("Enabling debug console");
-  enabled = true;
-}
-
-void disableCommand(CmdParser *myParser) {
-  Serial.println("Disabling debug console");
-  enabled = false;
-}
-
 void pingCommand(CmdParser *myParser) {
   Serial.println("OK");
 }
@@ -32,47 +13,20 @@ void TaskCommands(void *pvParameters)
 {
   (void) pvParameters;
 
-  boolean init = true;
-
   Serial.begin(9600);
 
-  cmdCallback.addCmd("enable", &enableCommand);
-  cmdCallback.addCmd("disable", &disableCommand);
+  CmdCallback<3> cmdCallback;
 
+  CmdBuffer<32> buffer;
   buffer.setEcho(true);
-
-  Serial.println("BoredomOS debug console");
-  Serial.println("Send 'enable' to enable debug console");
-
-  int initCount = 0;
-  do {
-    vTaskDelay( 250 / portTICK_PERIOD_MS ); // Init delay
-
-    cmdCallback.updateCmdProcessing(&parser, &buffer, &Serial);
-
-    if (initCount >= INIT_COUNT) {
-      init = false;
-    }
-    initCount++;
-  } while (init);
-
-  if (enabled)
-  {
-    Serial.println("Debug console enabled");
-    cmdCallback.addCmd("ping", &pingCommand);
-  }
-
-  while (enabled)
-  {
-    vTaskDelay( 250 / portTICK_PERIOD_MS ); //Delay
-
-    cmdCallback.updateCmdProcessing(&parser, &buffer, &Serial);
-    
-  }
   
+  CmdParser parser;
 
+  cmdCallback.addCmd("ping", &pingCommand);
 
-  Serial.println("Debug console disabled");
+  for (;;) {
+    vTaskDelay( 250 / portTICK_PERIOD_MS ); //Delay
+    cmdCallback.updateCmdProcessing(&parser, &buffer, &Serial);
+  }
 
-  vTaskDelete(NULL);
 }

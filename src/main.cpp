@@ -34,3 +34,8 @@ void setup() {
 void loop() {
 
 }
+
+
+void vPortSuppressTicksAndSleep(TickType_t xExpectedIdleTime) {
+
+}
