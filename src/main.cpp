@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
+#include <semphr.h>
+
+#include <solarchargershield.h>
 
 #define PRIORITY_LOWEST 0
 #define PRIORITY_LOW 1
@@ -7,35 +10,55 @@
 #define PRIORITY_HIGHEST 3
 
 /**
- * Task functions
+ * Tasks
  */
+
 extern void TaskInitLed(void *pvParameters);
 
-extern void TaskCommands(void *pvParameters); 
+extern void TaskCommandHandler(void *pvParameters);
+
+extern void TaskSolarChargerShield(void *pvParameters);
 
 /**
    Task handlers
 */
+TaskHandle_t taskSolarChargerShieldHandler;
+
 TaskHandle_t taskInitLedHandler;
 
 TaskHandle_t taskCommandsHandler;
 
-void setup() {
+/**
+ * Semaphore
+ */
 
-  /**
-     Create tasks
-  */
-  xTaskCreate(TaskInitLed, "InitLed", 64, NULL, PRIORITY_HIGHEST,  &taskInitLedHandler);
+SemaphoreHandle_t solarChargerShieldMutex;
 
-  xTaskCreate(TaskCommands, "Commands", 128, NULL, PRIORITY_LOWEST,  &taskCommandsHandler);
+SolarChargerShield solarChargerShield;
 
+void setup()
+{
+
+   /**
+    * Create mutex
+    */
+   solarChargerShieldMutex = xSemaphoreCreateMutex();
+
+   /**
+    *  Create tasks
+    */
+
+   xTaskCreate(TaskInitLed, "InitLed", 64, NULL, PRIORITY_HIGH, &taskInitLedHandler);
+
+   xTaskCreate(TaskSolarChargerShield, "SolarCharger", 258, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
+
+   xTaskCreate(TaskCommandHandler, "Commands", 258, NULL, PRIORITY_HIGH, &taskCommandsHandler);
 }
 
-void loop() {
-
+void loop()
+{
 }
 
-
-void vPortSuppressTicksAndSleep(TickType_t xExpectedIdleTime) {
-
+void vPortSuppressTicksAndSleep(TickType_t xExpectedIdleTime)
+{
 }
