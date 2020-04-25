@@ -6,77 +6,13 @@
 #include <CmdCallback.hpp>
 #include <CmdParser.hpp>
 
-#include <solarchargershield.h>
-#include <internaltemperature.h>
+extern void pingCommand(CmdParser *myParser);
 
-extern SolarChargerShield solarChargerShield;
+extern void watermarkCommand(CmdParser *myParser);
 
-extern SemaphoreHandle_t solarChargerShieldMutex;
+extern void voltageCommand(CmdParser *myParser);
 
-extern InternalTemperature internalTemperature;
-
-extern SemaphoreHandle_t internalTemperatureMutex;
-
-extern TaskHandle_t taskLedHandler;
-
-extern TaskHandle_t taskSolarChargerShieldHandler;
-
-extern TaskHandle_t taskInternalTemperatureHandler;
-
-void pingCommand(CmdParser *myParser)
-{
-  Serial.println("OK");
-}
-
-void watermarkCommand(CmdParser *myParser)
-{
-  if (myParser->equalCmdParam(1, "led"))
-  {
-    Serial.println(uxTaskGetStackHighWaterMark(taskLedHandler));
-  }
-  else if (myParser->equalCmdParam(1, "command"))
-  {
-    Serial.println(uxTaskGetStackHighWaterMark(NULL));
-  }
-  else if (myParser->equalCmdParam(1, "charger"))
-  {
-    Serial.println(uxTaskGetStackHighWaterMark(taskSolarChargerShieldHandler));
-  }
-  else if (myParser->equalCmdParam(1, "temperature"))
-  {
-    Serial.println(uxTaskGetStackHighWaterMark(taskInternalTemperatureHandler));
-  }
-  else
-  {
-    Serial.println("ERROR");
-  }
-}
-
-void voltageCommand(CmdParser *myParser)
-{
-  if (xSemaphoreTake(solarChargerShieldMutex, 10) == pdTRUE)
-  {
-    Serial.println(solarChargerShield.voltage);
-    xSemaphoreGive(solarChargerShieldMutex);
-  }
-  else
-  {
-    Serial.println("ERROR");
-  }
-}
-
-void internalTemperatureCommand(CmdParser *myParser)
-{
-  if (xSemaphoreTake(internalTemperatureMutex, 10) == pdTRUE)
-  {
-    Serial.println(internalTemperature.celsius);
-    xSemaphoreGive(internalTemperatureMutex);
-  }
-  else
-  {
-    Serial.println("ERROR");
-  }
-}
+extern void internalTemperatureCommand(CmdParser *myParser);
 
 void TaskCommandHandler(void *pvParameters)
 {
@@ -84,17 +20,17 @@ void TaskCommandHandler(void *pvParameters)
 
   Serial.begin(9600);
 
-  CmdCallback<4> cmdCallback;
-
   CmdBuffer<32> buffer;
   buffer.setEcho(true);
 
   CmdParser parser;
 
-  cmdCallback.addCmd("ping", &pingCommand);
-  cmdCallback.addCmd("watermark", &watermarkCommand);
-  cmdCallback.addCmd("voltage", &voltageCommand);
-  cmdCallback.addCmd("temperature", &internalTemperatureCommand);
+  CmdCallback_P<4> cmdCallback;
+
+  cmdCallback.addCmd(PSTR("ping"), &pingCommand);
+  cmdCallback.addCmd(PSTR("watermark"), &watermarkCommand);
+  cmdCallback.addCmd(PSTR("voltage"), &voltageCommand);
+  cmdCallback.addCmd(PSTR("temperature"), &internalTemperatureCommand);
 
   for (;;)
   {

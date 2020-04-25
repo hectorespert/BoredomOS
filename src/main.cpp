@@ -63,13 +63,13 @@ void setup()
     *  Create tasks
     */
 
-   //xTaskCreate(TaskLed, "Led", 128, NULL, PRIORITY_HIGH, &taskLedHandler);
+   xTaskCreate(TaskLed, "Led", 64, NULL, PRIORITY_HIGH, &taskLedHandler);
 
    xTaskCreate(TaskSolarChargerShield, "SolarCharger", 256, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
 
    xTaskCreate(TaskInternalTemperature, "InternalTemperature", 256, NULL, PRIORITY_HIGH, &taskInternalTemperatureHandler);
 
-   xTaskCreate(TaskCommandHandler, "Command", 256, NULL, PRIORITY_LOW, &taskCommandsHandler);
+   xTaskCreate(TaskCommandHandler, "Command", 192, NULL, PRIORITY_LOW, &taskCommandsHandler);
 }
 
 void loop()

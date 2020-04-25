@@ -3,15 +3,17 @@
 
 void TaskLed(void *pvParameters)
 {
-  (void)pvParameters;
+  (void) pvParameters;
 
   pinMode(LED_BUILTIN, OUTPUT);
 
-  vTaskDelay(500 / portTICK_PERIOD_MS);
-  digitalWrite(LED_BUILTIN, HIGH);
-  vTaskDelay(500 / portTICK_PERIOD_MS);
-  digitalWrite(LED_BUILTIN, LOW);
-  vTaskDelay(500 / portTICK_PERIOD_MS);
+  for (int i = 0; i < 5; i++)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    vTaskDelay( 500 / portTICK_PERIOD_MS );
+    digitalWrite(LED_BUILTIN, LOW);
+    vTaskDelay( 500 / portTICK_PERIOD_MS );
+  }
 
   vTaskDelete(NULL);
 }
