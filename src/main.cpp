@@ -3,6 +3,7 @@
 #include <semphr.h>
 
 #include <solarchargershield.h>
+#include <internaltemperature.h>
 
 #define PRIORITY_LOWEST 0
 #define PRIORITY_LOW 1
@@ -13,20 +14,24 @@
  * Tasks
  */
 
-extern void TaskInitLed(void *pvParameters);
+extern void TaskLed(void *pvParameters);
 
 extern void TaskCommandHandler(void *pvParameters);
 
 extern void TaskSolarChargerShield(void *pvParameters);
+
+extern void TaskInternalTemperature(void *pvParameters);
 
 /**
    Task handlers
 */
 TaskHandle_t taskSolarChargerShieldHandler;
 
-TaskHandle_t taskInitLedHandler;
+TaskHandle_t taskLedHandler;
 
 TaskHandle_t taskCommandsHandler;
+
+TaskHandle_t taskInternalTemperatureHandler;
 
 /**
  * Semaphore
@@ -34,7 +39,15 @@ TaskHandle_t taskCommandsHandler;
 
 SemaphoreHandle_t solarChargerShieldMutex;
 
+SemaphoreHandle_t internalTemperatureMutex;
+
+/**
+ * Global data
+ */
+
 SolarChargerShield solarChargerShield;
+
+InternalTemperature internalTemperature;
 
 void setup()
 {
@@ -44,15 +57,19 @@ void setup()
     */
    solarChargerShieldMutex = xSemaphoreCreateMutex();
 
+   internalTemperatureMutex = xSemaphoreCreateMutex();
+
    /**
     *  Create tasks
     */
 
-   xTaskCreate(TaskInitLed, "InitLed", 64, NULL, PRIORITY_HIGH, &taskInitLedHandler);
+   //xTaskCreate(TaskLed, "Led", 128, NULL, PRIORITY_HIGH, &taskLedHandler);
 
-   xTaskCreate(TaskSolarChargerShield, "SolarCharger", 258, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
+   xTaskCreate(TaskSolarChargerShield, "SolarCharger", 256, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
 
-   xTaskCreate(TaskCommandHandler, "Commands", 258, NULL, PRIORITY_HIGH, &taskCommandsHandler);
+   xTaskCreate(TaskInternalTemperature, "InternalTemperature", 256, NULL, PRIORITY_HIGH, &taskInternalTemperatureHandler);
+
+   xTaskCreate(TaskCommandHandler, "Command", 256, NULL, PRIORITY_LOW, &taskCommandsHandler);
 }
 
 void loop()
