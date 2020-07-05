@@ -10,11 +10,7 @@ extern TaskHandle_t taskInternalTemperatureHandler;
 
 void watermarkCommand(CmdParser *myParser)
 {
-  if (myParser->equalCmdParam(1, "led"))
-  {
-    Serial.println(uxTaskGetStackHighWaterMark(taskLedHandler));
-  }
-  else if (myParser->equalCmdParam(1, "command"))
+  if (myParser->equalCmdParam(1, "command"))
   {
     Serial.println(uxTaskGetStackHighWaterMark(NULL));
   }
