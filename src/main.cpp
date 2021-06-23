@@ -1,11 +1,11 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
-#include <semphr.h>
+//#include <semphr.h>
 
-#include <solarchargershield.h>
-#include <internaltemperature.h>
+//#include <solarchargershield.h>
+//#include <internaltemperature.h>
 
-#include <RTClib.h>
+//#include <RTClib.h>
 
 #define PRIORITY_LOWEST 0
 #define PRIORITY_LOW 1
@@ -18,40 +18,40 @@
 
 extern void TaskLed(void *pvParameters);
 
-extern void TaskCommandHandler(void *pvParameters);
+//extern void TaskCommandHandler(void *pvParameters);
 
-extern void TaskSolarChargerShield(void *pvParameters);
+//extern void TaskSolarChargerShield(void *pvParameters);
 
-extern void TaskInternalTemperature(void *pvParameters);
+//extern void TaskInternalTemperature(void *pvParameters);
 
 /**
    Task handlers
 */
-TaskHandle_t taskSolarChargerShieldHandler;
+//TaskHandle_t taskSolarChargerShieldHandler;
 
-TaskHandle_t taskCommandsHandler;
+//TaskHandle_t taskCommandsHandler;
 
-TaskHandle_t taskInternalTemperatureHandler;
+//TaskHandle_t taskInternalTemperatureHandler;
 
 /**
  * Semaphore
  */
 
-SemaphoreHandle_t solarChargerShieldMutex;
+//SemaphoreHandle_t solarChargerShieldMutex;
 
-SemaphoreHandle_t internalTemperatureMutex;
+//SemaphoreHandle_t internalTemperatureMutex;
 
-SemaphoreHandle_t rtcMutex;
+//SemaphoreHandle_t rtcMutex;
 
 /**
  * Global data
  */
 
-SolarChargerShield solarChargerShield;
+//SolarChargerShield solarChargerShield;
 
-InternalTemperature internalTemperature;
+//InternalTemperature internalTemperature;
 
-RTC_DS3231 rtc;
+//RTC_DS3231 rtc;
 
 void setup()
 {
@@ -61,34 +61,36 @@ void setup()
    /**
     * DS3231 init
     */
-   configASSERT(rtc.begin());
+   //configASSERT(rtc.begin());
 
    /**
     * RTC configuration if lost power
     */
-   if (rtc.lostPower())
-   {
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-   }
+   //if (rtc.lostPower())
+   //{
+   //   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+   //}
 
    /**
     * Create mutex
     */
-   solarChargerShieldMutex = xSemaphoreCreateMutex();
+   //solarChargerShieldMutex = xSemaphoreCreateMutex();
 
-   internalTemperatureMutex = xSemaphoreCreateMutex();
+   //internalTemperatureMutex = xSemaphoreCreateMutex();
 
-   rtcMutex = xSemaphoreCreateMutex();
+   //rtcMutex = xSemaphoreCreateMutex();
 
    /**
     *  Create tasks
     */
 
-   xTaskCreate(TaskSolarChargerShield, "SolarCharger", 256, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
+    xTaskCreate(TaskLed, "Led", 128, NULL, PRIORITY_HIGHEST, NULL);
 
-   xTaskCreate(TaskInternalTemperature, "InternalTemperature", 256, NULL, PRIORITY_HIGH, &taskInternalTemperatureHandler);
+   //xTaskCreate(TaskSolarChargerShield, "SolarCharger", 256, NULL, PRIORITY_HIGH, &taskSolarChargerShieldHandler);
 
-   xTaskCreate(TaskCommandHandler, "Command", 128, NULL, PRIORITY_LOW, &taskCommandsHandler);
+   //xTaskCreate(TaskInternalTemperature, "InternalTemperature", 256, NULL, PRIORITY_HIGH, &taskInternalTemperatureHandler);
+
+   //xTaskCreate(TaskCommandHandler, "Command", 128, NULL, PRIORITY_LOW, &taskCommandsHandler);
 }
 
 void loop()
