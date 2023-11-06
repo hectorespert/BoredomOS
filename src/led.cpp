@@ -5,7 +5,7 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 
-void TaskLed(void *pvParameters)
+[[noreturn]] void TaskLed(void *pvParameters)
 {
     (void) pvParameters;
 

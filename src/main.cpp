@@ -10,7 +10,7 @@
  * Tasks
  */
 
-extern void TaskLed(void *pvParameters);
+[[noreturn]] extern void TaskLed(void *pvParameters);
 
 
 void setup()
