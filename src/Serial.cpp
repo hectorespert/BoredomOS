@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
+#include <SolarCharger.h>
 
 [[noreturn]] void TaskSerial(void *pvParameters)
 {
@@ -7,11 +8,13 @@
 
     Serial.begin(9600);
 
+    SolarCharger solarCharger(A0);
+
     for (;;)
     {
-        Serial.println(uxTaskGetStackHighWaterMark(NULL));
+        Serial.println(solarCharger.readVoltage());
 
-        vTaskDelay( 5000 / portTICK_PERIOD_MS );
+        vTaskDelay( 1000 / portTICK_PERIOD_MS );
     }
 
 }
