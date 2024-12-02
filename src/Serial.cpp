@@ -1,20 +1,23 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
-#include <SolarCharger.h>
 
 [[noreturn]] void TaskSerial(void *pvParameters)
 {
     (void) pvParameters;
 
+    uint32_t notificationValue;
+
     Serial.begin(9600);
 
-    SolarCharger solarCharger(A0);
 
     for (;;)
     {
-        Serial.println(solarCharger.readVoltage());
+        xTaskNotifyWait(0x00, 0x00, &notificationValue, portMAX_DELAY);
 
-        vTaskDelay( 1000 / portTICK_PERIOD_MS );
+        float voltage = *(float*)&notificationValue;
+
+        Serial.print("Voltage: ");
+        Serial.println(voltage);
     }
 
 }
