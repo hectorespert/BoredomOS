@@ -1,63 +1,54 @@
 #include <Arduino.h>
-#include <millisDelay.h>
-#include <MAVLink.h>
+#include <SD.h>
+#include <SolarCharger.h>
+#include <Arduino_FreeRTOS.h>
+#include <Priority.h>
+#include <Led.h>
 
-#define LED_HIGH_MS 250
-// #define LED_LOW_MS 59750
-#define LED_LOW_MS 750
+#define SOLAR_CHARGER_READ_MS 1000
 
 #define MAVLINK_HEARTBEAT 1000
 
-static millisDelay ledDelay;
-static millisDelay mavlinkHeartbeatDelay;
+TaskHandle_t taskLedHandler = NULL;
+
+File logFile;
+
+SolarCharger solarCharger(A0);
+
+float batteryVoltage = 0.0;
 
 void setup()
 {
   Serial.begin(9600);
 
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
-  ledDelay.start(LED_LOW_MS);
-
-  mavlinkHeartbeatDelay.start(MAVLINK_HEARTBEAT);
-}
-
-void changeStatusLed()
-{
-  if (ledDelay.justFinished())
-  {
-    bool ledStatus = digitalRead(LED_BUILTIN);
-    if (ledStatus == LOW)
-    {
-      ledDelay.start(LED_HIGH_MS);
-    }
-    else
-    {
-      ledDelay.start(LED_LOW_MS);
-    }
-    digitalWrite(LED_BUILTIN, !ledStatus);
+  /*if (!SD.begin(9)) {
+    Serial.println("Card failed, or not present");
+    while (1);
   }
+
+  logFile = SD.open("datalog.txt", FILE_WRITE);
+  if (!logFile) {
+    Serial.print("error opening ");
+    while (true);
+  }*/
+
+  xTaskCreate(TaskLed, "HealthCheck", 64, NULL, PRIORITY_LOWEST, &taskLedHandler);
 }
 
-void sendHeartbeat()
+/*
+
+void readBatteryVoltage()
 {
-  if (mavlinkHeartbeatDelay.justFinished())
-  {
-    mavlinkHeartbeatDelay.repeat();
-
-    mavlink_message_t msg;
-    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-
-    mavlink_msg_heartbeat_pack(1, MAV_COMP_ID_AUTOPILOT1, &msg, MAV_TYPE_QUADROTOR, MAV_AUTOPILOT_GENERIC, MAV_MODE_FLAG_MANUAL_INPUT_ENABLED, 0, MAV_STATE_STANDBY);
-    uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-
-    Serial.write(buf, len);
+  if (!solarChargerDelay.justFinished()) {
+    return;
   }
-}
+
+  solarChargerDelay.repeat();
+
+  batteryVoltage = solarCharger.readVoltage();
+}*/
 
 void loop()
 {
-  changeStatusLed();
-
-  sendHeartbeat();
+  //readBatteryVoltage();
 }
