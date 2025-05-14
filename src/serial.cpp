@@ -3,38 +3,31 @@
 #include <MAVLink.h>
 #include <Serial.h>
 
-extern QueueHandle_t serialQueue;
+extern QueueHandle_t serialWriteQueue;
 
-[[noreturn]] void onSerialReceive()
-{
-    while (Serial.available() > 0)
-    {
-        uint8_t c = Serial.read();
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-        xQueueSendFromISR(serialQueue, &c, &xHigherPriorityTaskWoken);
-
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-    }
-}
-
-static mavlink_message_t msg;
+static mavlink_message_t msg_to_send;
 static uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
 [[noreturn]] void TaskSerialWrite(void *pvParameters)
 {
     (void) pvParameters;
 
+    while (!Serial) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
     for (;;)
     {
-        mavlink_msg_heartbeat_pack(1, MAV_COMP_ID_AUTOPILOT1, &msg, MAV_TYPE_QUADROTOR, MAV_AUTOPILOT_GENERIC, MAV_MODE_FLAG_MANUAL_INPUT_ENABLED, 0, MAV_STATE_STANDBY);
-        uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-
-        Serial.write(buf, len);
-
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        if (xQueueReceive(serialWriteQueue, &msg_to_send, portMAX_DELAY))
+        {
+            Serial.println("Sending heartbeat... asdasda");
+            uint16_t len = mavlink_msg_to_send_buffer(buf, &msg_to_send);
+            Serial.write(buf, len);
+        }
     }
 }
+
+extern QueueHandle_t serialReadQueue;
 
 static mavlink_message_t readed_msg;
 static mavlink_status_t status;
@@ -42,36 +35,25 @@ static mavlink_status_t status;
 [[noreturn]] void TaskSerialRead(void *pvParameters)
 {
     (void) pvParameters;
+
+    while (!Serial) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
     uint8_t receivedByte;
 
     for (;;)
     {
-        // Esperar un byte en la cola
-        if (xQueueReceive(serialQueue, &receivedByte, portMAX_DELAY))
+        while (Serial.available() > 0)
         {
-            // Intentar decodificar el mensaje MAVLink
+            receivedByte = Serial.read();
+
             if (mavlink_parse_char(MAVLINK_COMM_0, receivedByte, &readed_msg, &status))
             {
-                // Mensaje MAVLink recibido correctamente
-                //Serial.print("Mensaje MAVLink recibido, ID: ");
-                //Serial.println(readed_msg.msgid);
-
-                // Procesar el mensaje según su ID
-                switch (readed_msg.msgid)
-                {
-                case MAVLINK_MSG_ID_HEARTBEAT:
-                    //Serial.println("Mensaje Heartbeat recibido");
-                    break;
-
-                case MAVLINK_MSG_ID_ATTITUDE:
-                    //Serial.println("Mensaje Attitude recibido");
-                    break;
-
-                default:
-                    //Serial.println("Mensaje no reconocido");
-                    break;
-                }
+                xQueueSend(serialReadQueue, &readed_msg, 0);
             }
         }
+
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }

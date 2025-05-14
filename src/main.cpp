@@ -2,15 +2,14 @@
 #include <SD.h>
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
-#include <Led.h>
+#include <MAVLink.h>
 #include <Sensors.h>
-#include <Wire.h>
+//#include <Wire.h>
 #include <RTClib.h>
 #include <Serial.h>
+#include <Log.h>
 
-#define MAVLINK_HEARTBEAT 1000
-
-TaskHandle_t taskLedHandler = NULL;
+RTC_DS1307 rtc;
 
 TaskHandle_t taskSensorsHandler = NULL;
 
@@ -18,27 +17,39 @@ TaskHandle_t taskSerialWriteHandler = NULL;
 
 TaskHandle_t taskSerialReadHandler = NULL;
 
-QueueHandle_t serialQueue;
+TaskHandle_t taskHeartbeatHandler = NULL;
 
-File logFile;
+TaskHandle_t taskLoggerHandler = NULL;
 
-RTC_DS1307 rtc;
+TaskHandle_t taskSdWriteHandler = NULL;
+
+QueueHandle_t serialReadQueue = NULL;
+
+QueueHandle_t serialWriteQueue = NULL;
+
+QueueHandle_t loggerQueue = NULL;
+
+[[noreturn]] extern void TaskHeartbeat(void *pvParameters);
+
+[[noreturn]] extern void TaskLogger(void *pvParameters);
+
+[[noreturn]] extern void TaskSdWrite(void *pvParameters);
+
+[[noreturn]] extern void TaskSensors(void *pvParameters);
 
 void setup()
 {
   Serial.begin(115200);
 
+  configASSERT(rtc.begin());
 
-  if (!rtc.begin()) {
-    while (1);
-  }
+  configASSERT(SD.begin(9));
 
-  //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  loggerQueue = xQueueCreate(16, sizeof(Log));
+  configASSERT(loggerQueue != NULL);
 
-  /*if (!SD.begin(9)) {
-    Serial.println("Card failed, or not present");
-    while (1);
-  }
+
+  /*
 
   logFile = SD.open("datalog.txt", FILE_WRITE);
   if (!logFile) {
@@ -46,17 +57,21 @@ void setup()
     while (true);
   }*/
 
-  serialQueue = xQueueCreate(64, sizeof(uint8_t));
+  //serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t));
 
-  attachInterrupt(digitalPinToInterrupt(0), onSerialReceive, RISING);
+  //serialWriteQueue = xQueueCreate(16, sizeof(mavlink_message_t));
 
-  xTaskCreate(TaskLed, "Led", 56, NULL, PRIORITY_LOW, &taskLedHandler);
+  //xTaskCreate(TaskSerialRead, "SerialRead", 128, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
-  xTaskCreate(TaskSerialRead, "SerialRead", 128, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
+  //xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGHEST, &taskSerialWriteHandler);
 
-  xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGHEST, &taskSerialWriteHandler);
+  //xTaskCreate(TaskHeartbeat, "Heartbeat", 256, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
+  
+  xTaskCreate(TaskSensors, "Sensors", 64, NULL, PRIORITY_LOW, &taskSensorsHandler);
 
-  xTaskCreate(TaskSensors, "Sensors", 48, NULL, PRIORITY_HIGH, &taskSensorsHandler);
+  xTaskCreate(TaskLogger, "Logger", 256, NULL, PRIORITY_HIGHEST, &taskLoggerHandler);
+
+  xTaskCreate(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, &taskSdWriteHandler);
 
   vTaskStartScheduler();
 }
