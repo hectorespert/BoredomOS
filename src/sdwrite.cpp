@@ -9,17 +9,26 @@ extern QueueHandle_t loggerQueue;
 {
     (void) pvParameters;
 
-    //File logFile = SD.open("log.csv", FILE_WRITE);
-
     for (;;)
     {
         Log log;
         if (xQueueReceive(loggerQueue, &log, portMAX_DELAY) == pdPASS) {
+            
+            String line = String(log.timestamp) + "," + String(log.unixtime) + "," + String(log.sensors.voltage, 3) + "\n";
 
-            Serial.println("Writing to SD card...");
-            Serial.println(log.timestamp);
-            Serial.println(log.unixtime);
-            Serial.println(log.sensors.voltage);
+            File logFile = SD.open("log.csv", FILE_WRITE);
+            configASSERT(logFile != NULL);
+
+            if (logFile.size() == 0) {
+                logFile.println("timestamp,unixtime,voltage");
+                logFile.flush();
+            }
+
+            // TODO: Check maximum file size
+
+            logFile.print(line);
+            logFile.flush();
+            logFile.close();
         }
     }
 

@@ -11,7 +11,7 @@ extern Sensors sensors;
 [[noreturn]] void TaskLogger(void *pvParameters)
 {
     (void)pvParameters;
-    TickType_t xLastWakeTime = xTaskGetTickCount(); // Marca de tiempo inicial
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
     for (;;)
     {
