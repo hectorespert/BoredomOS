@@ -37,6 +37,8 @@ QueueHandle_t loggerQueue = NULL;
 
 [[noreturn]] extern void TaskSensors(void *pvParameters);
 
+[[noreturn]] extern void TaskDebug(void *pvParameters);
+
 void setup()
 {
   Serial.begin(115200);
@@ -48,28 +50,23 @@ void setup()
   loggerQueue = xQueueCreate(16, sizeof(Log));
   configASSERT(loggerQueue != NULL);
 
+  serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
+  configASSERT(serialReadQueue != NULL);
 
-  /*
+  serialWriteQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
+  configASSERT(serialWriteQueue != NULL);
 
-  logFile = SD.open("datalog.txt", FILE_WRITE);
-  if (!logFile) {
-    Serial.print("error opening ");
-    while (true);
-  }*/
+  xTaskCreate(TaskDebug, "TaskDebug", 128, NULL, PRIORITY_HIGHEST, NULL);
 
-  //serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t));
+  xTaskCreate(TaskSerialRead, "SerialRead", 256, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
-  //serialWriteQueue = xQueueCreate(16, sizeof(mavlink_message_t));
+  xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
 
-  //xTaskCreate(TaskSerialRead, "SerialRead", 128, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
-
-  //xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGHEST, &taskSerialWriteHandler);
-
-  //xTaskCreate(TaskHeartbeat, "Heartbeat", 256, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
+  xTaskCreate(TaskHeartbeat, "Heartbeat", 96, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
   
   xTaskCreate(TaskSensors, "Sensors", 64, NULL, PRIORITY_LOW, &taskSensorsHandler);
 
-  xTaskCreate(TaskLogger, "Logger", 256, NULL, PRIORITY_HIGHEST, &taskLoggerHandler);
+  xTaskCreate(TaskLogger, "Logger", 160, NULL, PRIORITY_HIGH, &taskLoggerHandler);
 
   xTaskCreate(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, &taskSdWriteHandler);
 
@@ -77,3 +74,57 @@ void setup()
 }
 
 void loop() {}
+
+[[noreturn]] void TaskDebug(void *pvParameters)
+{
+    (void) pvParameters;
+
+    for (;;)
+    {
+        size_t freeHeap = xPortGetFreeHeapSize();
+        Serial.print("Heap libre: ");
+        Serial.println(freeHeap);
+
+        Serial.print("TaskDebug water mark ");
+        Serial.println(uxTaskGetStackHighWaterMark(NULL));
+
+        if (taskSerialReadHandler != NULL)
+        {
+            Serial.print("TaskSerialRead water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskSerialReadHandler));
+        }
+
+        if (taskSerialWriteHandler != NULL)
+        {
+            Serial.print("TaskSerialWrite water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskSerialWriteHandler));
+        }
+
+        if (taskHeartbeatHandler != NULL)
+        {
+            Serial.print("TaskHeartbeat water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskHeartbeatHandler));
+        }
+
+        if (taskSensorsHandler != NULL)
+        {
+            Serial.print("TaskSensors water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskSensorsHandler));
+        }
+
+        if (taskLoggerHandler != NULL)
+        {
+            Serial.print("TaskLogger water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskLoggerHandler));
+        }
+
+        if (taskSdWriteHandler != NULL)
+        {
+            Serial.print("TaskSdWrite water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskSdWriteHandler));
+        }
+        
+
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
