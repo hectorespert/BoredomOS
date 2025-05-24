@@ -23,6 +23,8 @@ TaskHandle_t taskLoggerHandler = NULL;
 
 TaskHandle_t taskSdWriteHandler = NULL;
 
+TaskHandle_t taskMavlinkHandler = NULL;
+
 QueueHandle_t serialReadQueue = NULL;
 
 QueueHandle_t serialWriteQueue = NULL;
@@ -38,6 +40,8 @@ QueueHandle_t loggerQueue = NULL;
 [[noreturn]] extern void TaskSensors(void *pvParameters);
 
 [[noreturn]] extern void TaskDebug(void *pvParameters);
+
+[[noreturn]] extern void TaskMavlink(void *pvParameters);
 
 void setup()
 {
@@ -56,13 +60,15 @@ void setup()
   serialWriteQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
   configASSERT(serialWriteQueue != NULL);
 
-  xTaskCreate(TaskDebug, "TaskDebug", 128, NULL, PRIORITY_HIGHEST, NULL);
+  //xTaskCreate(TaskDebug, "TaskDebug", 128, NULL, PRIORITY_HIGHEST, NULL);
 
-  xTaskCreate(TaskSerialRead, "SerialRead", 256, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
+  xTaskCreate(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
   xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
 
   xTaskCreate(TaskHeartbeat, "Heartbeat", 96, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
+
+  xTaskCreate(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, &taskMavlinkHandler);
   
   xTaskCreate(TaskSensors, "Sensors", 64, NULL, PRIORITY_LOW, &taskSensorsHandler);
 
@@ -122,6 +128,30 @@ void loop() {}
         {
             Serial.print("TaskSdWrite water mark ");
             Serial.println(uxTaskGetStackHighWaterMark(taskSdWriteHandler));
+        }
+
+        if (taskMavlinkHandler != NULL)
+        {
+            Serial.print("TaskMavlink water mark ");
+            Serial.println(uxTaskGetStackHighWaterMark(taskMavlinkHandler));
+        }
+
+        if (loggerQueue != NULL)
+        {
+            Serial.print("LoggerQueue waiting ");
+            Serial.println(uxQueueMessagesWaiting(loggerQueue));
+        }
+
+        if (serialReadQueue != NULL)
+        {
+            Serial.print("SerialReadQueue waiting ");
+            Serial.println(uxQueueMessagesWaiting(serialReadQueue));
+        }
+
+        if (serialWriteQueue != NULL)
+        {
+            Serial.print("SerialWriteQueue waiting ");
+            Serial.println(uxQueueMessagesWaiting(serialWriteQueue));
         }
         
 

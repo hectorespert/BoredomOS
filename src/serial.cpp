@@ -28,7 +28,7 @@ extern QueueHandle_t serialWriteQueue;
 
 extern QueueHandle_t serialReadQueue;
 
-static mavlink_message_t readed_msg;
+static mavlink_message_t msg_to_read;
 static mavlink_status_t status;
 
 [[noreturn]] void TaskSerialRead(void *pvParameters)
@@ -45,22 +45,18 @@ static mavlink_status_t status;
         {
             uint8_t receivedByte = Serial.read();
 
-            Serial.print("Received byte: ");
-            Serial.println(receivedByte);
+            if (mavlink_parse_char(MAVLINK_COMM_0, receivedByte, &msg_to_read, &status)) {
 
-            /*if (mavlink_parse_char(MAVLINK_COMM_0, receivedByte, &readed_msg, &status))
-            {
-                Serial.print("Received message: ");
-                Serial.println(readed_msg.msgid);
-                Serial.print("Message length: ");
-                Serial.println(readed_msg.len);
-                Serial.print("Message checksum: ");
-                Serial.println(readed_msg.checksum);
-
-                //xQueueSend(serialReadQueue, &readed_msg, 0);
-            }*/
-
-            
+                mavlink_message_t* readed_msg = (mavlink_message_t*) pvPortMalloc(sizeof(mavlink_message_t));
+                if (readed_msg != NULL)
+                {
+                    memcpy(readed_msg, &msg_to_read, sizeof(mavlink_message_t));
+                    
+                    if (xQueueSend(serialReadQueue, &readed_msg, 0) != pdPASS) {
+                        vPortFree(readed_msg);
+                    }
+                }
+            }       
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);
