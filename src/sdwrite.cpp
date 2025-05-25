@@ -3,7 +3,7 @@
 #include <Log.h>
 #include <SD.h>
 
-extern QueueHandle_t loggerQueue;
+extern QueueHandle_t sdWriteQueue;
 
 [[noreturn]] void TaskSdWrite(void *pvParameters)
 {
@@ -11,10 +11,11 @@ extern QueueHandle_t loggerQueue;
 
     for (;;)
     {
-        Log log;
-        if (xQueueReceive(loggerQueue, &log, portMAX_DELAY) == pdPASS) {
+        Log* log;
+        if (xQueueReceive(sdWriteQueue, &log, portMAX_DELAY) == pdPASS) {
             
-            String line = String(log.timestamp) + "," + String(log.unixtime) + "," + String(log.sensors.voltage, 3) + "\n";
+            String line = String(log->timestamp) + "," + String(log->unixtime) + "," + String(log->sensors.voltage, 3) + "\n";
+            vPortFree(log);
 
             File logFile = SD.open("log.csv", FILE_WRITE);
             configASSERT(logFile != NULL);

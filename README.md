@@ -4,3 +4,9 @@
 
 Software and documentation for a Cubesat based on [https://www.thingiverse.com/thing:4096437](https://www.thingiverse.com/thing:4096437)
 
+
+## MAVProxy
+
+```bash
+mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
+```
