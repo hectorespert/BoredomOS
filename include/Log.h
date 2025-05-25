@@ -7,6 +7,7 @@ typedef struct
 {
     String timestamp;
     uint32_t unixtime;
+    uint32_t uptime;
     System system;
     Sensors sensors;
 } Log;

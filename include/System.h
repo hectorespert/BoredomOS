@@ -8,6 +8,9 @@ struct System {
     UBaseType_t taskSensorsAvailableStack;
     UBaseType_t taskStatusAvailableStack;
     UBaseType_t taskSdWriteAvailableStack;
+    UBaseType_t taskMavlinkAvailableStack;
+    UBaseType_t taskSerialReadAvailableStack;
+    UBaseType_t taskSerialWriteAvailableStack;
 };
 
 #endif //BOREDOMOS_SYSTEM_H

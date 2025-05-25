@@ -78,7 +78,10 @@ extern QueueHandle_t mavlinkStatusQueue;
             " " + log->system.taskHeartbeatAvailableStack +
             " " + log->system.taskSensorsAvailableStack +
             " " + log->system.taskStatusAvailableStack +
-            " " + log->system.taskSdWriteAvailableStack;
+            " " + log->system.taskSdWriteAvailableStack +
+            " " + log->system.taskMavlinkAvailableStack +
+            " " + log->system.taskSerialReadAvailableStack +
+            " " + log->system.taskSerialWriteAvailableStack;
             vPortFree(log);
             sendStatusText(text.c_str(), MAV_SEVERITY_INFO);
         }

@@ -1,11 +1,10 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 #include <Log.h>
-#include <RTClib.h>
+#include <RTC.h>
 #include <Sensors.h>
 #include <System.h>
 
-extern RTC_DS1307 rtc;
 extern QueueHandle_t sdWriteQueue;
 extern QueueHandle_t mavlinkStatusQueue;
 extern Sensors sensors;
@@ -14,6 +13,11 @@ extern TaskHandle_t taskLoggerHandler;
 extern TaskHandle_t taskHeartbeatHandler;
 extern TaskHandle_t taskSensorsHandler;
 extern TaskHandle_t taskSdWriteHandler;
+extern TaskHandle_t taskMavlinkHandler;
+extern TaskHandle_t taskSerialWriteHandler;
+extern TaskHandle_t taskSerialReadHandler;
+extern QueueHandle_t serialReadQueue;
+extern QueueHandle_t serialWriteQueue;
 
 [[noreturn]] void TaskLogger(void *pvParameters)
 {
@@ -22,11 +26,13 @@ extern TaskHandle_t taskSdWriteHandler;
 
     for (;;)
     {
-        DateTime now = rtc.now();
+        RTCTime currentTime;
+        RTC.getTime(currentTime);
 
         Log log = {
-            timestamp: now.timestamp(),
-            unixtime: now.unixtime(),
+            timestamp: currentTime.toString(),
+            unixtime: currentTime.getUnixTime(),
+            uptime: xTaskGetTickCount() * portTICK_PERIOD_MS,
             system: {
                 heap: xPortGetFreeHeapSize(),
                 taskLoggerAvailableStack: uxTaskGetStackHighWaterMark(taskLoggerHandler),
@@ -34,6 +40,9 @@ extern TaskHandle_t taskSdWriteHandler;
                 taskSensorsAvailableStack: uxTaskGetStackHighWaterMark(taskSensorsHandler),
                 taskStatusAvailableStack: uxTaskGetStackHighWaterMark(taskStatusHandler),
                 taskSdWriteAvailableStack: uxTaskGetStackHighWaterMark(taskSdWriteHandler),
+                taskMavlinkAvailableStack: uxTaskGetStackHighWaterMark(taskMavlinkHandler),
+                taskSerialReadAvailableStack: uxTaskGetStackHighWaterMark(taskSerialReadHandler),
+                taskSerialWriteAvailableStack: uxTaskGetStackHighWaterMark(taskSerialWriteHandler),
             },
             sensors: sensors,
         };

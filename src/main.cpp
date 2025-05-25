@@ -75,7 +75,7 @@ void setup()
 
   xTaskCreate(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
-  xTaskCreate(TaskSerialWrite, "SerialWrite", 128, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
+  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
 
   xTaskCreate(TaskHeartbeat, "Heartbeat", 96, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
 
@@ -83,9 +83,9 @@ void setup()
   
   xTaskCreate(TaskSensors, "Sensors", 64, NULL, PRIORITY_LOW, &taskSensorsHandler);
 
-  xTaskCreate(TaskLogger, "Logger", 192, NULL, PRIORITY_HIGH, &taskLoggerHandler);
+  xTaskCreate(TaskLogger, "Logger", 96, NULL, PRIORITY_HIGH, &taskLoggerHandler);
 
-  xTaskCreate(TaskStatus, "TaskStatus", 112, NULL, PRIORITY_LOWEST, &taskStatusHandler);
+  xTaskCreate(TaskStatus, "TaskStatus", 128, NULL, PRIORITY_LOWEST, &taskStatusHandler);
 
   xTaskCreate(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, &taskSdWriteHandler);
 
