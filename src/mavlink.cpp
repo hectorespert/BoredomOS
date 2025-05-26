@@ -4,6 +4,7 @@
 #include <Serial.h>
 #include <RTC.h>
 #include <Log.h>
+#include <RTClib.h>
 
 extern QueueHandle_t serialWriteQueue;
 
@@ -89,6 +90,7 @@ extern QueueHandle_t mavlinkStatusQueue;
 }
 
 extern QueueHandle_t serialReadQueue;
+extern RTC_DS1307 rtc;
 
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
@@ -118,20 +120,64 @@ extern QueueHandle_t serialReadQueue;
                 case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
                     break;
 
-                case MAVLINK_MSG_ID_SYSTEM_TIME:
-                    Serial.println("SYSTEM_TIME: ");
-                    Serial.print("Time since system boot: ");
-                    Serial.println(mavlink_msg_system_time_get_time_boot_ms(msg));
-                    Serial.print("Time since UNIX epoch: ");
-                    Serial.println(mavlink_msg_system_time_get_time_unix_usec(msg));
+                case MAVLINK_MSG_ID_SYSTEM_TIME: {
+                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / 1000000ULL; 
+
+                    RTCTime currentTime;
+                    RTC.getTime(currentTime);
+
+                    if (currentTime.getUnixTime() == unix_time_from_gcs) {
+                        break;
+                    }
+
+                    currentTime.setUnixTime(unix_time_from_gcs);
+                    RTC.setTime(currentTime);
+
+                    if (rtc.now().unixtime() == currentTime.getUnixTime()) {
+                        break;
+                    }
+
+                    rtc.adjust(DateTime(currentTime.getUnixTime()));
+
                     break;
+                }
 
                 case MAVLINK_MSG_ID_TIMESYNC: {
-                    Serial.println("TIMESYNC: ");
-                    Serial.print("Component ID: ");
-                    Serial.println(msg->compid);
-                    Serial.print("System ID: ");
-                    Serial.println(msg->sysid);
+                    mavlink_timesync_t timesync;
+                    mavlink_msg_timesync_decode(msg, &timesync);
+
+                    if (timesync.tc1 == 0) {
+
+                        mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+
+                        RTCTime currentTime;
+                        RTC.getTime(currentTime);
+
+                        mavlink_msg_timesync_pack(
+                            1, 
+                            MAV_COMP_ID_AUTOPILOT1, 
+                            timeSyncMsg, 
+                            currentTime.getUnixTime() * 1000ULL, 
+                            timesync.ts1, 
+                            timesync.target_system, 
+                            timesync.target_component
+                        );
+
+                        if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
+                            vPortFree(timeSyncMsg);
+                        }
+
+                    } else {
+                        Serial.print("Received time sync response: ");
+                        Serial.print("tc1: ");
+                        Serial.print(timesync.tc1);
+                        Serial.print(", ts1: ");
+                        Serial.print(timesync.ts1);
+                        Serial.print(", target_system: ");
+                        Serial.print(timesync.target_system);
+                        Serial.print(", target_component: ");
+                        Serial.println(timesync.target_component);
+                    }
                     break;
                 }
         
