@@ -8,6 +8,49 @@
 
 extern QueueHandle_t serialWriteQueue;
 
+static void sendHeartbeat() {
+    mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+
+    mavlink_msg_heartbeat_pack(
+        1, 
+        MAV_COMP_ID_AUTOPILOT1, 
+        heartbeatMsg, 
+        MAV_TYPE_ROCKET, 
+        MAV_AUTOPILOT_GENERIC, 
+        MAV_MODE_FLAG_AUTO_ENABLED, 
+        0, 
+        MAV_STATE_ACTIVE
+    );
+
+    if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
+    {
+        vPortFree(heartbeatMsg);
+    }
+}
+
+static void sendSystemTime()
+{
+    mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+
+    RTCTime currentTime;
+    RTC.getTime(currentTime);
+
+    uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    mavlink_msg_system_time_pack(
+        1, 
+        MAV_COMP_ID_AUTOPILOT1, 
+        systemTimeMsg, 
+        currentTime.getUnixTime() * 1000000ULL, 
+        boot_ms
+    );
+
+    if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
+    {
+        vPortFree(systemTimeMsg);
+    }
+}
+
 [[noreturn]] void TaskHeartbeat(void *pvParameters)
 {
     (void)pvParameters;
@@ -20,26 +63,13 @@ extern QueueHandle_t serialWriteQueue;
 
     for (;;)
     {
+        sendHeartbeat();
 
-        mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
 
-        mavlink_msg_heartbeat_pack(
-            1, 
-            MAV_COMP_ID_AUTOPILOT1, 
-            heartbeatMsg, 
-            MAV_TYPE_ROCKET, 
-            MAV_AUTOPILOT_GENERIC, 
-            MAV_MODE_FLAG_AUTO_ENABLED, 
-            0, 
-            MAV_STATE_ACTIVE
-        );
+        sendSystemTime();
 
-        if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
-        {
-            vPortFree(heartbeatMsg);
-        }
-
-        vTaskDelayUntil(&xLastWakeTime, 1000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
     }
 }
 
