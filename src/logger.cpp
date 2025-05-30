@@ -6,7 +6,6 @@
 #include <System.h>
 
 extern QueueHandle_t sdWriteQueue;
-extern QueueHandle_t mavlinkStatusQueue;
 extern Sensors sensors;
 extern TaskHandle_t taskStatusHandler;
 extern TaskHandle_t taskLoggerHandler;
@@ -16,8 +15,6 @@ extern TaskHandle_t taskSdWriteHandler;
 extern TaskHandle_t taskMavlinkHandler;
 extern TaskHandle_t taskSerialWriteHandler;
 extern TaskHandle_t taskSerialReadHandler;
-extern QueueHandle_t serialReadQueue;
-extern QueueHandle_t serialWriteQueue;
 
 [[noreturn]] void TaskLogger(void *pvParameters)
 {
@@ -46,14 +43,6 @@ extern QueueHandle_t serialWriteQueue;
             },
             sensors: sensors,
         };
-
-        Log* logToMavlinkStatus = (Log*) pvPortMalloc(sizeof(Log));
-        if (logToMavlinkStatus != NULL) {
-            memcpy(logToMavlinkStatus, &log, sizeof(Log));
-            if (xQueueSend(mavlinkStatusQueue, &logToMavlinkStatus, 0) != pdPASS) {
-                vPortFree(logToMavlinkStatus);
-            }
-        }
 
         Log* logToSdCard = (Log*) pvPortMalloc(sizeof(Log));
         if (logToSdCard != NULL) {

@@ -20,8 +20,8 @@ extern QueueHandle_t serialWriteQueue;
         {
             uint8_t buf[MAVLINK_MAX_PACKET_LEN];
             uint16_t len = mavlink_msg_to_send_buffer(buf, msg_to_send);
-            Serial.write(buf, len);
             vPortFree(msg_to_send);
+            Serial.write(buf, len);
         }
     }
 }

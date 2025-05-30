@@ -34,8 +34,6 @@ QueueHandle_t serialWriteQueue = NULL;
 
 QueueHandle_t sdWriteQueue = NULL;
 
-QueueHandle_t mavlinkStatusQueue = NULL;
-
 [[noreturn]] extern void TaskHeartbeat(void *pvParameters);
 
 [[noreturn]] extern void TaskLogger(void *pvParameters);
@@ -44,7 +42,7 @@ QueueHandle_t mavlinkStatusQueue = NULL;
 
 [[noreturn]] extern void TaskSensors(void *pvParameters);
 
-[[noreturn]] extern void TaskStatus(void *pvParameters);
+[[noreturn]] extern void TaskMavlinkBatteryStatus(void *pvParameters);
 
 [[noreturn]] extern void TaskMavlink(void *pvParameters);
 
@@ -53,7 +51,6 @@ void setup()
   configASSERT(rtc.begin());
   configASSERT(RTC.begin());
 
-  //rtc.adjust(DateTime(__DATE__, __TIME__));
   RTCTime currentTime(rtc.now().unixtime());
   RTC.setTime(currentTime);
 
@@ -64,9 +61,6 @@ void setup()
   sdWriteQueue = xQueueCreate(2, sizeof(Log*));
   configASSERT(sdWriteQueue != NULL);
 
-  mavlinkStatusQueue = xQueueCreate(2, sizeof(Log*));
-  configASSERT(mavlinkStatusQueue != NULL);
-
   serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
   configASSERT(serialReadQueue != NULL);
 
@@ -75,9 +69,9 @@ void setup()
 
   xTaskCreate(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
-  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
+  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGHEST, &taskSerialWriteHandler);
 
-  xTaskCreate(TaskHeartbeat, "Heartbeat", 96, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
+  xTaskCreate(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
 
   xTaskCreate(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, &taskMavlinkHandler);
   
@@ -85,7 +79,7 @@ void setup()
 
   xTaskCreate(TaskLogger, "Logger", 96, NULL, PRIORITY_HIGH, &taskLoggerHandler);
 
-  xTaskCreate(TaskStatus, "TaskStatus", 128, NULL, PRIORITY_LOWEST, &taskStatusHandler);
+  xTaskCreate(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, &taskStatusHandler);
 
   xTaskCreate(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, &taskSdWriteHandler);
 
