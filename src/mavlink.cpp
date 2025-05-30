@@ -5,6 +5,7 @@
 #include <RTC.h>
 #include <Log.h>
 #include <RTClib.h>
+#include <Sensors.h>
 
 extern QueueHandle_t serialWriteQueue;
 
@@ -35,13 +36,15 @@ static void sendSystemTime()
     RTCTime currentTime;
     RTC.getTime(currentTime);
 
+    uint64_t time_unix_usec = currentTime.getUnixTime() * 1000000ULL;
+
     uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
     mavlink_msg_system_time_pack(
         1, 
         MAV_COMP_ID_AUTOPILOT1, 
         systemTimeMsg, 
-        currentTime.getUnixTime() * 1000000ULL, 
+        time_unix_usec,
         boot_ms
     );
 
@@ -51,29 +54,7 @@ static void sendSystemTime()
     }
 }
 
-[[noreturn]] void TaskHeartbeat(void *pvParameters)
-{
-    (void)pvParameters;
-
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    while (!Serial) {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-
-    for (;;)
-    {
-        sendHeartbeat();
-
-        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
-
-        sendSystemTime();
-
-        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
-    }
-}
-
-void sendStatusText(const char* text, uint8_t severity)
+static void sendStatusText(const char* text, uint8_t severity)
 {
     mavlink_message_t* statusMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
     if (statusMsg != NULL) {
@@ -92,30 +73,80 @@ void sendStatusText(const char* text, uint8_t severity)
     }
 }
 
-extern QueueHandle_t mavlinkStatusQueue;
-
-[[noreturn]] void TaskStatus(void *pvParameters)
+[[noreturn]] void TaskHeartbeat(void *pvParameters)
 {
-    (void) pvParameters;
+    (void)pvParameters;
+
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    while (!Serial) {
+        vTaskDelay(125 / portTICK_PERIOD_MS);
+    }
 
     for (;;)
     {
-        Log* log;
-        if (xQueueReceive(mavlinkStatusQueue, &log, portMAX_DELAY) == pdPASS) {
-        
-            String text = String(log->unixtime) + 
-            " " + log->system.heap + 
-            " " + log->system.taskLoggerAvailableStack +
-            " " + log->system.taskHeartbeatAvailableStack +
-            " " + log->system.taskSensorsAvailableStack +
-            " " + log->system.taskStatusAvailableStack +
-            " " + log->system.taskSdWriteAvailableStack +
-            " " + log->system.taskMavlinkAvailableStack +
-            " " + log->system.taskSerialReadAvailableStack +
-            " " + log->system.taskSerialWriteAvailableStack;
-            vPortFree(log);
-            sendStatusText(text.c_str(), MAV_SEVERITY_INFO);
-        }
+        sendHeartbeat();
+
+        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
+
+        sendSystemTime();
+
+        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
+    }
+}
+
+extern Sensors sensors;
+
+static void sendBatteryStatus()
+{
+    mavlink_message_t* batteryMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+
+    uint16_t voltages[10];
+    voltages[0] = (uint16_t)(sensors.voltage * 1000);
+    for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
+
+    uint16_t voltages_ext[4] = {0, 0, 0, 0};
+
+    mavlink_msg_battery_status_pack(
+        1, 
+        MAV_COMP_ID_AUTOPILOT1, 
+        batteryMsg, 
+        0,
+        MAV_BATTERY_FUNCTION_ALL,
+        MAV_BATTERY_TYPE_LIPO,
+        INT16_MAX,
+        voltages,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        MAV_BATTERY_CHARGE_STATE_UNDEFINED,
+        voltages_ext, 
+        MAV_BATTERY_MODE_UNKNOWN,
+        0
+    );
+
+    if (xQueueSend(serialWriteQueue, &batteryMsg, 0) != pdPASS)
+    {
+        vPortFree(batteryMsg);
+    }
+}
+
+[[noreturn]] void TaskMavlinkBatteryStatus(void *pvParameters)
+{
+    (void)pvParameters;
+
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    while (!Serial) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
+    for (;;)
+    {
+        sendBatteryStatus();
+        vTaskDelayUntil(&xLastWakeTime, 2000 / portTICK_PERIOD_MS);
     }
 }
 
@@ -126,6 +157,9 @@ extern RTC_DS1307 rtc;
 {
     (void)pvParameters;
 
+    while (!Serial) {
+        vTaskDelay(125 / portTICK_PERIOD_MS);
+    }
 
     for (;;)
     {
@@ -178,42 +212,35 @@ extern RTC_DS1307 rtc;
 
                     if (timesync.tc1 == 0) {
 
-                        mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+                        // TODO: Not working
 
-                        RTCTime currentTime;
+                        /*RTCTime currentTime;
                         RTC.getTime(currentTime);
+
+                        mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
                         mavlink_msg_timesync_pack(
                             1, 
                             MAV_COMP_ID_AUTOPILOT1, 
-                            timeSyncMsg, 
-                            currentTime.getUnixTime() * 1000ULL, 
-                            timesync.ts1, 
+                            timeSyncMsg,
+                            timesync.ts1 / 1000ULL, // Convert to milliseconds
+                            timesync.ts1,
+                            //currentTime.getUnixTime() * 1000ULL, // Convert to milliseconds
+                            //currentTime.getUnixTime() * 1000000ULL, // Convert to nanoseconds
                             timesync.target_system, 
                             timesync.target_component
                         );
 
                         if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
                             vPortFree(timeSyncMsg);
-                        }
-
-                    } else {
-                        Serial.print("Received time sync response: ");
-                        Serial.print("tc1: ");
-                        Serial.print(timesync.tc1);
-                        Serial.print(", ts1: ");
-                        Serial.print(timesync.ts1);
-                        Serial.print(", target_system: ");
-                        Serial.print(timesync.target_system);
-                        Serial.print(", target_component: ");
-                        Serial.println(timesync.target_component);
+                        }*/
                     }
+
                     break;
                 }
         
                 default:
-                    Serial.print("Mensaje recibido con ID desconocido: ");
-                    Serial.println(msg->msgid);
+                    sendStatusText("Mensaje recibido con ID desconocido: " + msg->msgid, MAV_SEVERITY_WARNING);
                     break;
             }
 
