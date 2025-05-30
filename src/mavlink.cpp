@@ -220,7 +220,7 @@ extern RTC_DS1307 rtc;
 
                         mavlink_msg_timesync_pack(
                             1, 
-                            MAV_COMP_ID_AUTOPILOT1, 
+                            MAV_COMP_ID_AUTOPILOT1,
                             timeSyncMsg,
                             currentTime.getUnixTime() * 1000000000ULL,
                             timesync.ts1,
