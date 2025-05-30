@@ -9,8 +9,11 @@
 #include <Serial.h>
 #include <Log.h>
 #include <RTC.h>
+#include <Battery.h>
 
 RTC_DS1307 rtc;
+
+Battery battery = Battery();
 
 TaskHandle_t taskStatusHandler = NULL;
 
