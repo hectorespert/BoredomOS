@@ -9,6 +9,13 @@
 
 extern QueueHandle_t serialWriteQueue;
 
+static void waitSerial()
+{
+    while (!Serial) {
+        vTaskDelay(125 / portTICK_PERIOD_MS);
+    }
+}
+
 static void sendHeartbeat() {
     mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
@@ -79,15 +86,15 @@ static void sendStatusText(const char* text, uint8_t severity)
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    while (!Serial) {
-        vTaskDelay(125 / portTICK_PERIOD_MS);
-    }
-
     for (;;)
     {
+        waitSerial();
+
         sendHeartbeat();
 
         vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
+
+        waitSerial();
 
         sendSystemTime();
 
@@ -139,12 +146,10 @@ static void sendBatteryStatus()
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    while (!Serial) {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-
     for (;;)
     {
+        waitSerial();
+
         sendBatteryStatus();
         vTaskDelayUntil(&xLastWakeTime, 2000 / portTICK_PERIOD_MS);
     }
@@ -156,10 +161,6 @@ extern RTC_DS1307 rtc;
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
     (void)pvParameters;
-
-    while (!Serial) {
-        vTaskDelay(125 / portTICK_PERIOD_MS);
-    }
 
     for (;;)
     {
@@ -212,9 +213,7 @@ extern RTC_DS1307 rtc;
 
                     if (timesync.tc1 == 0) {
 
-                        // TODO: Not working
-
-                        /*RTCTime currentTime;
+                        RTCTime currentTime;
                         RTC.getTime(currentTime);
 
                         mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
@@ -223,17 +222,15 @@ extern RTC_DS1307 rtc;
                             1, 
                             MAV_COMP_ID_AUTOPILOT1, 
                             timeSyncMsg,
-                            timesync.ts1 / 1000ULL, // Convert to milliseconds
+                            currentTime.getUnixTime() * 1000000000ULL,
                             timesync.ts1,
-                            //currentTime.getUnixTime() * 1000ULL, // Convert to milliseconds
-                            //currentTime.getUnixTime() * 1000000ULL, // Convert to nanoseconds
-                            timesync.target_system, 
+                            timesync.target_system,
                             timesync.target_component
                         );
 
                         if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
                             vPortFree(timeSyncMsg);
-                        }*/
+                        }
                     }
 
                     break;
