@@ -177,6 +177,13 @@ extern RTC_DS1307 rtc;
                     break;
 
                 case MAVLINK_MSG_ID_COMMAND_LONG:
+                    mavlink_command_long_t command;
+                    mavlink_msg_command_long_decode(msg, &command);
+
+                    if (command.command == MAV_CMD_GET_HOME_POSITION) {
+                        break;
+                    }
+
                     break;
 
                 case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:

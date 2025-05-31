@@ -14,7 +14,7 @@ extern QueueHandle_t sdWriteQueue;
         Log* log;
         if (xQueueReceive(sdWriteQueue, &log, portMAX_DELAY) == pdPASS) {
             
-            String line = String(log->timestamp) + "," + String(log->unixtime) + "," + String(log->sensors.voltage, 3) + "\n";
+            String line = String(log->timestamp) + "," + String(log->unixtime) + "," + "0.0" + "\n";
             vPortFree(log);
 
             File logFile = SD.open("log.csv", FILE_WRITE);

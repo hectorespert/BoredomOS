@@ -5,7 +5,6 @@ struct System {
     size_t heap;
     UBaseType_t taskLoggerAvailableStack;
     UBaseType_t taskHeartbeatAvailableStack;
-    UBaseType_t taskSensorsAvailableStack;
     UBaseType_t taskStatusAvailableStack;
     UBaseType_t taskSdWriteAvailableStack;
     UBaseType_t taskMavlinkAvailableStack;

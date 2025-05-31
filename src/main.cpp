@@ -3,7 +3,6 @@
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
 #include <MAVLink.h>
-#include <Sensors.h>
 //#include <Wire.h>
 #include <RTClib.h>
 #include <Serial.h>
@@ -16,8 +15,6 @@ RTC_DS1307 rtc;
 Battery battery = Battery();
 
 TaskHandle_t taskStatusHandler = NULL;
-
-TaskHandle_t taskSensorsHandler = NULL;
 
 TaskHandle_t taskSerialWriteHandler = NULL;
 
@@ -78,9 +75,7 @@ void setup()
 
   xTaskCreate(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, &taskMavlinkHandler);
   
-  xTaskCreate(TaskSensors, "Sensors", 64, NULL, PRIORITY_LOW, &taskSensorsHandler);
-
-  xTaskCreate(TaskLogger, "Logger", 96, NULL, PRIORITY_HIGH, &taskLoggerHandler);
+  xTaskCreate(TaskLogger, "Logger", 96, NULL, PRIORITY_LOW, &taskLoggerHandler);
 
   xTaskCreate(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, &taskStatusHandler);
 
