@@ -9,7 +9,13 @@ Battery::Battery()
 
 float Battery::voltage()
 {
-    return _solarCharger.readVoltage();
+    unsigned long now = millis();
+    // Read every 125ms
+    if (now - _lastRead > 125) {
+        _cachedVoltage = _solarCharger.readVoltage();
+        _lastRead = now;
+    }
+    return _cachedVoltage;
 }
 
 uint16_t Battery::millivolts()
