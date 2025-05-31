@@ -5,7 +5,7 @@
 #include <RTC.h>
 #include <Log.h>
 #include <RTClib.h>
-#include <Sensors.h>
+#include <Battery.h>
 
 extern QueueHandle_t serialWriteQueue;
 
@@ -102,14 +102,14 @@ static void sendStatusText(const char* text, uint8_t severity)
     }
 }
 
-extern Sensors sensors;
+extern Battery battery;
 
 static void sendBatteryStatus()
 {
     mavlink_message_t* batteryMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
     uint16_t voltages[10];
-    voltages[0] = (uint16_t)(sensors.voltage * 1000);
+    voltages[0] = battery.millivolts();
     for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
 
     uint16_t voltages_ext[4] = {0, 0, 0, 0};
@@ -126,7 +126,7 @@ static void sendBatteryStatus()
         -1,
         -1,
         -1,
-        -1,
+        battery.remaining(),
         0,
         MAV_BATTERY_CHARGE_STATE_UNDEFINED,
         voltages_ext, 
@@ -177,6 +177,13 @@ extern RTC_DS1307 rtc;
                     break;
 
                 case MAVLINK_MSG_ID_COMMAND_LONG:
+                    mavlink_command_long_t command;
+                    mavlink_msg_command_long_decode(msg, &command);
+
+                    if (command.command == MAV_CMD_GET_HOME_POSITION) {
+                        break;
+                    }
+
                     break;
 
                 case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
