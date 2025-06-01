@@ -25,7 +25,7 @@ static void sendHeartbeat() {
         heartbeatMsg, 
         MAV_TYPE_ROCKET, 
         MAV_AUTOPILOT_GENERIC, 
-        MAV_MODE_FLAG_AUTO_ENABLED, 
+        MAV_MODE_FLAG_AUTO_ENABLED | MAV_MODE_FLAG_SAFETY_ARMED, 
         0, 
         MAV_STATE_ACTIVE
     );
