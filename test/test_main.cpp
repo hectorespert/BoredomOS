@@ -1,11 +1,14 @@
 #include <unity.h>
 #include <Arduino.h>
 #include <Battery.h>
+#include <SystemTime.h>
 
 Battery battery;
+SystemTime systemTime;
 
 void setUp(void) {
     battery = Battery();
+    systemTime = SystemTime();
 }
 
 void tearDown(void) {
@@ -30,11 +33,19 @@ void test_remaining_should_return_battery_percentage(void) {
     TEST_ASSERT_TRUE(remaining <= 100);
 }
 
+void test_system_clock_should_initialize(void) {
+    TEST_ASSERT_TRUE(systemTime.begin());
+    TEST_ASSERT_TRUE(systemTime.getUnixTime() > 0);
+    TEST_ASSERT_TRUE(systemTime.getUnixTimeUsec() > 0);
+    TEST_ASSERT_TRUE(systemTime.getUnixTimeNsec() > 0);
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_voltaje_should_return_battery_voltage);
     RUN_TEST(test_millivolts_should_return_battery_voltage_in_millivolts);
     RUN_TEST(test_remaining_should_return_battery_percentage);
+    RUN_TEST(test_system_clock_should_initialize);
     return UNITY_END();
 }
 
