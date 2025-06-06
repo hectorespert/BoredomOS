@@ -4,8 +4,7 @@
 #include <Priority.h>
 #include <MAVLink.h>
 //#include <Wire.h>
-#include <Serial.h>
-#include <Log.h>
+#include <Data.h>
 #include <Battery.h>
 #include <SystemTime.h>
 
@@ -33,6 +32,10 @@ QueueHandle_t serialWriteQueue = NULL;
 
 QueueHandle_t sdWriteQueue = NULL;
 
+[[noreturn]] extern void TaskSerialWrite(void *pvParameters);
+
+[[noreturn]] extern void TaskSerialRead(void *pvParameters);
+
 [[noreturn]] extern void TaskHeartbeat(void *pvParameters);
 
 [[noreturn]] extern void TaskLogger(void *pvParameters);
@@ -53,7 +56,7 @@ void setup()
 
   configASSERT(SD.begin(9));
 
-  sdWriteQueue = xQueueCreate(2, sizeof(Log*));
+  sdWriteQueue = xQueueCreate(16, sizeof(Data*));
   configASSERT(sdWriteQueue != NULL);
 
   serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t*));

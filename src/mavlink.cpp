@@ -2,7 +2,6 @@
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
 #include <Serial.h>
-#include <Log.h>
 #include <Battery.h>
 #include <SystemTime.h>
 
