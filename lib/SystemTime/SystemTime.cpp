@@ -2,9 +2,8 @@
 #include <Arduino.h>
 #include <RTC.h>
 
-SystemTime::SystemTime()
+SystemTime::SystemTime() : _ds1307()
 {
-    _ds1307 = RTC_DS1307();
 }
 
 bool SystemTime::begin()
