@@ -2,6 +2,7 @@
 #include <Arduino_FreeRTOS.h>
 #include <Data.h>
 #include <SD.h>
+#include <ArduinoJson.h>
 
 extern QueueHandle_t sdWriteQueue;
 
@@ -14,22 +15,31 @@ extern QueueHandle_t sdWriteQueue;
         Data* data;
         if (xQueueReceive(sdWriteQueue, &data, portMAX_DELAY) == pdPASS) {
             
-            String line = String(data->unixtime) + "," + "0.0" + "\n";
+            JsonDocument doc;
+            doc["unixtime"] = data->unixtime;
+            doc["uptime"] = data->uptime;
+            doc["system"]["heap"] = data->system.heap;
+            doc["system"]["tasks"]["loggerAvailableStack"] = data->system.tasks.loggerAvailableStack;
+            doc["system"]["tasks"]["heartbeatAvailableStack"] = data->system.tasks.heartbeatAvailableStack;
+            doc["system"]["tasks"]["statusAvailableStack"] = data->system.tasks.statusAvailableStack;
+            doc["system"]["tasks"]["sdWriteAvailableStack"] = data->system.tasks.sdWriteAvailableStack;
+            doc["system"]["tasks"]["mavlinkAvailableStack"] = data->system.tasks.mavlinkAvailableStack;
+            doc["system"]["tasks"]["serialReadAvailableStack"] = data->system.tasks.serialReadAvailableStack;
+            doc["system"]["tasks"]["serialWriteAvailableStack"] = data->system.tasks.serialWriteAvailableStack;
+            doc["energy"]["millivolts"] = data->energy.millivolts;
+            doc["energy"]["remaining"] = data->energy.remaining;
+        
             vPortFree(data);
 
-            File logFile = SD.open("log.csv", FILE_WRITE);
-            configASSERT(logFile != NULL);
-
-            if (logFile.size() == 0) {
-                logFile.println("unixtime,voltage");
-                logFile.flush();
+            File dataFile = SD.open("data.mpk", FILE_WRITE);
+            if (!dataFile) {
+                return;
             }
 
-            // TODO: Check maximum file size
-
-            logFile.print(line);
-            logFile.flush();
-            logFile.close();
+            serializeMsgPack(doc, dataFile);
+            
+            dataFile.flush();
+            dataFile.close();
         }
     }
 

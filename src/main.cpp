@@ -3,7 +3,6 @@
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
 #include <MAVLink.h>
-//#include <Wire.h>
 #include <Data.h>
 #include <Battery.h>
 #include <SystemTime.h>
