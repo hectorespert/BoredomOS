@@ -27,12 +27,12 @@ time_t SystemTime::getUnixTime()
 
 uint64_t SystemTime::getUnixTimeUsec()
 {
-    return getUnixTime() * 1000000ULL;
+    return getUnixTime() * USEC_PER_SEC;
 }
 
 int64_t SystemTime::getUnixTimeNsec()
 {
-    return getUnixTime() * 1000000000ULL;
+    return getUnixTime() * NSEC_PER_SEC;
 }
 
 void SystemTime::setUnixTime(time_t unix_time)
