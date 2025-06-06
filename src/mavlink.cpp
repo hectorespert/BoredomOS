@@ -189,7 +189,7 @@ extern RTC_DS1307 rtc;
                     break;
 
                 case MAVLINK_MSG_ID_SYSTEM_TIME: {
-                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / 1000000ULL;
+                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / USEC_PER_SEC;
                     systemTime.setUnixTime(unix_time_from_gcs);
                     break;
                 }

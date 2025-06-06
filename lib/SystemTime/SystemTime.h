@@ -1,5 +1,7 @@
 #ifndef SYSTEM_TIME_H
 #define SYSTEM_TIME_H
+#define USEC_PER_SEC 1000000ULL
+#define NSEC_PER_SEC 1000000000ULL
 #include <RTClib.h>
 
 class SystemTime
