@@ -4,15 +4,14 @@
 #include <Priority.h>
 #include <MAVLink.h>
 //#include <Wire.h>
-#include <RTClib.h>
 #include <Serial.h>
 #include <Log.h>
-#include <RTC.h>
 #include <Battery.h>
-
-RTC_DS1307 rtc;
+#include <SystemTime.h>
 
 Battery battery = Battery();
+
+SystemTime systemTime = SystemTime();
 
 TaskHandle_t taskStatusHandler = NULL;
 
@@ -48,11 +47,7 @@ QueueHandle_t sdWriteQueue = NULL;
 
 void setup()
 {
-  configASSERT(rtc.begin());
-  configASSERT(RTC.begin());
-
-  RTCTime currentTime(rtc.now().unixtime());
-  RTC.setTime(currentTime);
+  configASSERT(systemTime.begin());
 
   Serial.begin(115200);
 

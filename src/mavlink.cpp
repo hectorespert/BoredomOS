@@ -2,12 +2,13 @@
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
 #include <Serial.h>
-#include <RTC.h>
 #include <Log.h>
-#include <RTClib.h>
 #include <Battery.h>
+#include <SystemTime.h>
 
 extern QueueHandle_t serialWriteQueue;
+
+extern SystemTime systemTime;
 
 static void waitSerial()
 {
@@ -40,18 +41,13 @@ static void sendSystemTime()
 {
     mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
-    RTCTime currentTime;
-    RTC.getTime(currentTime);
-
-    uint64_t time_unix_usec = currentTime.getUnixTime() * 1000000ULL;
-
     uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
     mavlink_msg_system_time_pack(
         1, 
         MAV_COMP_ID_AUTOPILOT1, 
         systemTimeMsg, 
-        time_unix_usec,
+        systemTime.getUnixTimeUsec(),
         boot_ms
     );
 
@@ -193,24 +189,8 @@ extern RTC_DS1307 rtc;
                     break;
 
                 case MAVLINK_MSG_ID_SYSTEM_TIME: {
-                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / 1000000ULL; 
-
-                    RTCTime currentTime;
-                    RTC.getTime(currentTime);
-
-                    if (currentTime.getUnixTime() == unix_time_from_gcs) {
-                        break;
-                    }
-
-                    currentTime.setUnixTime(unix_time_from_gcs);
-                    RTC.setTime(currentTime);
-
-                    if (rtc.now().unixtime() == currentTime.getUnixTime()) {
-                        break;
-                    }
-
-                    rtc.adjust(DateTime(currentTime.getUnixTime()));
-
+                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / 1000000ULL;
+                    systemTime.setUnixTime(unix_time_from_gcs);
                     break;
                 }
 
@@ -219,17 +199,13 @@ extern RTC_DS1307 rtc;
                     mavlink_msg_timesync_decode(msg, &timesync);
 
                     if (timesync.tc1 == 0) {
-
-                        RTCTime currentTime;
-                        RTC.getTime(currentTime);
-
                         mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
                         mavlink_msg_timesync_pack(
                             1, 
                             MAV_COMP_ID_AUTOPILOT1,
                             timeSyncMsg,
-                            currentTime.getUnixTime() * 1000000000ULL,
+                            systemTime.getUnixTimeNsec(),
                             timesync.ts1,
                             timesync.target_system,
                             timesync.target_component
