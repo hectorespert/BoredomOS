@@ -8,7 +8,7 @@ extern QueueHandle_t sdWriteQueue;
 
 #define LOG_FILE_COUNT 4
 #define LOG_FILE_SIZE_LIMIT (1024UL * 1024UL * 1024UL) // 1GB
-#define LOG_INDEX_FILE "data_index.txt"
+#define LOG_INDEX_FILE "data_index.bin"
 
 static int readLogIndex() {
     File idxFile = SD.open(LOG_INDEX_FILE, FILE_READ);
