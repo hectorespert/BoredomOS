@@ -7,7 +7,7 @@
 
 extern QueueHandle_t sdWriteQueue;
 
-SdData sdData = SdData();
+SdData sdData;
 
 [[noreturn]] void TaskSdWrite(void *pvParameters)
 {

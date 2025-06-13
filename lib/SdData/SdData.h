@@ -4,18 +4,16 @@
 #include <SD.h>
 #include <ArduinoJson.h>
 
-#define LOG_FILE_COUNT 4
-#define LOG_FILE_SIZE_LIMIT (1024UL * 1024UL * 1024UL) // 1GB
-#define LOG_INDEX_FILE "data_index.bin"
-
 class SdData
 {
 public:
-  SdData();
+  SdData(int files = 4, size_t size = 1024UL * 1024UL * 1024UL);
   void begin();
-  void write(JsonDocument json);
+  void write(const JsonDocument& json);
 private:
   int _fileIdx = 0;
+  int _files;
+  size_t _size;
   File _dataFile;
   int readLogIndex();
   void writeLogIndex();

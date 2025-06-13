@@ -1,7 +1,9 @@
 #include <SdData.h>
 #include <Arduino.h>
 
-SdData::SdData()
+#define LOG_INDEX_FILE "index.bin"
+
+SdData::SdData(int files, size_t size): _files(files), _size(size)
 {
     
 }
@@ -12,7 +14,7 @@ int SdData::readLogIndex() {
     int idx = 0;
     idxFile.readBytes((char*)&idx, sizeof(idx));
     idxFile.close();
-    if (idx < 0 || idx >= LOG_FILE_COUNT) return 0;
+    if (idx < 0 || idx >= _files) return 0;
     return idx;
 }
 
@@ -44,7 +46,7 @@ void SdData::writeLogIndex() {
     idxFile.close();
 }
 
-void SdData::write(JsonDocument json)
+void SdData::write(const JsonDocument& json)
 {
     if (!_dataFile) {
         return;
@@ -54,9 +56,9 @@ void SdData::write(JsonDocument json)
     _dataFile.flush();
     size_t fileSize = _dataFile.size();
 
-    if (fileSize >= LOG_FILE_SIZE_LIMIT) {
+    if (fileSize >= _size ) {
         _dataFile.close();
-        _fileIdx = (_fileIdx + 1) % LOG_FILE_COUNT;
+        _fileIdx = (_fileIdx + 1) % _files;
         writeLogIndex();
         String newLogFileName = getLogFileName();
         if (SD.exists(newLogFileName.c_str())) {
