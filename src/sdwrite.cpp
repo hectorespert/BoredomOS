@@ -3,18 +3,22 @@
 #include <Data.h>
 #include <SD.h>
 #include <ArduinoJson.h>
+#include <SdData.h>
 
 extern QueueHandle_t sdWriteQueue;
+
+SdData sdData;
 
 [[noreturn]] void TaskSdWrite(void *pvParameters)
 {
     (void) pvParameters;
 
+    sdData.begin();
+
     for (;;)
     {
         Data* data;
         if (xQueueReceive(sdWriteQueue, &data, portMAX_DELAY) == pdPASS) {
-            
             JsonDocument doc;
             doc["unixtime"] = data->unixtime;
             doc["uptime"] = data->uptime;
@@ -28,19 +32,8 @@ extern QueueHandle_t sdWriteQueue;
             doc["system"]["tasks"]["serialWriteAvailableStack"] = data->system.tasks.serialWriteAvailableStack;
             doc["energy"]["millivolts"] = data->energy.millivolts;
             doc["energy"]["remaining"] = data->energy.remaining;
-        
             vPortFree(data);
-
-            File dataFile = SD.open("data.mpk", FILE_WRITE);
-            if (!dataFile) {
-                return;
-            }
-
-            serializeMsgPack(doc, dataFile);
-            
-            dataFile.flush();
-            dataFile.close();
+            sdData.write(doc);
         }
     }
-
 }
