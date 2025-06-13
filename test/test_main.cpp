@@ -20,8 +20,8 @@ void cleanSdFiles() {
             SD.remove(fname.c_str());
         }
     }
-    if (SD.exists("data_index.bin")) {
-        SD.remove("data_index.bin");
+    if (SD.exists("index.bin")) {
+        SD.remove("index.bin");
     }
 }
 
