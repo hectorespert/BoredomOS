@@ -1,9 +1,12 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
+#include <MAVLinkFTP.h>
 #include <Serial.h>
 #include <Battery.h>
 #include <SystemTime.h>
+
+#define SYSTEM_ID 1
 
 extern QueueHandle_t serialWriteQueue;
 
@@ -20,7 +23,7 @@ static void sendHeartbeat() {
     mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
     mavlink_msg_heartbeat_pack(
-        1, 
+        SYSTEM_ID, 
         MAV_COMP_ID_AUTOPILOT1, 
         heartbeatMsg, 
         MAV_TYPE_ROCKET, 
@@ -43,7 +46,7 @@ static void sendSystemTime()
     uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
     mavlink_msg_system_time_pack(
-        1, 
+        SYSTEM_ID, 
         MAV_COMP_ID_AUTOPILOT1, 
         systemTimeMsg, 
         systemTime.getUnixTimeUsec(),
@@ -61,7 +64,7 @@ static void sendStatusText(const char* text, uint8_t severity)
     mavlink_message_t* statusMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
     if (statusMsg != NULL) {
         mavlink_msg_statustext_pack(
-            1,
+            SYSTEM_ID,
             MAV_COMP_ID_AUTOPILOT1,
             statusMsg,
             severity,
@@ -110,7 +113,7 @@ static void sendBatteryStatus()
     uint16_t voltages_ext[4] = {0, 0, 0, 0};
 
     mavlink_msg_battery_status_pack(
-        1, 
+        SYSTEM_ID, 
         MAV_COMP_ID_AUTOPILOT1, 
         batteryMsg, 
         0,
@@ -152,6 +155,7 @@ static void sendBatteryStatus()
 
 extern QueueHandle_t serialReadQueue;
 extern RTC_DS1307 rtc;
+MAVLinkFTP ftp;
 
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
@@ -184,8 +188,28 @@ extern RTC_DS1307 rtc;
                 case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
                     break;
 
-                case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
+                case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL: {
+                    mavlink_file_transfer_protocol_t ftp_request;
+                    mavlink_msg_file_transfer_protocol_decode(msg, &ftp_request);
+                    ftp.handle(&ftp_request, SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1);
+
+                    mavlink_message_t* ftp_response = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+
+                    mavlink_msg_file_transfer_protocol_pack(
+                        SYSTEM_ID, 
+                        MAV_COMP_ID_AUTOPILOT1, 
+                        ftp_response, 
+                        ftp_request.target_network, 
+                        ftp_request.target_system, 
+                        ftp_request.target_component, 
+                        ftp_request.payload
+                    );
+
+                    if (xQueueSend(serialWriteQueue, &ftp_response, 0) != pdPASS) {
+                        vPortFree(ftp_response);
+                    }
                     break;
+                }
 
                 case MAVLINK_MSG_ID_SYSTEM_TIME: {
                     time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / USEC_PER_SEC;
@@ -201,7 +225,7 @@ extern RTC_DS1307 rtc;
                         mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
                         mavlink_msg_timesync_pack(
-                            1, 
+                            SYSTEM_ID, 
                             MAV_COMP_ID_AUTOPILOT1,
                             timeSyncMsg,
                             systemTime.getUnixTimeNsec(),
