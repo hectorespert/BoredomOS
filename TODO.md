@@ -220,6 +220,51 @@ Por decidir antes de escribirlo:
   (MessagePack en vez de JSON, anillo de ficheros de tamaño fijo, `MAV_TYPE_ROCKET`),
   que es justo lo que no se deduce leyendo los fuentes.
 
+### Compilación debug y release, con traza de MAVLink por consola
+
+**Estado:** propuesta
+**Ámbito:** `platformio.ini`, `src/mavlink.cpp`, `src/serial.cpp`, `CLAUDE.md`,
+`README.md`
+
+Depurar el protocolo hoy es a ciegas: no hay forma de ver qué mensajes MAVLink
+entran y salen sin un GCS al otro lado interpretándolos. La idea es tener dos
+perfiles de compilación y que el de depuración vuelque la traza del protocolo por
+el puerto de consola, en texto legible.
+
+Depende de *[Mover el enlace MAVLink a `Serial1`...]*: mientras las tramas binarias
+sigan yendo por el USB no hay puerto de consola donde escribir la traza.
+
+Qué debería trazar, por cada mensaje: sentido (entrante/saliente), `msgid` —a poder
+ser con nombre, no solo el número—, `sysid`/`compid` de origen y longitud. Los dos
+puntos de paso obligados ya existen y son los sitios naturales donde engancharlo:
+el `switch` de `TaskMavlink` para lo que entra y el drenaje de `TaskSerialWrite`
+para lo que sale.
+
+Puntos a resolver antes de implementar:
+
+- **Cómo se separan los perfiles.** Un segundo `[env:...]` en `platformio.ini` que
+  herede del actual y añada su `build_flags` es lo idiomático de PlatformIO. Ojo:
+  CI ejecuta `pio run` sin `-e`, que compila *todos* los entornos — así el perfil
+  de depuración también se comprueba en cada push, que es lo deseable, pero hay
+  que asegurarse de que no se convierte en el que se sube a la placa por defecto.
+- **La traza no puede existir en release.** Tiene que compilarse fuera con
+  `#ifdef`, no quedar tras un `if` en tiempo de ejecución: las cadenas de texto y
+  el formateo ocupan flash y RAM, y aquí no sobra ninguna de las dos. El perfil
+  release debe generar exactamente el binario de hoy.
+- **Escribir en consola no puede bloquear el vuelo.** Si el USB no está conectado o
+  su búfer se llena, un `print` puede quedarse esperando y arrastrar a una tarea de
+  prioridad `PRIORITY_HIGHEST`. Y varias tareas escribiendo a la vez entrelazan la
+  salida. Hay que decidir si se escribe directamente, con mutex, o por una cola
+  como el resto del firmware.
+- **Pilas.** Formatear texto consume pila, y están ajustadas entre 96 y 256
+  palabras. Al activar el perfil de depuración hay que volver a mirar los
+  high-water marks del log: es exactamente el caso que provoca el parpadeo a
+  0,5 Hz de `src/hooks.cpp`.
+- **Qué más entra en el perfil de depuración.** Nivel de detalle configurable
+  (solo cabeceras, o volcado hexadecimal), y si se aprovecha para las trazas de
+  otros subsistemas o se queda solo en MAVLink.
+- Documentar en `README.md` y `CLAUDE.md` cómo compilar y subir cada perfil.
+
 ## Por modificar
 
 ### Comprobar el resultado de `pvPortMalloc` en los cuatro sitios que no lo hacen
