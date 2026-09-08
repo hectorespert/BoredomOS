@@ -166,6 +166,47 @@ un heap momentáneamente lleno no da un fallo puntual, lo repite en cada ciclo.
 Por decidir: si al no poder reservar conviene dejar rastro (contador en `Data`
 hacia el log de la SD) o basta con saltarse el envío en silencio.
 
+### Mejorar la sincronización del reloj
+
+**Estado:** propuesta
+**Ámbito:** `lib/SystemTime`, `src/mavlink.cpp`
+
+`lib/SystemTime` mantiene en hora el RTC interno del R4 y el DS1307 externo, pero
+la sincronización tiene hoy varias limitaciones que se notan en cuanto el satélite
+lleva tiempo encendido o el GCS intenta medir el desfase.
+
+Limitaciones actuales, por orden de impacto:
+
+- **Resolución de un segundo.** `getUnixTimeUsec()` y `getUnixTimeNsec()` son
+  `getUnixTime()` multiplicado por 10^6 y 10^9, así que la parte subsegundo es
+  siempre cero. Eso va a la respuesta `TIMESYNC` y al `SYSTEM_TIME` que se emite
+  cada segundo desde `TaskHeartbeat`: el GCS recibe una marca cuantizada al
+  segundo y su estimación de desfase hereda ese error de hasta ±1 s. Combinar el
+  RTC (segundos) con `xTaskGetTickCount()` o `micros()` para la fracción es lo que
+  da resolución real.
+- **Base de tiempo de `TIMESYNC` sin fijar.** La respuesta de `src/mavlink.cpp:201`
+  usa `getUnixTimeNsec()`, tiempo de pared. Conviene decidir y documentar si es eso
+  lo que espera el GCS de referencia o un tiempo monótono desde arranque, porque si
+  no coinciden el desfase calculado en tierra no significa nada.
+- **El DS1307 no se corrige si el RTC interno ya está en hora.** `setUnixTime()`
+  sale por el `return` temprano al comparar solo contra el reloj interno, así que
+  un DS1307 que haya derivado nunca se reajusta desde tierra — y es justo el que
+  siembra la hora en el siguiente arranque.
+- **No hay resincronización periódica.** `begin()` copia DS1307 → RTC interno una
+  vez al arrancar y ahí acaba. Los dos relojes derivan por separado durante toda la
+  misión sin que nadie los vuelva a acercar.
+- **No se valida lo que llega del GCS.** `MAVLINK_MSG_ID_SYSTEM_TIME` se acepta tal
+  cual: un valor corrupto o a cero deja al satélite en 1970 y contamina el
+  `unixtime` de todos los registros de la SD, que es la referencia con la que luego
+  se leen los `.mpk`.
+
+Por decidir antes de implementar: qué reloj manda cuando discrepan, cada cuánto se
+resincronizan entre sí, y qué rango de fechas se considera aceptable en un
+`SYSTEM_TIME` entrante.
+
+Al tocar `lib/SystemTime` hay que pasar `pio test`: `test/test_main.cpp` valida
+contra el DS1307 real, así que esto no se puede comprobar sin la placa.
+
 ## Hecho
 
 _Vacío por ahora._
