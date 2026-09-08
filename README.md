@@ -5,6 +5,8 @@
 Software and documentation for a Cubesat based on [https://www.thingiverse.com/thing:4096437](https://www.thingiverse.com/thing:4096437)
 
 
+Pending features and changes are tracked in [TODO.md](TODO.md).
+
 ## MAVProxy
 
 ```bash
