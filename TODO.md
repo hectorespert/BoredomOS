@@ -138,6 +138,47 @@ Puntos de implementación:
 - Comprobación en `test/test_main.cpp`, que corre sobre hardware real y por tanto
   puede validar el estado con la placa enchufada (cargando) y sin ella.
 
+### Descargar los ficheros de la SD por MAVLink FTP
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`, `lib/SdData`, `src/sdwrite.cpp`, `src/main.cpp`
+
+Hoy el registro de mantenimiento solo se puede recuperar sacando la tarjeta de la
+placa: nada lo expone por el enlace. Implementar MAVLink FTP
+(`FILE_TRANSFER_PROTOCOL`) permitiría listar y descargar los `data0..N.mpk` e
+`index.bin` desde tierra con el GCS de referencia (`ftp list` / `ftp get` en
+MAVProxy), que es la única forma realista de leerlos con el satélite montado.
+
+El hueco ya está marcado: `src/mavlink.cpp` tiene un `case
+MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:` vacío en el `switch` de `TaskMavlink`.
+
+Puntos a resolver antes de implementar:
+
+- **Alcance del protocolo.** FTP de MAVLink es una máquina de estados con sesiones
+  y opcodes (`ListDirectory`, `OpenFileRO`, `ReadFile`, `Terminate`, lecturas en
+  ráfaga...). Decidir el subconjunto mínimo: listar y leer en solo lectura cubre el
+  caso de uso; escritura y borrado desde tierra son otra discusión, y peligrosa
+  sobre el fichero que el firmware tiene abierto.
+- **Concurrencia con `TaskSdWrite`.** `lib/SdData` mantiene `_dataFile` abierto
+  para escritura mientras el logger vuelca a 1 Hz, y la SD cuelga de SPI con `CS`
+  en el pin 9. Dos tareas tocando la tarjeta a la vez es corrupción: hace falta un
+  mutex, o que el acceso FTP pase por `TaskSdWrite`, que ya es la dueña del medio.
+  Es la decisión de diseño principal de esta funcionalidad.
+- **RAM.** Es la restricción de siempre: `mavlink_message_t` ya son ~280 bytes y
+  las pilas están ajustadas entre 96 y 256 palabras. Una tarea FTP con su búfer de
+  sesión no cabe sin medir; hay que mirar los high-water marks del log antes y
+  después.
+- **Tiempo de descarga.** Por defecto `SdData` son 4 ficheros de 1 GiB. Sobre un
+  enlace de radio, y con los ~239 bytes útiles que mueve cada paquete FTP,
+  descargar uno entero no es viable: conviene revisar ese tamaño por defecto, o
+  soportar lectura por offset para bajar solo el tramo que interese.
+- **Coherencia de lo que se descarga.** El fichero activo se está escribiendo
+  mientras se lee. Definir si se sirve tal cual (el receptor puede encontrar un
+  registro MessagePack a medias al final) o si solo se ofrecen los ficheros
+  cerrados del anillo.
+- Mantener la tripleta de identidad del resto del firmware: sistema `1`,
+  `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+
 ## Por modificar
 
 ### Comprobar el resultado de `pvPortMalloc` en los cuatro sitios que no lo hacen
