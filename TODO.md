@@ -97,6 +97,47 @@ Puntos de implementación:
   colgará la placa igual que hoy hacen RTC y SD.
 - Vigilar los high-water marks tras añadir la tarea: el margen de RAM es escaso.
 
+### Detectar cuándo la batería está cargando
+
+**Estado:** propuesta
+**Ámbito:** `lib/Battery`, `src/mavlink.cpp`, `include/Data.h`, `src/logger.cpp`,
+`src/sdwrite.cpp`
+
+Ahora mismo el firmware solo sabe *qué tensión* tiene la batería, no si está
+entrando corriente de los paneles. `src/mavlink.cpp` refleja esa carencia: envía
+`MAV_BATTERY_CHARGE_STATE_UNDEFINED` fijo y `current_battery = -1`. Desde tierra no
+se distingue una batería al 60 % subiendo al sol de una al 60 % bajando en eclipse,
+que es justo la diferencia que importa para planificar el consumo.
+
+Por decidir antes de implementar:
+
+- **De dónde sale la señal.** `lib/Battery` solo tiene `SolarCharger` sobre `A0`, y
+  esa librería únicamente expone `readVoltage()`. Hay dos caminos:
+  - *Hardware:* leer el pin `STAT`/`CHG` del cargador en un GPIO. Es fiable e
+    inmediato, pero añade cableado, y hoy el pinout está fijo en el código
+    (SD `CS` en 9, batería en `A0`, DS1307 en I2C) — habría que documentarlo ahí.
+  - *Software:* inferirlo de la tendencia de la tensión. No toca hardware, pero
+    obliga a guardar historial y a fijar umbral y ventana temporal para no
+    confundir el ruido del ADC con carga real.
+- **Qué estados se distinguen.** Basta con cargando / no cargando, o interesa
+  además *cargada* (fin de carga) y *descargando*. Esto fija qué valores de
+  `MAV_BATTERY_CHARGE_STATE` se emiten.
+
+Puntos de implementación:
+
+- La lectura vive en `lib/Battery`, junto a `voltage()` y `remaining()`, con la
+  misma política de caché que ya usa (125 ms) si la fuente lo requiere.
+- Sustituir el `MAV_BATTERY_CHARGE_STATE_UNDEFINED` fijo de `sendBatteryStatus()`
+  por el estado real. Misma tripleta de identidad que el resto: sistema `1`,
+  `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+- Añadir el estado a `Energy` en `include/Data.h` y volcarlo en `src/sdwrite.cpp`,
+  para poder reconstruir después los ciclos de carga desde los `.mpk`. Igual que
+  con el sensor de temperatura, esto cambia el esquema de los ficheros de la SD.
+- Si se elige la vía software, el historial no puede crecer: buffer de tamaño fijo,
+  sin `malloc` por muestra.
+- Comprobación en `test/test_main.cpp`, que corre sobre hardware real y por tanto
+  puede validar el estado con la placa enchufada (cargando) y sin ella.
+
 ## Por modificar
 
 _Vacío por ahora._
