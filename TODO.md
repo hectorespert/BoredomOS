@@ -72,7 +72,8 @@ distintos:
 - **BMP180** — presión barométrica y temperatura.
 
 Va al bus I2C que ya usa el DS1307, así que no añade pines nuevos al cableado fijo
-del proyecto.
+del proyecto. **El módulo ya está pedido**, así que el hardware no es una incógnita:
+lo que queda es comprobarlo al recibirlo y decidir el software.
 
 Dos problemas de hardware a resolver **antes de escribir código**:
 
