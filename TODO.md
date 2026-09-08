@@ -55,6 +55,48 @@ Puntos a resolver al implementarla:
 - Revisar `test/test_main.cpp`: al liberar el USB, la salida de Unity deja de
   mezclarse con las tramas MAVLink.
 
+### Añadir un sensor de temperatura
+
+**Estado:** propuesta
+**Ámbito:** `src/sensors.cpp` (nuevo), `src/main.cpp`, `include/Data.h`,
+`src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
+
+Medir la temperatura a bordo y exponerla por los dos caminos que ya existen: el
+registro de mantenimiento en la SD y la telemetría MAVLink hacia tierra. Es dato
+crítico para un CubeSat: la LiPo y la SD tienen rango de operación estrecho y hoy
+no hay forma de saber a qué temperatura vuela la placa.
+
+Por decidir antes de implementar:
+
+- **Qué sensor.** El sensor interno del RA4M1 no necesita hardware pero mide el
+  die, no el ambiente. Un I2C externo colgado del bus que ya usa el DS1307 no
+  añade cableado nuevo. Elegir uno u otro fija la dependencia en `platformio.ini`
+  y si hace falta una librería en `lib/` al estilo de `lib/Battery`.
+- **Cuántos puntos de medida.** Un solo sensor, o varios (batería, exterior)
+  cambia la forma del dato en `Data`.
+- **Cadencia y caché.** `lib/Battery` cachea 125 ms; la temperatura cambia mucho
+  más despacio, así que el muestreo puede ser bastante más lento que el 1 Hz de
+  `src/logger.cpp`.
+
+Puntos de implementación:
+
+- `src/main.cpp:44` ya declara `[[noreturn]] extern void TaskSensors(...)` sin
+  implementación ni `xTaskCreate`: es el hueco previsto para esto. Hay que crear
+  `src/sensors.cpp` y darle prioridad de `include/Priority.h` y pila en palabras.
+- Añadir el campo a `include/Data.h`, rellenarlo en `src/logger.cpp` y volcarlo en
+  `src/sdwrite.cpp`. Al tocar `Data` cambia el esquema de los `.mpk`: decidir si
+  los ficheros antiguos siguen siendo legibles.
+- Si la lectura no la hace el propio `TaskLogger`, el valor tiene que llegarle sin
+  romper el protocolo de colas: **punteros en heap, `vPortFree` si el `xQueueSend`
+  no devuelve `pdPASS`, y el consumidor libera**.
+- Mensaje MAVLink de salida: elegir uno estándar (`SCALED_PRESSURE.temperature` en
+  centigrados x100, o `HYGROMETER_SENSOR`) y emitirlo con la misma tripleta de
+  identidad que el resto: sistema `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+- Añadir la comprobación a `test/test_main.cpp`, que corre solo sobre hardware
+  real. Si el sensor se inicializa con `configASSERT` en `setup()`, su ausencia
+  colgará la placa igual que hoy hacen RTC y SD.
+- Vigilar los high-water marks tras añadir la tarea: el margen de RAM es escaso.
+
 ## Por modificar
 
 _Vacío por ahora._
