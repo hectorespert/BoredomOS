@@ -10,8 +10,11 @@ Firmware for a CubeSat (hardware based on https://www.thingiverse.com/thing:4096
 mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
 ```
 
+**Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything.** It is the single source of truth for the design: the task and queue model, the three pipelines, which file owns which resource, and the constraints that explain why the code looks the way it does. This file does not repeat it.
+
 Planned and in-progress work is tracked in [TODO.md](TODO.md); check it before starting a
-feature, and add or update the entry there when one is defined or finished.
+feature, and add or update the entry there when one is defined or finished. Entries are
+written in English, one per feature or defect, and defined before any code is written.
 
 ## Commands
 
@@ -24,27 +27,18 @@ pio test                 # Unity tests — ON DEVICE ONLY, needs board + DS1307 
 
 There is no host/native test environment: `test/test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so tests cannot run in CI or on a dev machine. All test cases live in one file and are dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines — `pio test -f` filters test *directories*, of which there is only one.
 
-## Architecture
+Since the tests cannot run here, a change that touches `lib/` or a task body is not verified by building it. Say so rather than implying it was tested.
 
-`src/main.cpp` is the only place tasks and queues are created; everything else is a task body in its own translation unit reaching shared objects via `extern`. Adding a subsystem means: define the task in a new `src/*.cpp`, declare it `[[noreturn]] extern` in `main.cpp`, and `xTaskCreate` it there.
+## Conventions when editing
 
-**Queues carry heap pointers, never values.** Producers `pvPortMalloc` a `Data*` or `mavlink_message_t*`, and every `xQueueSend` must `vPortFree` on `!= pdPASS` or the RAM leaks — the MCU has no memory to spare. The consumer owns the pointer and frees it after use. Follow this protocol exactly in new code.
+These are the invariants that are easiest to break silently. `ARCHITECTURE.md` explains why each one exists.
 
-Three pipelines, all fed by queues:
-
-- **Serial ↔ MAVLink.** `serial.cpp` owns the UART: `TaskSerialRead` byte-parses into `serialReadQueue`, `TaskSerialWrite` drains `serialWriteQueue`. `mavlink.cpp` holds all protocol logic — `TaskMavlink` dispatches inbound by `msgid`, while `TaskHeartbeat` and `TaskMavlinkBatteryStatus` emit periodic telemetry. Nothing outside `serial.cpp` should touch `Serial` for I/O; tasks only wait on `while (!Serial)` before publishing.
-- **Housekeeping log.** `logger.cpp` samples free heap and each task's stack high-water mark once a second into a `Data` struct (`include/Data.h`) and posts it to `sdWriteQueue`; `sdwrite.cpp` converts it to a `JsonDocument` and hands it to `SdData`.
-- **Time.** `lib/SystemTime` keeps the R4's internal `RTC` and an external DS1307 in sync — `begin()` seeds the internal clock from the DS1307, `setUnixTime()` writes both and short-circuits when already correct. Inbound `SYSTEM_TIME` and `TIMESYNC` from the GCS drive it, so the satellite's clock is settable from the ground.
-
-Identity on the bus is hardcoded: system id `1`, component `MAV_COMP_ID_AUTOPILOT1`, type `MAV_TYPE_ROCKET`. Any new outbound message must use the same triple.
-
-`lib/SdData` is a fixed-footprint ring of `data0..N.mpk` files with the current index persisted in `index.bin`, so a power cycle resumes where it left off and the card can never fill. Despite taking an `ArduinoJson` document it serializes **MessagePack**, not JSON — the `.mpk` files are binary.
-
-`lib/Battery` wraps the `SolarCharger` library on `A0` and caches reads for 125 ms; `remaining()` is a naive linear 3.5 V–4.2 V LiPo map.
-
-### Constraints that shape the code
-
-- Stack sizes in `xTaskCreate` are in **words**, and are tuned tight (96–256). `configCHECK_FOR_STACK_OVERFLOW=2` is on and `src/hooks.cpp` traps an overflow into a 0.5 Hz `LED_BUILTIN` blink with interrupts disabled — a board blinking slowly on boot means a stack is too small, not a wiring fault. The per-task high-water marks in the SD log exist to size these; check them after changing any task body.
-- Task priorities come from `include/Priority.h` (`PRIORITY_LOWEST`..`PRIORITY_HIGHEST`), not raw numbers. Serial I/O is HIGHEST, SD writing LOWEST.
-- Wiring is hardcoded, not configurable: SD card CS on pin **9**, battery sense on **A0**, DS1307 on I2C.
-- `setup()` uses `configASSERT` for RTC, SD and queue creation, so missing hardware halts the board rather than degrading.
+- **Adding a subsystem is three edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, and an `xTaskCreate` there. Tasks and queues are created nowhere else.
+- **Queues carry heap pointers, never values.** Producer `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`. The consumer frees after use. On 8 KB of heap a leak is fatal within minutes.
+- **Stack sizes in `xTaskCreate` are words, not bytes**, and are tuned tight (96–256). After changing a task body, check that task's high-water mark in the SD log before assuming it still fits.
+- **Priorities come from `include/Priority.h`**, never raw numbers.
+- **Only the owning file touches its resource:** `src/serial.cpp` the UART, `src/sdwrite.cpp` the card, `lib/SystemTime` the clocks, `lib/Battery` the ADC. Everything else goes through a queue or the library wrapper. This is what makes the absence of mutexes safe — do not break it by reaching for a peripheral directly.
+- **Every outbound MAVLink message uses the same identity triple:** system id `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+- **Wiring is hardcoded** (SD `CS` on 9, battery on `A0`, DS1307 on I2C). If a change adds a pin, document it in `ARCHITECTURE.md`.
+- **`configASSERT` in `setup()` halts the board on purpose** for missing RTC, SD or queues. Do not soften it into a degraded boot without an explicit decision.
+- When a change makes `ARCHITECTURE.md` inaccurate, update it in the same commit.
