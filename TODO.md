@@ -179,6 +179,47 @@ Puntos a resolver antes de implementar:
 - Mantener la tripleta de identidad del resto del firmware: sistema `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 
+### Escribir el documento de arquitectura
+
+**Estado:** propuesta
+**Ámbito:** `ARCHITECTURE.md` (nuevo), `README.md`, `CLAUDE.md`
+
+El repositorio no tiene documentación de arquitectura para personas: `README.md`
+son cuatro líneas y el comando de MAVProxy, y lo único que describe el diseño es la
+sección *Architecture* de `CLAUDE.md`, escrita para Claude Code. Quien llegue nuevo
+al proyecto —o el propio autor dentro de seis meses— no tiene dónde ver por qué el
+firmware está partido así.
+
+Contenido que debería cubrir:
+
+- El modelo de tareas y colas: `src/main.cpp` como único sitio donde se crean, y
+  cada tarea en su unidad de traducción alcanzando los objetos compartidos por
+  `extern`.
+- El protocolo de propiedad de la memoria, que es la regla que más fácil se rompe:
+  las colas llevan punteros a heap, el productor libera si `xQueueSend` no devuelve
+  `pdPASS`, el consumidor libera tras usar.
+- Las tres tuberías —serie ↔ MAVLink, registro de mantenimiento, tiempo— y qué
+  fichero es dueño de qué recurso (`src/serial.cpp` del UART, `src/sdwrite.cpp` de
+  la tarjeta).
+- Las restricciones que explican el código tal como está: pilas en palabras y
+  ajustadas, prioridades de `include/Priority.h`, cableado fijo, `configASSERT` que
+  cuelga la placa en vez de degradar.
+- Un diagrama de las tuberías y las colas. Mermaid se renderiza en GitHub y se
+  versiona como texto.
+
+Por decidir antes de escribirlo:
+
+- **Dónde vive la fuente única.** `CLAUDE.md` ya describe todo esto. Mantener dos
+  documentos en paralelo garantiza que uno quede obsoleto: o `CLAUDE.md` pasa a
+  apuntar a `ARCHITECTURE.md` y se queda con lo específico de Claude Code
+  (comandos, convenciones al editar), o el nuevo documento se limita a lo que
+  `CLAUDE.md` no cubre.
+- **Qué profundidad.** Documentar decisiones y restricciones envejece bien;
+  enumerar funciones y firmas envejece mal y ya está en el código.
+- Si conviene registrar además el *porqué* de las decisiones ya tomadas
+  (MessagePack en vez de JSON, anillo de ficheros de tamaño fijo, `MAV_TYPE_ROCKET`),
+  que es justo lo que no se deduce leyendo los fuentes.
+
 ## Por modificar
 
 ### Comprobar el resultado de `pvPortMalloc` en los cuatro sitios que no lo hacen
