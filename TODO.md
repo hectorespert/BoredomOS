@@ -140,7 +140,31 @@ Puntos de implementación:
 
 ## Por modificar
 
-_Vacío por ahora._
+### Comprobar el resultado de `pvPortMalloc` en los cuatro sitios que no lo hacen
+
+**Estado:** definida
+**Ámbito:** `src/mavlink.cpp`
+
+El protocolo de colas del proyecto se cumple a medias en `src/mavlink.cpp`: todos
+los `xQueueSend` liberan con `vPortFree` cuando no devuelven `pdPASS`, pero cuatro
+reservas no comprueban que `pvPortMalloc` haya devuelto algo antes de usar el
+puntero. Se lo pasan directamente a `mavlink_msg_*_pack`, que escribe en él:
+
+- `src/mavlink.cpp:20` — `sendHeartbeat()`
+- `src/mavlink.cpp:41` — `SYSTEM_TIME`
+- `src/mavlink.cpp:104` — `sendBatteryStatus()`
+- `src/mavlink.cpp:201` — respuesta a `TIMESYNC`
+
+Con el heap agotado, `pvPortMalloc` devuelve `NULL` y el `pack` escribe en la
+dirección 0. El patrón correcto ya está en el mismo fichero, en `src/mavlink.cpp:61`
+(`STATUSTEXT`), y en `src/logger.cpp:42` y `src/serial.cpp:50`: envolver desde la
+reserva hasta el `xQueueSend` en `if (msg != NULL) { ... }`.
+
+Importa más de lo que parece porque los tres primeros son emisores **periódicos**:
+un heap momentáneamente lleno no da un fallo puntual, lo repite en cada ciclo.
+
+Por decidir: si al no poder reservar conviene dejar rastro (contador en `Data`
+hacia el log de la SD) o basta con saltarse el envío en silencio.
 
 ## Hecho
 
