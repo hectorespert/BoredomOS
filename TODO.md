@@ -55,6 +55,71 @@ Puntos a resolver al implementarla:
 - Revisar `test/test_main.cpp`: al liberar el USB, la salida de Unity deja de
   mezclarse con las tramas MAVLink.
 
+### Añadir la IMU GY-87
+
+**Estado:** propuesta
+**Ámbito:** `src/sensors.cpp` (nuevo), `src/main.cpp`, `include/Data.h`,
+`src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
+
+Incorporar el módulo **GY-87** como unidad inercial del satélite, para conocer su
+actitud y su movimiento y reportarlos por MAVLink además de registrarlos en la SD.
+
+El GY-87 es un módulo I2C de 10 grados de libertad que integra tres chips
+distintos:
+
+- **MPU-6050** — acelerómetro y giróscopo de 3 ejes, más temperatura del die.
+- **HMC5883L** — magnetómetro de 3 ejes.
+- **BMP180** — presión barométrica y temperatura.
+
+Va al bus I2C que ya usa el DS1307, así que no añade pines nuevos al cableado fijo
+del proyecto.
+
+Dos problemas de hardware a resolver **antes de escribir código**:
+
+- **Colisión de direcciones I2C con el DS1307.** El DS1307 está en `0x68`, dirección
+  fija que no se puede cambiar, y el MPU-6050 responde por defecto en esa misma
+  dirección. Se resuelve llevando el pin `AD0` del módulo a nivel alto para moverlo
+  a `0x69`, pero hay que comprobar cómo viene ese pin en la placa GY-87 concreta:
+  en muchas está fijado a masa y hace falta tocar el módulo. Sin esto los dos
+  dispositivos se pisan y no funciona ninguno.
+- **El magnetómetro cuelga del bus auxiliar del MPU-6050.** En el GY-87 el HMC5883L
+  no está directamente en el bus principal: para alcanzarlo hay que habilitar antes
+  el modo *bypass* del MPU-6050. Un escaneo del bus que no lo encuentre no significa
+  que el módulo esté roto.
+
+Por decidir antes de implementar:
+
+- **Qué se mide y a qué cadencia.** Datos crudos de acelerómetro, giróscopo y
+  magnetómetro, o además una actitud fusionada (roll/pitch/yaw). La fusión es
+  aritmética en coma flotante en cada muestra: hay que medirla contra las pilas
+  ajustadas y el 1 Hz del resto del firmware antes de comprometerse.
+- **Qué librerías.** Cada chip tiene la suya y no todas son ligeras; con 8 KB de
+  heap de FreeRTOS conviene mirar el coste antes de añadirlas a `lib_deps`.
+- **Calibración.** El magnetómetro necesita offsets, y el giróscopo un cero. Dónde
+  se guardan —constantes compiladas, un fichero en la SD, parámetros desde tierra
+  vía *[Responder a los mensajes del GCS que hoy se ignoran]*— es una decisión de
+  diseño, no un detalle.
+
+Puntos de implementación:
+
+- `src/main.cpp:44` ya declara `[[noreturn]] extern void TaskSensors(...)` sin
+  implementación ni `xTaskCreate`: es el hueco previsto. Hay que crear
+  `src/sensors.cpp`, con prioridad de `include/Priority.h` y pila en palabras.
+- Envolver el módulo en `lib/` al estilo de `lib/Battery`, para que la lógica de
+  tareas no hable con tres chips a la vez.
+- Mensajes MAVLink de salida: `SCALED_IMU` o `RAW_IMU` para inercial y magnetómetro,
+  `SCALED_PRESSURE` para el barómetro, y `ATTITUDE` si se llega a fusionar. Misma
+  tripleta de identidad que el resto: sistema `1`, `MAV_COMP_ID_AUTOPILOT1`,
+  `MAV_TYPE_ROCKET`.
+- Ampliar `include/Data.h` y `src/sdwrite.cpp`. Son bastantes campos nuevos: revisar
+  cuánto crece cada registro MessagePack y qué le hace eso al ritmo de rotación del
+  anillo de `lib/SdData`.
+- Con tres chips en el bus, el acceso I2C deja de ser exclusivo del RTC. Hay que
+  decidir cómo se serializa frente a `lib/SystemTime`, igual que la SD frente a
+  `TaskSdWrite`.
+- Comprobaciones en `test/test_main.cpp`, que corre sobre hardware real.
+
+
 ### Añadir un sensor de temperatura
 
 **Estado:** propuesta
@@ -68,10 +133,11 @@ no hay forma de saber a qué temperatura vuela la placa.
 
 Por decidir antes de implementar:
 
-- **Qué sensor.** El sensor interno del RA4M1 no necesita hardware pero mide el
-  die, no el ambiente. Un I2C externo colgado del bus que ya usa el DS1307 no
-  añade cableado nuevo. Elegir uno u otro fija la dependencia en `platformio.ini`
-  y si hace falta una librería en `lib/` al estilo de `lib/Battery`.
+- **Qué sensor.** Si entra la IMU de *[Añadir la IMU GY-87]*, el módulo ya trae dos
+  fuentes de temperatura —el BMP180 y el die del MPU-6050— y esta entrada se reduce
+  a exponer ese valor, sin hardware ni dependencias adicionales. Las alternativas
+  son el sensor interno del RA4M1, que no necesita nada pero mide el die del micro
+  y no el ambiente, o un I2C dedicado. Conviene decidirlo **después** de la GY-87.
 - **Cuántos puntos de medida.** Un solo sensor, o varios (batería, exterior)
   cambia la forma del dato en `Data`.
 - **Cadencia y caché.** `lib/Battery` cachea 125 ms; la temperatura cambia mucho
