@@ -334,6 +334,39 @@ resincronizan entre sí, y qué rango de fechas se considera aceptable en un
 Al tocar `lib/SystemTime` hay que pasar `pio test`: `test/test_main.cpp` valida
 contra el DS1307 real, así que esto no se puede comprobar sin la placa.
 
+### Corregir la aritmética de punteros en el `STATUSTEXT` de mensaje desconocido
+
+**Estado:** definida
+**Ámbito:** `src/mavlink.cpp`
+
+En el `default` del `switch` de `TaskMavlink`, `src/mavlink.cpp:222`:
+
+```cpp
+sendStatusText("Mensaje recibido con ID desconocido: " + msg->msgid, MAV_SEVERITY_WARNING);
+```
+
+`sendStatusText` recibe un `const char*`, así que ahí no hay concatenación de
+cadenas: el `+` es **aritmética de punteros**. El literal ocupa 37 caracteres y el
+puntero avanza `msg->msgid` bytes sobre él, de modo que:
+
+- con un `msgid` menor que 37 se envía un trozo del final del literal, sin el
+  número que se pretendía mostrar;
+- con un `msgid` mayor —el caso habitual, los identificadores de MAVLink llegan a
+  centenares— se lee **fuera del literal** y se transmiten a tierra bytes
+  arbitrarios de flash hasta topar con un `\0`.
+
+Se dispara con cualquier mensaje que no esté contemplado en el `switch`, que es
+justo para lo que existe la rama `default`.
+
+El arreglo es formatear el número en un búfer propio, con el tamaño acotado
+(`snprintf` sobre un `char[]` local) antes de llamar a `sendStatusText`, teniendo
+en cuenta que `STATUSTEXT` corta el texto a 50 caracteres y que la pila de
+`TaskMavlink` son 256 palabras.
+
+Conviene revisarlo junto a *[Compilación debug y release...]*: si la traza de
+protocolo acaba imprimiendo el `msgid` por consola, el formateo del número debería
+resolverse una sola vez y no en dos sitios.
+
 ## Hecho
 
 _Vacío por ahora._
