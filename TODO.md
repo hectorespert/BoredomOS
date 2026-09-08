@@ -265,6 +265,95 @@ Puntos a resolver antes de implementar:
   otros subsistemas o se queda solo en MAVLink.
 - Documentar en `README.md` y `CLAUDE.md` cómo compilar y subir cada perfil.
 
+### Añadir un watchdog
+
+**Estado:** propuesta
+**Ámbito:** `src/main.cpp`, tareas de `src/*.cpp`, `platformio.ini`
+
+No hay watchdog. Cualquier tarea que se quede colgada —un `xQueueReceive` que no
+llega, un I2C esperando al DS1307, el bucle de `src/hooks.cpp`— deja el satélite
+inerte hasta un ciclo de alimentación que en vuelo nadie puede dar. Para firmware
+pensado para volar es la ausencia más grave del proyecto.
+
+El RA4M1 tiene WDT independiente. Por decidir:
+
+- **Qué tareas lo alimentan.** Un solo `refresh()` desde la tarea de menor
+  prioridad detecta inanición pero no que una tarea concreta se haya parado. Un
+  esquema donde cada tarea marca su paso y una sola refresca cuando todas han
+  pasado detecta mucho más, a costa de estado compartido.
+- **Timeout**, contra el ciclo más lento (`TaskSdWrite`, que puede bloquearse en
+  SPI escribiendo en la tarjeta).
+- **Qué se hace tras un reinicio por watchdog.** Dejar constancia en el log de la
+  SD o en un `STATUSTEXT` al arrancar; si no, los reinicios son invisibles desde
+  tierra.
+- Interacción con `configASSERT`: hoy un fallo de hardware en `setup()` cuelga la
+  placa. Con watchdog eso pasa a ser un ciclo de reinicio infinito, que puede ser
+  mejor (reintenta) o peor (no llega a emitir nada). Hay que decidirlo a la vez.
+
+
+### Reflejar el estado real del satélite en el heartbeat
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`, `include/Data.h`
+
+`sendHeartbeat()` manda constantes: `MAV_STATE_ACTIVE` y
+`MAV_MODE_FLAG_AUTO_ENABLED | MAV_MODE_FLAG_SAFETY_ARMED`, pase lo que pase. Con la
+batería al 5 %, la SD sin montar o el RTC perdido, el satélite sigue anunciando por
+el enlace que todo va bien — justo cuando tierra necesita enterarse.
+
+Por decidir:
+
+- Qué condiciones elevan el estado a `MAV_STATE_CRITICAL` o `MAV_STATE_EMERGENCY`:
+  umbral de batería, fallo de escritura en la SD, hora no válida.
+- De dónde sale esa información. Hoy nadie centraliza la salud del sistema; hace
+  falta un estado compartido, y llegar a él sin romper el modelo de tareas y colas.
+- Si `MAV_STATE_BOOT` durante `setup()` y `MAV_STATE_STANDBY` sin enlace aportan
+  algo, o basta con activo/crítico.
+
+Relacionado con *[Detectar cuándo la batería está cargando]*: el estado de carga es
+una de las entradas naturales de esta decisión.
+
+
+### Responder a los mensajes del GCS que hoy se ignoran
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`
+
+En el `switch` de `TaskMavlink` hay varios `case` que solo hacen `break`:
+`COMMAND_LONG` (incluido `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` y
+`REQUEST_DATA_STREAM`. El GCS los da por perdidos y reintenta: MAVProxy se queda
+esperando un `COMMAND_ACK` que no llega nunca.
+
+Lo mínimo es contestar siempre algo. Un `COMMAND_ACK` con
+`MAV_RESULT_UNSUPPORTED` es una respuesta honesta y corta el reintento; callarse no.
+
+Por decidir:
+
+- Qué comandos se soportan de verdad y cuáles se rechazan explícitamente.
+- Si se implementa el protocolo de parámetros (`PARAM_REQUEST_LIST` /
+  `PARAM_SET`) o se responde con una lista vacía. Tener parámetros ajustables desde
+  tierra —umbrales, cadencias— cambiaría bastante el proyecto: hoy todo está fijo
+  en el código.
+- Si `REQUEST_DATA_STREAM` debe poder cambiar la cadencia de la telemetría, hoy
+  clavada en `TaskHeartbeat` y `TaskMavlinkBatteryStatus`.
+
+
+### Añadir análisis estático a CI
+
+**Estado:** definida
+**Ámbito:** `.github/workflows/main.yml`, `platformio.ini`
+
+El workflow solo ejecuta `pio run`: comprueba que compila, nada más. PlatformIO
+trae cppcheck integrado en `pio check`, que no cuesta nada añadir al job existente.
+
+No es teórico: la aritmética de punteros de
+*[Corregir la aritmética de punteros en el `STATUSTEXT`...]* y los `pvPortMalloc`
+sin comprobar son exactamente el tipo de defecto que cppcheck señala.
+
+Por decidir: qué severidades hacen fallar el build. Empezar avisando sin romper el
+job, ver el ruido real sobre este código y solo después endurecerlo — si el primer
+`pio check` sale con cien avisos y tumba CI, acaba desactivado.
+
 ## Por modificar
 
 ### Comprobar el resultado de `pvPortMalloc` en los cuatro sitios que no lo hacen
@@ -366,6 +455,154 @@ en cuenta que `STATUSTEXT` corta el texto a 50 caracteres y que la pila de
 Conviene revisarlo junto a *[Compilación debug y release...]*: si la traza de
 protocolo acaba imprimiendo el `msgid` por consola, el formateo del número debería
 resolverse una sola vez y no en dos sitios.
+
+### El registro de la SD nunca guarda los datos de la batería
+
+**Estado:** definida
+**Ámbito:** `src/logger.cpp`
+
+En `src/logger.cpp` el inicializador de `Data` rellena `unixtime`, `uptime` y
+`system`, pero **no `energy`**. El fichero ni siquiera incluye `Battery.h` ni
+declara `extern Battery battery`. Al ser inicialización agregada, los miembros que
+faltan quedan a cero, así que `src/sdwrite.cpp` escribe `millivolts: 0` y
+`remaining: 0` en cada muestra, siempre.
+
+Es decir: la telemetría de energía **no está en ninguno de los `.mpk` grabados
+hasta ahora**, aunque el campo aparezca en el fichero. La tensión sí sale por
+MAVLink en `BATTERY_STATUS`, así que el fallo pasa desapercibido con el GCS
+delante; solo se nota al abrir los ficheros.
+
+El arreglo es declarar el `extern`, incluir la cabecera y rellenar `energy` con
+`battery.millivolts()` y `battery.remaining()`. `lib/Battery` ya cachea 125 ms, así
+que llamarlo a 1 Hz desde `TaskLogger` no añade lecturas de ADC.
+
+Al tocarlo, comprobar el high-water mark de `TaskLogger`: son 96 palabras, de las
+más ajustadas del proyecto.
+
+
+### El hook de desbordamiento de pila se cuelga antes de avisar
+
+**Estado:** definida
+**Ámbito:** `src/hooks.cpp`, `CLAUDE.md`
+
+`vApplicationStackOverflowHook()` hace `taskDISABLE_INTERRUPTS()` y a continuación
+`while (!Serial) {}`. El CDC USB necesita interrupciones para enumerar: sin un host
+conectado —o sea, en vuelo— ese bucle no termina nunca y la placa queda muerta
+**sin parpadear**. El `delay(2000)` posterior tiene el mismo problema, porque
+depende del tick, que también acaba de quedar sin interrupciones.
+
+O sea que el diagnóstico documentado solo funciona si ya había un PC enchufado, que
+es justo el caso en el que menos falta hace.
+
+Además el parpadeo son 2000 ms encendido y 2000 apagado: un periodo de 4 s, 0,25 Hz,
+no los 0,5 Hz que dice `CLAUDE.md`.
+
+Por decidir: si el aviso visual debe ir primero y el mensaje por serie después
+(solo si el puerto ya estaba listo), o si conviene mover el parpadeo a manipulación
+directa del registro del pin y un retardo por bucle de espera, sin depender de nada
+que necesite interrupciones. Hay que actualizar `CLAUDE.md` con la frecuencia real
+y con lo que realmente se puede esperar de este hook.
+
+Se solapa con *[Añadir un watchdog]*: si hay watchdog, quedarse aquí parpadeando
+para siempre deja de ser la respuesta obvia a un desbordamiento.
+
+
+### `uptime` desborda a los ~49,7 días
+
+**Estado:** propuesta
+**Ámbito:** `src/logger.cpp`, `include/Data.h`
+
+`uptime` se calcula como `xTaskGetTickCount() * portTICK_PERIOD_MS` sobre un
+`uint32_t`. Con `configTICK_RATE_HZ` a 1000 y ticks de 32 bits, el contador da la
+vuelta a los ~49,7 días. En una misión de meses el campo deja de significar nada
+justo cuando empieza a ser interesante.
+
+Los `vTaskDelayUntil` del firmware toleran el desbordamiento por diseño; el campo
+del log, no.
+
+Por decidir: llevar la cuenta de vueltas y guardar el uptime en 64 bits, o registrar
+en su lugar un contador de arranques más el tiempo desde el último, que además
+serviría para detectar los reinicios de *[Añadir un watchdog]*.
+
+
+### El fallo del registro en SD es silencioso
+
+**Estado:** propuesta
+**Ámbito:** `lib/SdData`, `src/sdwrite.cpp`, `src/mavlink.cpp`
+
+Si `SD.open` falla en `SdData::begin()`, el objeto queda sin fichero y `write()`
+retorna sin hacer nada indefinidamente. Ni `begin()` ni `write()` devuelven nada, y
+`TaskSdWrite` no puede distinguir «guardado» de «tirado a la basura».
+
+Resultado: se puede perder el registro completo de la misión sin un solo aviso por
+el enlace. `setup()` sí usa `configASSERT(SD.begin(9))`, pero eso solo cubre el
+arranque; una tarjeta que falle o se desmonte después pasa desapercibida.
+
+Por decidir: que `begin()`/`write()` devuelvan resultado y `TaskSdWrite` lo
+propague; y por dónde se entera tierra —un `STATUSTEXT`, un campo en el heartbeat
+de *[Reflejar el estado real del satélite en el heartbeat]*, o ambos—. Cuidado con
+no inundar el enlace repitiendo el aviso a 1 Hz.
+
+
+### `TaskSerialRead` sondea el puerto en lugar de esperar
+
+**Estado:** propuesta
+**Ámbito:** `src/serial.cpp`
+
+El bucle de `TaskSerialRead` vacía lo disponible y hace `vTaskDelay(10 ms)`. A
+57600 baudios eso son ~57 bytes por ciclo contra un búfer de recepción típico de
+64: el margen es mínimo, y a más velocidad se pierden bytes en silencio —lo que
+desde tierra se ve como tramas MAVLink corruptas intermitentes, de lo más difícil
+de diagnosticar.
+
+Encima la tarea es `PRIORITY_HIGHEST`, así que despierta cien veces por segundo
+aunque no haya nada que leer.
+
+Por decidir: si se pasa a una espera bloqueante de verdad (notificación de tarea
+desde la recepción, o semáforo) o simplemente se acorta el periodo de sondeo. Lo
+primero es lo correcto pero depende de lo que exponga el puerto elegido en
+*[Mover el enlace MAVLink a `Serial1`...]*, así que conviene resolverlo después de
+esa entrada.
+
+
+### Que Dependabot vigile también las librerías de PlatformIO
+
+**Estado:** definida
+**Ámbito:** `.github/dependabot.yml`
+
+`.github/dependabot.yml` solo declara el ecosistema `github-actions`. Las
+dependencias de `lib_deps` en `platformio.ini` —MAVLink, ArduinoJson, RTClib,
+Adafruit BusIO, SD, SolarCharger— no las vigila nadie: se actualizan cuando alguien
+se acuerda.
+
+Dependabot no tiene ecosistema para PlatformIO, así que hay que decidir la
+alternativa: fijar versiones en `lib_deps` y revisarlas a mano de forma periódica,
+o un job programado que compruebe si hay versiones nuevas y abra el aviso.
+
+Ligado a esto: `lib_deps` no fija versiones de ninguna librería. Reproducir una
+compilación de hace seis meses hoy no es posible, y una actualización rompiente de
+cualquiera de las seis entra en el siguiente `pio run` sin avisar.
+
+
+### Limpieza de restos menores
+
+**Estado:** definida
+**Ámbito:** `src/mavlink.cpp`, `src/logger.cpp`, `src/hooks.cpp`,
+`test/test_main.cpp`
+
+Cosas pequeñas, sin relación entre sí, que conviene quitar de en medio de una vez:
+
+- `src/mavlink.cpp` declara `extern RTC_DS1307 rtc;`, un global que no existe en
+  ningún sitio. No da error de enlace solo porque nadie lo usa.
+- `src/logger.cpp` inicializa `Data` con la sintaxis GNU de etiquetas
+  (`unixtime: ...`), una extensión que las versiones recientes de GCC rechazan en
+  C++. Los inicializadores designados de C++20 (`.unixtime = ...`) son el
+  equivalente estándar.
+- `test/test_main.cpp` usa `StaticJsonDocument`, deprecado en ArduinoJson 7,
+  mientras `src/sdwrite.cpp` ya usa `JsonDocument`.
+- La constante `TEST_FILE_SIZE_MB` del test vale `1024UL`, que son bytes, no
+  megabytes: el nombre engaña sobre lo que realmente se está probando.
+- Falta un espacio en `"Overflow on" + String(pcTaskName)` de `src/hooks.cpp`.
 
 ## Hecho
 
