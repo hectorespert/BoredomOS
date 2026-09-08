@@ -397,12 +397,98 @@ Lo mínimo es contestar siempre algo. Un `COMMAND_ACK` con
 Por decidir:
 
 - Qué comandos se soportan de verdad y cuáles se rechazan explícitamente.
-- Si se implementa el protocolo de parámetros (`PARAM_REQUEST_LIST` /
-  `PARAM_SET`) o se responde con una lista vacía. Tener parámetros ajustables desde
-  tierra —umbrales, cadencias— cambiaría bastante el proyecto: hoy todo está fijo
-  en el código.
-- Si `REQUEST_DATA_STREAM` debe poder cambiar la cadencia de la telemetría, hoy
-  clavada en `TaskHeartbeat` y `TaskMavlinkBatteryStatus`.
+- **`AUTOPILOT_VERSION` (148)**, en respuesta a
+  `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES` (520). Es lo que pregunta el GCS nada
+  más conectar para saber qué sabe hacer el vehículo; sin respuesta te trata como
+  un nodo mínimo. Barato de implementar y mejora todo lo demás.
+- **Cadencia de telemetría desde tierra.** Hoy está clavada en `TaskHeartbeat` y
+  `TaskMavlinkBatteryStatus`. Antes que implementar `REQUEST_DATA_STREAM`, que está
+  obsoleto, conviene ir a `MAV_CMD_SET_MESSAGE_INTERVAL` (511) con `MESSAGE_INTERVAL`
+  (244), que es el mecanismo actual. Importa con una radio estrecha, y más aún si
+  entra *[Descargar los ficheros de la SD por MAVLink FTP]* compitiendo por el
+  enlace.
+- El protocolo de parámetros tiene entrada propia:
+  *[Implementar el protocolo de parámetros MAVLink]*.
+
+
+### Emitir `SYS_STATUS`
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`, `include/Data.h`
+
+`SYS_STATUS` (1) es la ausencia más llamativa de la telemetría actual. Lleva los
+bitmasks `onboard_control_sensors_present`, `_enabled` y `_health`, la carga de CPU,
+tensión y porcentaje de batería, y contadores de errores de comunicación. Todos los
+GCS lo muestran en primer plano; hoy el satélite no manda nada de eso.
+
+Encaja con dos cosas que el firmware ya tiene a medias:
+
+- Los bitmasks de salud son el sitio donde expresar «la SD falló», «el RTC se
+  perdió», «la IMU no responde». Es justo lo que
+  *[Reflejar el estado real del satélite en el heartbeat]* quiere comunicar y el
+  `HEARTBEAT` no tiene campos para decir. Las dos entradas comparten la misma
+  fuente: hace falta un estado de salud centralizado, hoy inexistente.
+- `errors_count1..4` es donde llevar la cuenta de los `pvPortMalloc` fallidos de
+  *[Comprobar el resultado de `pvPortMalloc`...]* y de los envíos descartados por
+  cola llena, que ahora se pierden en silencio.
+
+Por decidir: qué subsistemas se declaran en `present`/`enabled` (la enumeración
+`MAV_SYS_STATUS_SENSOR` no tiene entradas para «tarjeta SD» ni «RTC», así que hay
+que elegir las más cercanas o aceptar que algunas cosas solo se cuenten por
+`STATUSTEXT`), y a qué cadencia se emite.
+
+
+### Implementar el protocolo de parámetros MAVLink
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`, `lib/` (almacenamiento), `platformio.ini`
+
+`PARAM_REQUEST_LIST` (21) → `PARAM_VALUE` (22), más `PARAM_REQUEST_READ` (20) y
+`PARAM_SET` (23). Para un satélite que no se puede reflashear, es lo que más
+capacidad añade de toda la lista: convierte en ajustables desde tierra cosas que
+hoy están clavadas en el código —umbrales de batería, cadencias de telemetría,
+tamaño del anillo de `lib/SdData`, y los offsets de calibración del magnetómetro
+cuando entre *[Añadir la IMU GY-87]*—.
+
+Efecto colateral inmediato: MAVProxy se queda en «waiting for parameters» hasta que
+alguien contesta a `PARAM_REQUEST_LIST`. Aunque sea con una lista vacía, hay que
+responder.
+
+Por decidir:
+
+- **Dónde persisten.** La R4 tiene memoria de datos no volátil, y también está la
+  SD ya montada. Cada opción tiene su riesgo: la SD puede fallar (ver *[El fallo del
+  registro en SD es silencioso]*) y dejar al satélite sin configuración.
+- **Qué pasa si un parámetro se corrompe.** Valores por defecto compilados y
+  validación de rango al cargarlos, o se acepta lo que haya.
+- **Qué es parámetro y qué no.** Todo ajustable desde tierra es también todo
+  rompible desde tierra: un umbral mal puesto puede dejar el satélite inservible.
+- El envío de la lista completa no puede monopolizar el enlace ni la cola de
+  escritura: hay que trocearlo, no volcar todos los `PARAM_VALUE` de golpe.
+
+
+### Publicar el mantenimiento en vivo con `NAMED_VALUE_INT` / `NAMED_VALUE_FLOAT`
+
+**Estado:** propuesta
+**Ámbito:** `src/mavlink.cpp`, `src/logger.cpp`
+
+Todo el registro de mantenimiento existe para dimensionar las pilas, y hoy solo se
+puede consultar sacando la tarjeta de la placa. `NAMED_VALUE_INT` (252) y
+`NAMED_VALUE_FLOAT` (251) permiten publicar por el enlace el heap libre y los
+high-water marks de cada tarea, en vivo, sin inventar mensajes propios ni tocar el
+esquema de los `.mpk`.
+
+Es la forma barata de cerrar el bucle que describe `CLAUDE.md`: «los high-water
+marks existen para dimensionar las pilas; revísalos tras cambiar el cuerpo de una
+tarea». Con esto se revisan con la placa montada, en vez de a posteriori.
+
+Por decidir: qué valores se publican y a qué ritmo —son ocho campos y el nombre va
+en 10 caracteres por mensaje, así que a 1 Hz esto solo no es gratis en un enlace
+estrecho—, y si conviene que sea exclusivo del perfil de
+*[Compilación debug y release...]*.
+
+Alternativa parcial: `MEMINFO` (152) para el heap, aunque es específico de ArduPilot
+y no cubre las pilas por tarea.
 
 
 ### Añadir análisis estático a CI
@@ -649,6 +735,42 @@ o un job programado que compruebe si hay versiones nuevas y abra el aviso.
 Ligado a esto: `lib_deps` no fija versiones de ninguna librería. Reproducir una
 compilación de hace seis meses hoy no es posible, y una actualización rompiente de
 cualquiera de las seis entra en el siguiente `pio run` sin avisar.
+
+
+### Revisar el contenido de los mensajes que ya se emiten
+
+**Estado:** definida
+**Ámbito:** `src/mavlink.cpp`
+
+Los cuatro mensajes que el satélite emite hoy salen con campos vacíos, constantes o
+directamente engañosos. No hace falta hardware nuevo para arreglar buena parte:
+
+- **`STATUSTEXT` está mal usado, no solo mal formateado.** Aparte del bug de
+  *[Corregir la aritmética de punteros...]*, el problema de diseño es que el
+  `default` del `switch` responde con un mensaje de texto a tierra **por cada
+  mensaje entrante no contemplado**. Un GCS hablador manda continuamente cosas que
+  el `switch` no cubre (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`,
+  `MISSION_COUNT`...), así que el satélite se dedica a inundar un enlace estrecho
+  quejándose. Quitarlo de ahí y reservar `STATUSTEXT` para lo que merece aviso:
+  resultado de la inicialización al arrancar, fallo de la SD, causa del último
+  reinicio.
+- **`BATTERY_STATUS` va casi vacío:** `current_battery`, `current_consumed` y
+  `energy_consumed` a `-1`, `time_remaining` a `0`, `temperature` a `INT16_MAX` y
+  `charge_state` a `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Dos se pueden rellenar sin
+  hardware adicional en cuanto entren *[Añadir la IMU GY-87]* (temperatura) y
+  *[Detectar cuándo la batería está cargando]* (estado de carga). `time_remaining`
+  requiere medir corriente.
+- **`HEARTBEAT` declara cosas que no son:** `MAV_MODE_FLAG_SAFETY_ARMED |
+  MAV_MODE_FLAG_AUTO_ENABLED` fijos y `custom_mode` a 0, pase lo que pase. El estado
+  lo cubre *[Reflejar el estado real del satélite en el heartbeat]*; los flags de
+  modo son decisión aparte.
+- **`MAV_TYPE_ROCKET` es discutible.** No existe `MAV_TYPE_SATELLITE`, pero
+  `MAV_TYPE_GENERIC` describe mejor un CubeSat que un cohete, y cambia cómo lo pinta
+  el GCS. Conviene decidirlo pronto: `CLAUDE.md` lo fija como identidad del bus y
+  cuanto más código lo asuma, más cuesta cambiarlo.
+- **`SYSTEM_TIME` a 1 Hz es mucho** para algo que casi nunca cambia de forma
+  interesante. Si entra `MAV_CMD_SET_MESSAGE_INTERVAL` en
+  *[Responder a los mensajes del GCS que hoy se ignoran]*, esto se resuelve solo.
 
 
 ### Limpieza de restos menores
