@@ -10,6 +10,9 @@ Firmware for a CubeSat (hardware based on https://www.thingiverse.com/thing:4096
 mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
 ```
 
+Planned and in-progress work is tracked in [TODO.md](TODO.md); check it before starting a
+feature, and add or update the entry there when one is defined or finished.
+
 ## Commands
 
 ```bash
