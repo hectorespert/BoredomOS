@@ -18,42 +18,6 @@ pointers travelling through the queue.
 
 ## To implement
 
-### Move the MAVLink link to `Serial1` and leave USB as the debug console
-
-**Status:** defined
-**Scope:** `src/serial.cpp`, `src/mavlink.cpp`, `src/main.cpp`, `src/hooks.cpp`, `platformio.ini`, `README.md`
-
-Today MAVLink and debugging share the same port: `Serial` (USB CDC) carries the
-binary frames, so the serial monitor is unreadable and any debug `print` would
-corrupt the link. This feature separates both uses:
-
-- The MAVLink link moves to the `Serial1` hardware UART (pins D0 `RX` / D1 `TX` of
-  the UNO R4 Minima), which is where the telemetry radio will be connected.
-- `Serial` (USB) is freed up as a text console: debugging, Unity output under
-  `pio test` and the stack overflow message of `src/hooks.cpp`.
-
-Points to resolve while implementing it:
-
-- The link port is chosen in **one single place** (an alias or `#define` in
-  `include/`, not `Serial1` repeated in every `.cpp`), so that going back to USB
-  does not touch the protocol logic.
-- Link speed: `Serial1.begin(...)` with the radio's baud rate (MAVLink telemetry
-  usually runs at 57600, not 115200). Whether it is fixed or a `build_flag` is
-  still to be decided.
-- The `while (!Serial)` guards in `src/serial.cpp` and the `waitSerial()` of
-  `src/mavlink.cpp` exist because the USB CDC is not ready until the host opens the
-  port. On a hardware UART that guard is a no-op, so it has to be removed or
-  replaced by whatever wait is appropriate, without leaving tasks spinning.
-- `Serial.begin()` stays in `setup()` for the console, but **no task may block
-  waiting for `Serial`**: the board has to work in flight with no USB attached.
-- Whatever is written to the console must not be written from several tasks without
-  control; decide whether it is accessed directly or through a queue, consistently
-  with the rest of the firmware.
-- Document the port change on the ground side in `README.md`: `mavproxy.py
-  --master=<radio port>` instead of `/dev/ttyACM0`.
-- Review `test/test_main.cpp`: once USB is freed, Unity output stops being mixed
-  with MAVLink frames.
-
 ### Add the GY-87 IMU
 
 **Status:** proposed
@@ -262,7 +226,7 @@ messages come in and go out without a GCS on the other end interpreting them. Th
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on *[Move the MAVLink link to `Serial1`...]*: while the binary frames keep
+Depends on the `move-mavlink-link-to-serial1` change: while the binary frames keep
 going over USB there is no console port to write the trace to.
 
 What it should trace, per message: direction (inbound/outbound), `msgid` — by name
@@ -807,8 +771,10 @@ even when there is nothing to read.
 
 To decide: whether it moves to a genuinely blocking wait (a task notification from
 the receive path, or a semaphore) or the polling period is simply shortened. The
-former is the right answer but depends on what the port chosen in *[Move the MAVLink
-link to `Serial1`...]* exposes, so it is better resolved after that entry.
+former is the right answer but depends on what the port chosen in the
+`move-mavlink-link-to-serial1` change exposes, so it is better resolved after it.
+Note that the premise above needs re-checking: `SERIAL_BUFFER_SIZE` on this core is
+512, not 64, and the ring is filled by the receive ISR, so a late task loses nothing.
 
 
 ### Have Dependabot watch the PlatformIO libraries too
