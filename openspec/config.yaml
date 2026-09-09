@@ -1,32 +1,79 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context. Shown to AI when creating artifacts. 50 KB limit.
+context: |
+  BoredomOS is the flight firmware of a CubeSat: Arduino UNO R4 Minima
+  (Renesas RA4M1, Cortex-M4 at 48 MHz, 32 KB RAM) running FreeRTOS, built with
+  PlatformIO. It presents itself to the ground station as a MAVLink vehicle over
+  USB CDC at 115200; MAVProxy is the reference GCS. There are no control loops,
+  no dynamic configuration, and no filesystem beyond a fixed ring of SD log files.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Three documents divide the work, and a change should not blur them:
+  - ARCHITECTURE.md is the single source of truth for the design — structure and
+    why. Read it before proposing anything, and update it in the same change when
+    it becomes inaccurate.
+  - TODO.md is the backlog: what is planned but not yet built, one entry per
+    feature or defect, in English, defined before any code is written.
+  - openspec/ holds the change being implemented right now, and the specs that
+    describe behaviour once it is archived.
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  Hard constraints every proposal must respect:
+  - 8 KB of FreeRTOS heap (configTOTAL_HEAP_SIZE 0x2000, out of 32 KB of RAM).
+    Task stacks, TCBs and every queued message come out of it, and it is nearly
+    fully committed today. A new task costs 4 x stack_words + 112 bytes. Adding a
+    library or a task is a decision, not a detail.
+  - Queues carry heap pointers, never values. The producer pvPortMallocs, checks
+    the result for NULL, and vPortFrees if xQueueSend does not return pdPASS; the
+    consumer frees after use. A leak is fatal within minutes.
+  - Stack sizes in xTaskCreate are words, not bytes, and are tuned tight (96-256).
+  - Four priority levels, from include/Priority.h, never raw numbers.
+  - Adding a subsystem is three edits: the task body in a new src/*.cpp reaching
+    shared objects via extern, a [[noreturn]] extern declaration in src/main.cpp,
+    and an xTaskCreate there. Tasks and queues are created nowhere else.
+  - One owner per resource: src/serial.cpp the UART, src/sdwrite.cpp the card,
+    lib/SystemTime the clocks, lib/Battery the ADC. Everything else goes through a
+    queue or the library wrapper — this is what makes the absence of mutexes safe.
+  - Every outbound MAVLink message uses system id 1, MAV_COMP_ID_AUTOPILOT1,
+    MAV_TYPE_ROCKET.
+  - Wiring is hardcoded (SD CS on 9, battery on A0, DS1307 on I2C). A new pin must
+    be documented in ARCHITECTURE.md.
+  - configASSERT in setup() halts the board on a missing RTC, SD card or queue.
+    Do not propose softening it into a degraded boot as a side effect.
+
+  Verification: `pio run` is all that CI runs. There is no host or native test
+  environment — test/test_main.cpp asserts against a real battery, a real DS1307
+  and a real SD card, so `pio test` builds, flashes and runs on the board itself
+  (about 25 s for the 5 cases) and cannot run in CI. Running it reflashes the
+  board with the test binary and wipes data*.mpk and index.bin from the card, so
+  it is not a read-only check. A change touching lib/ or a task body is not
+  verified by building it; tasks must say which steps need the board.
+
+# Per-artifact rules.
+rules:
+  proposal:
+    - Any proposal that adds a task, a queue or a library must state its RAM cost
+      against the 8 KB FreeRTOS heap. A task costs 4 x stack_words + 112 bytes.
+    - State explicitly when a change alters the MAVLink surface (new message id,
+      new stream rate, changed identity triple).
+  design:
+    - Name which file owns each resource the change touches, and keep it to one
+      owner. Reaching a peripheral from a second file is what would force mutexes.
+  tasks:
+    - Mark every step that needs the assembled board. `pio run` is the only check
+      that runs without hardware.
+    - A change touching lib/ or a task body needs a `pio test` run and a look at
+      the high-water marks in the SD log before it is called done.
+
+# Advisory guidance, injected when these operations run.
+operations:
+  apply:
+    guidance:
+      - Never report a task body or a lib/ change as verified on the basis of a
+        successful build. Say what was and was not run.
+      - '`pio test` reflashes the board with the test binary and wipes data*.mpk
+        and index.bin from the card. Ask before running it, and reflash with
+        `pio run -t upload` afterwards if the board should stay operational.'
+  archive:
+    guidance:
+      - Update ARCHITECTURE.md in the same change when it becomes inaccurate, and
+        close out the matching TODO.md entry.

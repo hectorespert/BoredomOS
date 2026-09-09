@@ -507,16 +507,42 @@ towards the SD log) or whether silently skipping the send is enough.
 **Status:** defined
 **Scope:** `src/main.cpp`, `src/serial.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
-`configTOTAL_HEAP_SIZE` on this port is `0x2000` — 8 KB — and task stacks and TCBs
-come out of that same heap. The seven tasks add up to 1152 words (4608 bytes) plus
-around 700 bytes of TCBs, so roughly 5.3 KB are gone before `loop()` would ever run,
-leaving about 2.7 KB.
+`configTOTAL_HEAP_SIZE` on this port is `0x2000` — 8 KB — and task stacks, TCBs and
+the queue structures themselves all come out of that same heap. With this
+configuration a TCB is 96 bytes, and `heap_4` adds an 8-byte header to every block
+and rounds up to 8, so **a task costs `4 × stack_words + 112` bytes**. The full
+accounting at boot:
+
+| | Bytes |
+|---|---|
+| The seven tasks (1152 words of stack in total) | 5392 |
+| Idle task (128 words, `configMINIMAL_STACK_SIZE`) | 624 |
+| Timer daemon (128 words) and its command queue | 864 |
+| The three queue structures (`Queue_t` is 68 bytes, plus 16 × 4) | 432 |
+| **Committed** | **7312** |
+| **Free** | **~870** |
 
 Every message travelling through `serialReadQueue` and `serialWriteQueue` is a
-`mavlink_message_t` of ~290 bytes on the heap. That is around nine messages in
-flight in the best case, against the depth 16 that `src/main.cpp:61` and
-`src/main.cpp:64` declare for each of the two queues. The 32 slots are unreachable:
-`pvPortMalloc` fails long before a queue reports itself full.
+`mavlink_message_t`, which is packed and measures 291 bytes — 304 as a heap block.
+So the real ceiling is **two or three messages in flight**, against the depth 16
+that `src/main.cpp:61` and `src/main.cpp:64` declare for each of the two queues. The
+32 slots are unreachable by a wide margin: `pvPortMalloc` fails long before a queue
+reports itself full.
+
+Two findings from the accounting that were not obvious before:
+
+- Nothing in `src/`, `lib/` or the dependencies calls `xTimerCreate`. The timer
+  daemon and its queue are 864 bytes paid for a feature the firmware does not use,
+  and `-D configUSE_TIMERS=0` reclaims them outright.
+- There is more RAM headroom than the 32 KB figure suggests. `arm-none-eabi-nm`
+  puts `ucHeap` (8 KB) inside `.bss`, `g_heap` — the separate newlib malloc heap —
+  at `0x20003ce0` (another 8 KB), and `g_main_stack` (1 KB) at `0x20007b00`, which
+  leaves **7712 bytes between them that no section claims**. The RAM percentage
+  PlatformIO prints after a build counts none of those three.
+
+These numbers are computed from the map file and the kernel headers, not measured on
+the board. The free-heap field `TaskLogger` already writes to the SD log is the
+check.
 
 The consequence is not a full queue with a clean `vPortFree`, which the code does
 handle, but a `NULL` allocation — see *[Check the result of `pvPortMalloc`...]* —
@@ -532,7 +558,7 @@ To decide:
 - Whether it is worth queueing the serialised frame instead of the whole
   `mavlink_message_t`: `mavlink_msg_to_send_buffer` already runs in
   `TaskSerialWrite`, and the wire frame of a typical message is far smaller than the
-  290-byte struct.
+  291-byte struct.
 - Whether the free heap and the failed allocations reach the ground, which is what
   *[Emit `SYS_STATUS`]* proposes with `errors_count1..4`.
 
