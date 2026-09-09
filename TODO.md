@@ -889,6 +889,45 @@ Small, unrelated things worth getting out of the way in one go:
   4 GiB and never rotates]*.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
+### The tests do not link FreeRTOS, so nothing covers the tasks
+
+**Status:** defined
+**Scope:** `platformio.ini`, `test/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
+
+`test_build_src` defaults to `False` in PlatformIO, and `platformio.ini` does not
+set it. `src/` is therefore not compiled into the test binary: no `main.cpp`, no
+`xTaskCreate`, no `vTaskStartScheduler`. The five cases link `Battery`,
+`SystemTime` and `SdData` against the Arduino core and nothing else.
+
+The section sizes confirm it. The application firmware has a `.bss` of 14824 bytes,
+which contains `ucHeap`; the test firmware built from the same tree has a `.bss` of
+4608 bytes, too small to hold an 8192-byte array. The FreeRTOS heap is not in the
+test binary because FreeRTOS is not in the test binary.
+
+The consequence is that `pio test` covers the libraries in isolation and **cannot
+observe the RTOS at all**: not a stack size, not a queue depth, not the pointer
+ownership protocol, not a high-water mark, not the overflow hook. Those are exactly
+the invariants that are easiest to break silently, and the ones `CLAUDE.md` and
+`openspec/config.yaml` currently imply a test run would catch. A green `pio test`
+after changing a task body means nothing about that task body.
+
+To decide:
+
+- Whether `test_build_src = yes` is the answer. It would pull `src/main.cpp` into
+  the test binary, and with it a second `setup()` competing with Unity's, so it
+  needs a guard (`#ifndef PIO_UNIT_TESTING` around the task creation, or moving the
+  scheduler start out of `setup()`).
+- Whether the RTOS is worth testing on-target at all, or whether the honest fix is
+  to state the gap in `CLAUDE.md` and `ARCHITECTURE.md` and keep relying on the SD
+  log's high-water marks as the only evidence that the stacks fit.
+- Whether a separate test environment is better than one binary: a `[env:...]` with
+  its own `test_build_src` would keep the current library tests fast and let a
+  second suite exercise the task graph.
+
+Until this is settled, the guidance in `CLAUDE.md` and the `tasks` rule in
+`openspec/config.yaml` overstate what a test run proves for a change to a task
+body, and both should be narrowed to `lib/`.
+
 ## Done
 
 ### Write the architecture document
