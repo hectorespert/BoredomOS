@@ -16,6 +16,16 @@ Planned and in-progress work is tracked in [TODO.md](TODO.md); check it before s
 feature, and add or update the entry there when one is defined or finished. Entries are
 written in English, one per feature or defect, and defined before any code is written.
 
+Three places hold planning, and they do not overlap. **`ARCHITECTURE.md` is structure and
+why** — how the firmware is put together, and the constraints behind it. **`TODO.md` is the
+backlog** — everything planned that nobody is implementing right now. **`openspec/` is the
+change in flight**: when a `TODO.md` entry is picked up, `/opsx:propose` turns it into a
+change under `openspec/changes/` with its proposal, design, spec deltas and tasks; the
+`TODO.md` entry moves to `in progress` and names the change id. Archiving the change moves
+the entry to *Done* and leaves the behaviour described in `openspec/specs/`, which fills up
+as changes are archived rather than being written up front. Do not open a change for an
+entry that is not being implemented, and do not restate the architecture in a spec.
+
 ## Commands
 
 ```bash
@@ -25,9 +35,11 @@ pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text
 pio test                 # Unity tests — ON DEVICE ONLY, needs board + DS1307 + SD card
 ```
 
-There is no host/native test environment: `test/test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so tests cannot run in CI or on a dev machine. All test cases live in one file and are dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines — `pio test -f` filters test *directories*, of which there is only one.
+There is no host/native test environment: `test/test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so tests never run in CI. They do run on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All test cases live in one file and are dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines — `pio test -f` filters test *directories*, of which there is only one.
 
-Since the tests cannot run here, a change that touches `lib/` or a task body is not verified by building it. Say so rather than implying it was tested.
+`pio test` is not a read-only check: it reflashes the board with the test binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational.
+
+A change that touches `lib/` or a task body is not verified by building it. Run the tests on the board, or say plainly that you did not.
 
 ## Conventions when editing
 

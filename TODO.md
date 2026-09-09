@@ -507,16 +507,42 @@ towards the SD log) or whether silently skipping the send is enough.
 **Status:** defined
 **Scope:** `src/main.cpp`, `src/serial.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
-`configTOTAL_HEAP_SIZE` on this port is `0x2000` — 8 KB — and task stacks and TCBs
-come out of that same heap. The seven tasks add up to 1152 words (4608 bytes) plus
-around 700 bytes of TCBs, so roughly 5.3 KB are gone before `loop()` would ever run,
-leaving about 2.7 KB.
+`configTOTAL_HEAP_SIZE` on this port is `0x2000` — 8 KB — and task stacks, TCBs and
+the queue structures themselves all come out of that same heap. With this
+configuration a TCB is 96 bytes, and `heap_4` adds an 8-byte header to every block
+and rounds up to 8, so **a task costs `4 × stack_words + 112` bytes**. The full
+accounting at boot:
+
+| | Bytes |
+|---|---|
+| The seven tasks (1152 words of stack in total) | 5392 |
+| Idle task (128 words, `configMINIMAL_STACK_SIZE`) | 624 |
+| Timer daemon (128 words) and its command queue | 864 |
+| The three queue structures (`Queue_t` is 68 bytes, plus 16 × 4) | 432 |
+| **Committed** | **7312** |
+| **Free** | **~870** |
 
 Every message travelling through `serialReadQueue` and `serialWriteQueue` is a
-`mavlink_message_t` of ~290 bytes on the heap. That is around nine messages in
-flight in the best case, against the depth 16 that `src/main.cpp:61` and
-`src/main.cpp:64` declare for each of the two queues. The 32 slots are unreachable:
-`pvPortMalloc` fails long before a queue reports itself full.
+`mavlink_message_t`, which is packed and measures 291 bytes — 304 as a heap block.
+So the real ceiling is **two or three messages in flight**, against the depth 16
+that `src/main.cpp:61` and `src/main.cpp:64` declare for each of the two queues. The
+32 slots are unreachable by a wide margin: `pvPortMalloc` fails long before a queue
+reports itself full.
+
+Two findings from the accounting that were not obvious before:
+
+- Nothing in `src/`, `lib/` or the dependencies calls `xTimerCreate`. The timer
+  daemon and its queue are 864 bytes paid for a feature the firmware does not use,
+  and `-D configUSE_TIMERS=0` reclaims them outright.
+- There is more RAM headroom than the 32 KB figure suggests. `arm-none-eabi-nm`
+  puts `ucHeap` (8 KB) inside `.bss`, `g_heap` — the separate newlib malloc heap —
+  at `0x20003ce0` (another 8 KB), and `g_main_stack` (1 KB) at `0x20007b00`, which
+  leaves **7712 bytes between them that no section claims**. The RAM percentage
+  PlatformIO prints after a build counts none of those three.
+
+These numbers are computed from the map file and the kernel headers, not measured on
+the board. The free-heap field `TaskLogger` already writes to the SD log is the
+check.
 
 The consequence is not a full queue with a clean `vPortFree`, which the code does
 handle, but a `NULL` allocation — see *[Check the result of `pvPortMalloc`...]* —
@@ -532,7 +558,7 @@ To decide:
 - Whether it is worth queueing the serialised frame instead of the whole
   `mavlink_message_t`: `mavlink_msg_to_send_buffer` already runs in
   `TaskSerialWrite`, and the wire frame of a typical message is far smaller than the
-  290-byte struct.
+  291-byte struct.
 - Whether the free heap and the failed allocations reach the ground, which is what
   *[Emit `SYS_STATUS`]* proposes with `errors_count1..4`.
 
@@ -862,6 +888,45 @@ Small, unrelated things worth getting out of the way in one go:
   the name misleads about what is really being tested. See *[The default SD ring is
   4 GiB and never rotates]*.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
+
+### The tests do not link FreeRTOS, so nothing covers the tasks
+
+**Status:** defined
+**Scope:** `platformio.ini`, `test/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
+
+`test_build_src` defaults to `False` in PlatformIO, and `platformio.ini` does not
+set it. `src/` is therefore not compiled into the test binary: no `main.cpp`, no
+`xTaskCreate`, no `vTaskStartScheduler`. The five cases link `Battery`,
+`SystemTime` and `SdData` against the Arduino core and nothing else.
+
+The section sizes confirm it. The application firmware has a `.bss` of 14824 bytes,
+which contains `ucHeap`; the test firmware built from the same tree has a `.bss` of
+4608 bytes, too small to hold an 8192-byte array. The FreeRTOS heap is not in the
+test binary because FreeRTOS is not in the test binary.
+
+The consequence is that `pio test` covers the libraries in isolation and **cannot
+observe the RTOS at all**: not a stack size, not a queue depth, not the pointer
+ownership protocol, not a high-water mark, not the overflow hook. Those are exactly
+the invariants that are easiest to break silently, and the ones `CLAUDE.md` and
+`openspec/config.yaml` currently imply a test run would catch. A green `pio test`
+after changing a task body means nothing about that task body.
+
+To decide:
+
+- Whether `test_build_src = yes` is the answer. It would pull `src/main.cpp` into
+  the test binary, and with it a second `setup()` competing with Unity's, so it
+  needs a guard (`#ifndef PIO_UNIT_TESTING` around the task creation, or moving the
+  scheduler start out of `setup()`).
+- Whether the RTOS is worth testing on-target at all, or whether the honest fix is
+  to state the gap in `CLAUDE.md` and `ARCHITECTURE.md` and keep relying on the SD
+  log's high-water marks as the only evidence that the stacks fit.
+- Whether a separate test environment is better than one binary: a `[env:...]` with
+  its own `test_build_src` would keep the current library tests fast and let a
+  second suite exercise the task graph.
+
+Until this is settled, the guidance in `CLAUDE.md` and the `tasks` rule in
+`openspec/config.yaml` overstate what a test run proves for a change to a task
+body, and both should be narrowed to `lib/`.
 
 ## Done
 
