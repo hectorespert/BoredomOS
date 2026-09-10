@@ -1,19 +1,25 @@
+"""TIMESYNC is answered.
+
+Covers the mavlink-link scenario about TIMESYNC. The sub-second part of the reply
+is expected to be zero: SystemTime has one-second resolution, which is a known
+limitation tracked in TODO.md, not a defect of the link.
+"""
+
 import time
-from pymavlink import mavutil
-m = mavutil.mavlink_connection('/dev/ttyACM0', baud=115200, source_system=255, source_component=190)
-m.recv_match(type='HEARTBEAT', blocking=True, timeout=5)
-ts1 = int(time.time() * 1e9)
-m.mav.timesync_send(0, ts1)
-print("-> TIMESYNC(tc1=0, ts1=%d) enviado" % ts1)
-t0 = time.time(); reply = None
-while time.time() - t0 < 5:
-    msg = m.recv_match(type='TIMESYNC', blocking=True, timeout=1)
-    if msg and msg.tc1 != 0:
-        reply = msg; break
-if reply:
-    print("respuesta: tc1=%d" % reply.tc1)
-    print("  ts1 devuelto intacto:", reply.ts1 == ts1)
-    print("  tc1 como fecha:", time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(reply.tc1/1e9)))
-    print("  parte sub-segundo de tc1:", reply.tc1 % 1_000_000_000, "(0 = resolucion de 1 s, backlog conocido)")
-else:
-    print("respuesta: NINGUNA")
+
+
+def test_timesync_is_answered(link):
+    ts1 = int(time.time() * 1e9)
+    link.mav.mav.timesync_send(0, ts1)
+
+    reply = None
+    started = time.time()
+    while time.time() - started < 5.0:
+        msg = link.mav.recv_match(type="TIMESYNC", blocking=True, timeout=1.0)
+        if msg and msg.tc1 != 0:
+            reply = msg
+            break
+
+    assert reply is not None, "TIMESYNC with tc1 == 0 was not answered"
+    assert reply.ts1 == ts1, f"ts1 was not echoed back: sent {ts1}, got {reply.ts1}"
+    assert reply.tc1 > 0, "reply carries no timestamp"
