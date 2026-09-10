@@ -18,8 +18,8 @@ board is unreachable.
   contains no `xQueueRegistry`, no `xTimerQueue` and no `pxCurrentTimerList` — the
   registry disappears because `timers.c` was its only caller, so this confirms both
   facilities are gone rather than one
-- [ ] 1.4 Set `-D configTOTAL_HEAP_SIZE=0x1800` and verify `pio run` succeeds and `nm`
-  reports `ucHeap` at 6144 bytes. This precedes the conversion on purpose: doing it
+- [ ] 1.4 Set `-D configTOTAL_HEAP_SIZE=0x1800` and verify `pio run` succeeds and
+  `arm-none-eabi-nm -S` reports `ucHeap` at 6144 bytes. This precedes the conversion on purpose: doing it
   afterwards leaves an intermediate with about 600 bytes of unclaimed RAM, where any
   overflow surfaces as the opaque section-overlap error of task 5.2. The intermediate
   produced here is not runnable — 6144 bytes cannot back seven tasks still created
@@ -76,14 +76,22 @@ board is unreachable.
 
 - [ ] 5.1 Add a PlatformIO `extra_scripts` post-build step that sums `.data`, `.bss`,
   `.heap`, the main stack and the vector table against `RAM_LENGTH` from
-  `memory_regions.ld` and fails with the shortfall in bytes, and verify it passes on
-  the current tree and reports the right figure when given a deliberately inflated
-  input. Without it the build's own diagnostic names no size: `fsp.ld` places `.heap`
-  and `.stack_dummy` at absolute addresses, which defeats ld's region accounting.
+  `memory_regions.ld`, prints the true commitment and the headroom on every build, and
+  fails with a non-zero result and the shortfall in bytes when the headroom falls below
+  a declared minimum. Verify it passes on the current tree, prints the expected
+  figures, and fails with the right shortfall when the minimum is temporarily raised
+  above the actual headroom. Note what it is and is not for: because `fsp.ld` places
+  `.heap` and `.stack_dummy` at absolute addresses, an actual overflow already fails
+  the link — but as a section-overlap message naming two addresses, no size and not the
+  object that did not fit, and a post-build step never runs after a failed link. This
+  check exists to fail *before* that point, while the numbers are still legible.
 - [ ] 5.2 Temporarily add an eighth task — declared, given static storage, **and
   created with `xTaskCreateStatic`** — whose stack cannot fit in the RAM that remains,
-  and verify the build fails and that the post-build check names the shortfall in
-  bytes. Declaring the storage without creating the task is not sufficient:
+  and verify the build fails. Confirm both halves of the behaviour: with the headroom
+  minimum in place the post-build check fails first and names the shortfall in bytes;
+  with it lowered, the link itself fails with the bare section-overlap message, which
+  is the diagnostic 5.1 exists to pre-empt. Declaring the storage without creating the
+  task is not sufficient:
   `--gc-sections` and dead-store elimination remove an unused array and the build goes
   green at an unchanged RAM figure. Remove the task afterwards and verify `pio run`
   succeeds again.

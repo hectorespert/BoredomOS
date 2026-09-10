@@ -14,17 +14,20 @@ The RAM total that the build reports SHALL include every task stack, every task
 control block and every queue structure individually, so that the total rises when a
 task is added and falls when one is removed.
 
-A build whose total RAM commitment exceeds what the device has SHALL fail, produce no
-firmware image, and report the shortfall in bytes.
+A build whose total RAM commitment exceeds what the device has, or leaves less than a
+declared minimum of headroom, SHALL fail with a non-zero result and report the
+shortfall in bytes. It SHALL NOT be necessary to read the linker's own diagnostic to
+learn the size.
 
 #### Scenario: A task is added that does not fit
 
 - **WHEN** a task is created whose stack cannot be accommodated in the RAM that
   remains
-- **THEN** the build fails
+- **THEN** the build fails with a non-zero result
 - **AND** it identifies the RAM overrun and the number of bytes by which the commitment
-  exceeds the device's RAM
-- **AND** no firmware image is produced
+  exceeds what is available
+- **AND** any image left on disk by a partially successful build is reported as
+  over-budget rather than treated as valid
 
 #### Scenario: A task is added that does fit
 
