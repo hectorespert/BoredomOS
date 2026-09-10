@@ -506,9 +506,10 @@ To decide:
   `mavlink_message_t`: `mavlink_msg_to_send_buffer` already runs in
   `TaskSerialWrite`, and the wire frame of a typical message is far smaller than the
   291-byte struct. Two routes, and they differ: the serialised frame is still a heap
-  pointer, while *[Queue the message intent by value instead of a packed
-  `mavlink_message_t`]* removes the allocation entirely. That entry owns the
-  question now.
+  pointer allocated per message, while *[Queue the message intent by value instead of
+  a packed `mavlink_message_t`]* removes the **per-message** `pvPortMalloc` and
+  `vPortFree` churn — the queue's own storage is still heap, reserved once at
+  `xQueueCreate`. That entry owns the question now.
 - Whether the free heap and the failed allocations reach the ground, which is what
   *[Emit `SYS_STATUS`]* proposes with `errors_count1..4`.
 

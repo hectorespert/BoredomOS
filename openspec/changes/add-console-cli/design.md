@@ -7,8 +7,11 @@ tree and the installed toolchain:
   `main()` calls `Serial.begin(115200)` before `setup()`, and since the link moved to
   `Serial1` nothing writes to it. `ARCHITECTURE.md:261` records it as **no owner**.
 - Every knob in the port's `FreeRTOSConfig.h` is `#ifndef`-guarded, so
-  `configUSE_TRACE_FACILITY` and `INCLUDE_eTaskGetState` can be turned on from
-  `build_flags` exactly like the two `INCLUDE_*` flags already in `platformio.ini`.
+  `configUSE_TRACE_FACILITY` can be turned on from `build_flags` exactly like the two
+  `INCLUDE_*` flags already in `platformio.ini`. That one flag is the whole cost:
+  `INCLUDE_eTaskGetState` is not required, because `uxTaskGetSystemState` derives
+  `eCurrentState` from the list each task is queued on rather than calling
+  `eTaskGetState`.
 - `configUSE_TIMERS` is 1 and `configUSE_MUTEXES` is 0. So the timer-service task
   exists today and appears in `ps`, and there is no priority inheritance — a task has
   one priority, not a base and a current one. `TODO.md`'s *[The two serial queues

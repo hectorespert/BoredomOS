@@ -6,10 +6,9 @@ check that runs without hardware.
 - [ ] 1.1 Add `-D configUSE_TRACE_FACILITY=1` to `[env:uno_r4_minima]` `build_flags`
       in `platformio.ini`, beside the existing `INCLUDE_*` flags; verify `pio run`
       still builds all three environments clean under `-Wall -Wextra`.
-      `INCLUDE_eTaskGetState` was planned here and dropped during implementation:
-      `uxTaskGetSystemState` fills `eCurrentState` from the list each task sits in and
-      never calls `eTaskGetState`, so the flag would cost flash for an entry point
-      nothing reaches
+      `INCLUDE_eTaskGetState` is deliberately not added: `uxTaskGetSystemState` fills
+      `eCurrentState` from the list each task sits in and never calls `eTaskGetState`,
+      so the flag would cost flash for an entry point nothing reaches
 - [ ] 1.2 Add `include/Cli.h` defining `CLI_SERIAL` (default `Serial`), following the
       comment style and the concrete-port warning in `include/Link.h`; verify by
       building, since nothing includes it yet

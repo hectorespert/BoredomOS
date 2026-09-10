@@ -71,8 +71,9 @@ it clears itself in that order.
       independent of `Serial1`'s; **[board]** verify with a ground station on each port
       that neither shows gaps caused by the other
 - [ ] 4.5 **[board]** Confirm the identity triple on USB matches the radio link exactly
-      — system `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`,
-      `MAV_AUTOPILOT_GENERIC` — and that a GCS attached to both sees one vehicle
+      — system `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET` — along with the
+      `MAV_AUTOPILOT_GENERIC` field `mavlink-link` also fixes, and that a GCS attached
+      to both sees one vehicle
 - [ ] 4.6 Grow the console task's stack in `src/main.cpp` from 192 to a provisional 384
       words to hold the frame buffer; **[board]** replace that with the measured need
       from `ps` and record it

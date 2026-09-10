@@ -22,9 +22,11 @@ console owner that `ARCHITECTURE.md:317` says the first writer must claim.
   - `free` — heap total, free now, and minimum ever free.
   - `help` / `?` — lists the commands.
 - The task list comes from the kernel, not from a hand-maintained table, so a task
-  added later appears without touching the CLI. This needs
-  `-D configUSE_TRACE_FACILITY=1` and `-D INCLUDE_eTaskGetState=1` in
-  `platformio.ini`, alongside the two `INCLUDE_*` flags already there.
+  added later appears without touching the CLI. This needs one new flag in
+  `platformio.ini`, `-D configUSE_TRACE_FACILITY=1`, alongside the two `INCLUDE_*`
+  flags already there. `INCLUDE_eTaskGetState` is **not** needed:
+  `uxTaskGetSystemState` fills each `eCurrentState` from the list the task sits in
+  and never calls `eTaskGetState`.
 - A new `include/Cli.h` naming the console port as `CLI_SERIAL`, defaulting to
   `Serial`, mirroring how `include/Link.h` names `LINK_SERIAL`. The `bench`
   environment — which moves the MAVLink link onto USB — overrides it to `Serial1`, so
