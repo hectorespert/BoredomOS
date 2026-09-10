@@ -15,9 +15,11 @@ board is unreachable.
   words, and verify `pio run` now links
 - [x] 1.3 Add `-D configNUM_THREAD_LOCAL_STORAGE_POINTERS=0` and
   `-D configQUEUE_REGISTRY_SIZE=0`, and verify with `arm-none-eabi-nm` that the `.elf`
-  contains no `xQueueRegistry`, no `xTimerQueue` and no `pxCurrentTimerList` — the
-  registry disappears because `timers.c` was its only caller, so this confirms both
-  facilities are gone rather than one
+  contains no `xTimerQueue` and no `pxCurrentTimerList` — those two are what establish
+  that the timer service is gone. `xQueueRegistry` is absent too, but its absence
+  proves nothing on its own: either the flag or the linker would remove it
+  independently, since `timers.c` was `vQueueAddToRegistry`'s only caller. That is why
+  the flag buys no bytes once timers are off and is set only to record the intent.
 - [x] 1.4 Set `-D configTOTAL_HEAP_SIZE=0x1800` and verify `pio run` succeeds and
   `arm-none-eabi-nm -S` reports `ucHeap` at 6144 bytes. This precedes the conversion on purpose: doing it
   afterwards leaves an intermediate with about 600 bytes of unclaimed RAM, where any
