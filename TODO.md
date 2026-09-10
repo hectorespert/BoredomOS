@@ -502,12 +502,136 @@ To decide:
   `configTOTAL_HEAP_SIZE` is raised in `build_flags` (the RA4M1 has 32 KB of RAM
   total, so there is some room, but it is shared with everything the Arduino core
   and the SD and MAVLink libraries use).
-- Whether it is worth queueing the serialised frame instead of the whole
+- Whether it is worth queueing something smaller than the whole
   `mavlink_message_t`: `mavlink_msg_to_send_buffer` already runs in
   `TaskSerialWrite`, and the wire frame of a typical message is far smaller than the
-  291-byte struct.
+  291-byte struct. Two routes, and they differ: the serialised frame is still a heap
+  pointer, while *[Queue the message intent by value instead of a packed
+  `mavlink_message_t`]* removes the allocation entirely. That entry owns the
+  question now.
 - Whether the free heap and the failed allocations reach the ground, which is what
   *[Emit `SYS_STATUS`]* proposes with `errors_count1..4`.
+
+### Queue the message intent by value instead of a packed `mavlink_message_t`
+
+**Status:** proposed
+**Scope:** `src/mavlink.cpp`, `src/serial.cpp`, `src/main.cpp`, `include/Data.h`,
+`CLAUDE.md`
+
+Both serial queues carry a pointer to a `mavlink_message_t`, which is packed and
+measures 291 bytes whatever the message is: it reserves 255 bytes of payload and 13
+of signature every time, and the firmware signs nothing. A `HEARTBEAT` carries 9
+useful bytes, `SYSTEM_TIME` 12, `BATTERY_STATUS` 41. The amplification runs between
+7x and 32x, and it is paid out of the heap on every send.
+
+The alternative is to queue what the producer *means* rather than what the wire
+needs, and let the single consumer do the packing it already does:
+
+```c
+struct LinkMsg {
+    uint8_t kind;
+    union {
+        struct { uint64_t unix_usec; uint32_t boot_ms; }  system_time;
+        struct { uint16_t millivolts; int8_t remaining; } battery;
+        struct { int64_t ts1; uint8_t tsys, tcomp; }      timesync;
+        struct { uint8_t severity; char text[50]; }       statustext;
+    };
+};
+```
+
+That is 64 bytes, and `STATUSTEXT` is what sets the size — its text field is 50
+characters. Without it the item would fit in 16 bytes. `HEARTBEAT` carries no
+payload at all: the `kind` is the whole message.
+
+At 64 bytes the item goes through the queue **by value**, and the consequence is the
+point of the entry: `pvPortMalloc`, the `NULL` check, the `vPortFree` on a failed
+`xQueueSend` and the `vPortFree` after use all stop existing. Five places where the
+allocation protocol can be got wrong become zero, and the leak that `CLAUDE.md`
+describes as fatal within minutes stops being an available mistake rather than a
+watched one. The producer fills a local struct and sends it; the consumer receives a
+local copy and packs it into a `static mavlink_message_t` in `.bss` — the pattern
+`src/serial.cpp:29` already uses for the read path.
+
+The ledger, against the accounting in *[The two serial queues cannot fit in the
+FreeRTOS heap]*:
+
+| | Today | Proposed |
+|---|---|---|
+| `serialWriteQueue` storage | 16 x 4 = 64 B | 8 x 64 = 512 B |
+| In flight | 291 B per message, from ~870 B free | 0 |
+| `.bss` | 0 | 291 B for the packing buffer |
+| Heap operations per message | 3 (`malloc`, `free` on failure, `free` after use) | 0 |
+
+It is not a net saving of bytes under normal load: about 448 bytes of fixed heap buy
+back a transient demand of the same order. What it buys is that the demand becomes
+**deterministic and reserved at boot** instead of competing, every second, for the
+~870 bytes that are left — which is precisely the competition that makes
+the `add-console-cli` change a repeating
+failure rather than a one-off.
+
+It also retires an invariant with its reason rather than by decree. `CLAUDE.md` says
+queues carry heap pointers and never values, and that is correct **because the item
+is 291 bytes**: by value it would need 4656 bytes of permanent storage. At 64 bytes
+the arithmetic inverts. If this is implemented, `CLAUDE.md` has to say so, or the
+next reader will follow a rule whose justification no longer holds.
+
+To decide:
+
+- **The depth.** 16 slots were never reachable. Producers emit about 2.5 messages a
+  second and the drain handles roughly 100, so 4 slots (256 B) or 8 (512 B) both have
+  wide margin; 4 leaves ~678 B free at boot against ~422 B for 8.
+- **Whether `STATUSTEXT` stays in the union.** It quadruples the item on its own. A
+  separate, shallower queue for it, or a bounded text pool, would take the common
+  item down to 16 bytes — at the cost of a second queue structure.
+- **Whether `serialReadQueue` changes too.** It has the same 291-byte item, but the
+  producer is a parser that already owns a `mavlink_message_t`, so the argument is
+  weaker there and the two can be decided separately.
+- Whether the packing buffer is a `.bss` static or lives on `TaskSerialWrite`'s
+  stack, which is 192 words and would have to grow by about 73.
+
+Related: the USB endpoint proposed in the `add-usb-dual-protocol` change takes a
+third route — no queue at all, packing into a stack buffer and dropping the frame
+when the port has no room, following madflight. When that lands the firmware will
+hold two outbound models at once, which is defensible (`UART` does not implement
+`availableForWrite()` and `SerialUSB` does) but is worth converging deliberately
+rather than by accretion.
+
+**What this entry unblocks.** Converging them means giving the USB endpoint its own
+write queue that the same producers fill, so one `HEARTBEAT` becomes one entry in each
+of two queues and each port drains its own at its own pace. That is impossible while
+the item is a `mavlink_message_t`: the block is 304 bytes in `heap_4`, there are about
+870 bytes free after boot, and a producer would have to allocate twice — 608 bytes for
+a single duplicated `HEARTBEAT`, and over 1200 if the battery sender fires in the same
+instant, which does not fit. `pvPortMalloc` returns `NULL` long before either queue
+reports itself full, and per *[Check the result of `pvPortMalloc` in the four places
+that don't]* three of the four senders would write to address 0.
+
+Two arguments say the queue is not obviously the better model even once it fits, and
+both should be weighed rather than assumed:
+
+- **A queue here converts a visible drop into an invisible allocation failure.** The
+  appeal of queueing is not losing a message when the port is momentarily full, but
+  with this much free heap the queue absorbs two messages and then fails. Dropping a
+  frame is behaviour the USB endpoint's spec states outright; a failed allocation is
+  something nothing currently detects.
+- **It recouples the two links through the heap.** Today the USB path cannot consume
+  heap at all. With a shared-heap queue, a USB queue nobody drains — because nobody
+  plugged a cable in — starts costing the radio link its allocations. On a satellite,
+  the radio's reliability should not depend on what is attached to the bench port.
+
+Both arguments weaken sharply at 64 bytes an item: a depth-4 USB queue is 256 bytes
+reserved once, and duplicating a message costs nothing at send time, so a queue that
+nobody drains fails its `xQueueSend` and is ignored rather than exhausting anything.
+That is the state in which converging the two models is worth doing, and it is why
+this entry is the prerequisite rather than the two being independent.
+
+Sequencing, if both are implemented: this entry moves the builder call from the
+producer to the drain — the producer fills an intent, the consumer packs it — so it
+revisits the split that `add-usb-dual-protocol` introduces in `src/mavlink.cpp`. The
+shared builders themselves survive unchanged; only their call sites move. On the USB
+side the convergence replaces that change's telemetry scheduler with a queue drain and
+leaves everything else — mode detection, the `availableForWrite()` measurement, the
+deleted `bench`, the HIL cases — untouched.
 
 ### The default SD ring is 4 GiB and never rotates
 
