@@ -2,6 +2,7 @@
 #include <SD.h>
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
+#include <Link.h>
 #include <MAVLink.h>
 #include <Data.h>
 #include <Battery.h>
@@ -51,7 +52,10 @@ void setup()
 {
   configASSERT(systemTime.begin());
 
-  Serial.begin(115200);
+  // The console (Serial) is already open: the core's main() calls
+  // Serial.begin(115200) before setup(). Opening it again here would
+  // initialise the same port twice whenever LINK_SERIAL is overridden onto it.
+  LINK_SERIAL.begin(LINK_BAUD);
 
   configASSERT(SD.begin(9));
 
@@ -66,7 +70,7 @@ void setup()
 
   xTaskCreate(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
 
-  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGHEST, &taskSerialWriteHandler);
+  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
 
   xTaskCreate(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
 

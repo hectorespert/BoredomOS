@@ -5,3 +5,6 @@
 .vscode/ipch
 *.tlog.*
 *.tlog
+# Python bytecode from the HIL checks in test/test_hil/
+__pycache__/
+*.pyc

@@ -2,16 +2,13 @@
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
 #include <Serial.h>
+#include <Link.h>
 
 extern QueueHandle_t serialWriteQueue;
 
 [[noreturn]] void TaskSerialWrite(void *pvParameters)
 {
     (void) pvParameters;
-
-    while (!Serial) {
-        vTaskDelay(125 / portTICK_PERIOD_MS);
-    }
 
     for (;;)
     {
@@ -21,7 +18,7 @@ extern QueueHandle_t serialWriteQueue;
             uint8_t buf[MAVLINK_MAX_PACKET_LEN];
             uint16_t len = mavlink_msg_to_send_buffer(buf, msg_to_send);
             vPortFree(msg_to_send);
-            Serial.write(buf, len);
+            LINK_SERIAL.write(buf, len);
         }
     }
 }
@@ -35,15 +32,11 @@ static mavlink_status_t status;
 {
     (void) pvParameters;
 
-    while (!Serial) {
-        vTaskDelay(125 / portTICK_PERIOD_MS);
-    }
-
     for (;;)
     {
-        while (Serial.available() > 0)
+        while (LINK_SERIAL.available() > 0)
         {
-            uint8_t receivedByte = Serial.read();
+            uint8_t receivedByte = LINK_SERIAL.read();
 
             if (mavlink_parse_char(MAVLINK_COMM_0, receivedByte, &msg_to_read, &status)) {
 

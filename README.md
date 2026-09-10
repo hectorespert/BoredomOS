@@ -19,9 +19,12 @@ commands, and keeps a housekeeping log on an SD card.
 | microSD card module | SPI, `CS` on pin **9** |
 | DS1307 real-time clock | I2C, address `0x68` |
 | Solar charger with LiPo cell | battery sense on **A0** |
-| Ground link | USB CDC, 115200 baud |
+| Ground link (MAVLink) | `Serial1` UART, **D0** (`RX`) / **D1** (`TX`), 57600 baud |
+| USB CDC, 115200 baud | console — reserved for debug and a CLI, unused today |
 
-Wiring is hardcoded in the firmware, not configurable.
+Wiring is hardcoded in the firmware, not configurable. The one exception is the
+link port itself: `include/Link.h` defines `LINK_SERIAL` and `LINK_BAUD`, both
+overridable from `build_flags` (see `platformio.ini`).
 
 ## Quick start
 
@@ -30,7 +33,7 @@ Requires [PlatformIO](https://platformio.org/install/cli).
 ```bash
 pio run                  # build
 pio run -t upload        # flash the board
-pio device monitor       # serial at 115200 — raw MAVLink frames, not text
+pio device monitor       # USB console at 115200 — silent, nothing writes to it
 ```
 
 Tests run **on the board only**: they assert against a real battery, RTC and SD
@@ -45,8 +48,21 @@ pio test
 MAVProxy is the reference ground control station:
 
 ```bash
+mavproxy.py --master=<link port>,57600 --load-module system_time
+```
+
+`<link port>` is whatever is wired to D0/D1 — the telemetry radio, or a USB-TTL
+adapter on the bench. **`/dev/ttyACM0` no longer carries MAVLink.**
+
+To test without a radio, build the link back onto USB and nothing else changes:
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-D LINK_SERIAL=Serial -D LINK_BAUD=115200" pio run -t upload
 mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
 ```
+
+`LINK_BAUD` is pinned here only to keep both sides reading the same number: a USB
+CDC port has no real line rate and ignores it.
 
 The satellite identifies itself as system `1`, component `MAV_COMP_ID_AUTOPILOT1`,
 type `MAV_TYPE_ROCKET`. It emits `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and

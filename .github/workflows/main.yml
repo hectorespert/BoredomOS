@@ -31,3 +31,8 @@ jobs:
         pip install --upgrade platformio
     - name: Run PlatformIO
       run: pio run
+    - name: Static analysis
+      # Reports defects without failing the job: pio check exits 0 unless
+      # --fail-on-defect is passed. Tighten to --fail-on-defect=high once the
+      # codebase has lived with the checker for a while.
+      run: pio check

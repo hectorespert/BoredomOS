@@ -1,20 +1,12 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
-#include <Serial.h>
 #include <Battery.h>
 #include <SystemTime.h>
 
 extern QueueHandle_t serialWriteQueue;
 
 extern SystemTime systemTime;
-
-static void waitSerial()
-{
-    while (!Serial) {
-        vTaskDelay(125 / portTICK_PERIOD_MS);
-    }
-}
 
 static void sendHeartbeat() {
     mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
@@ -83,13 +75,9 @@ static void sendStatusText(const char* text, uint8_t severity)
 
     for (;;)
     {
-        waitSerial();
-
         sendHeartbeat();
 
         vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
-
-        waitSerial();
 
         sendSystemTime();
 
@@ -143,8 +131,6 @@ static void sendBatteryStatus()
 
     for (;;)
     {
-        waitSerial();
-
         sendBatteryStatus();
         vTaskDelayUntil(&xLastWakeTime, 2000 / portTICK_PERIOD_MS);
     }

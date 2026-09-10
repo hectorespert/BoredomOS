@@ -8,7 +8,7 @@ Every entry is defined here before any code is written for it.
 ```markdown
 ### Short feature title
 
-**Status:** proposed | defined | in progress | done
+**Status:** proposed | defined
 **Scope:** affected files or modules (`src/*.cpp`, `lib/*`, ...)
 
 What it should do and why. If it adds a task or a queue, state the priority
@@ -17,42 +17,6 @@ pointers travelling through the queue.
 ```
 
 ## To implement
-
-### Move the MAVLink link to `Serial1` and leave USB as the debug console
-
-**Status:** defined
-**Scope:** `src/serial.cpp`, `src/mavlink.cpp`, `src/main.cpp`, `src/hooks.cpp`, `platformio.ini`, `README.md`
-
-Today MAVLink and debugging share the same port: `Serial` (USB CDC) carries the
-binary frames, so the serial monitor is unreadable and any debug `print` would
-corrupt the link. This feature separates both uses:
-
-- The MAVLink link moves to the `Serial1` hardware UART (pins D0 `RX` / D1 `TX` of
-  the UNO R4 Minima), which is where the telemetry radio will be connected.
-- `Serial` (USB) is freed up as a text console: debugging, Unity output under
-  `pio test` and the stack overflow message of `src/hooks.cpp`.
-
-Points to resolve while implementing it:
-
-- The link port is chosen in **one single place** (an alias or `#define` in
-  `include/`, not `Serial1` repeated in every `.cpp`), so that going back to USB
-  does not touch the protocol logic.
-- Link speed: `Serial1.begin(...)` with the radio's baud rate (MAVLink telemetry
-  usually runs at 57600, not 115200). Whether it is fixed or a `build_flag` is
-  still to be decided.
-- The `while (!Serial)` guards in `src/serial.cpp` and the `waitSerial()` of
-  `src/mavlink.cpp` exist because the USB CDC is not ready until the host opens the
-  port. On a hardware UART that guard is a no-op, so it has to be removed or
-  replaced by whatever wait is appropriate, without leaving tasks spinning.
-- `Serial.begin()` stays in `setup()` for the console, but **no task may block
-  waiting for `Serial`**: the board has to work in flight with no USB attached.
-- Whatever is written to the console must not be written from several tasks without
-  control; decide whether it is accessed directly or through a queue, consistently
-  with the rest of the firmware.
-- Document the port change on the ground side in `README.md`: `mavproxy.py
-  --master=<radio port>` instead of `/dev/ttyACM0`.
-- Review `test/test_main.cpp`: once USB is freed, Unity output stops being mixed
-  with MAVLink frames.
 
 ### Add the GY-87 IMU
 
@@ -262,7 +226,7 @@ messages come in and go out without a GCS on the other end interpreting them. Th
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on *[Move the MAVLink link to `Serial1`...]*: while the binary frames keep
+Depends on the `move-mavlink-link-to-serial1` change: while the binary frames keep
 going over USB there is no console port to write the trace to.
 
 What it should trace, per message: direction (inbound/outbound), `msgid` — by name
@@ -454,23 +418,6 @@ Partial alternative: `MEMINFO` (152) for the heap, although it is ArduPilot-spec
 and does not cover the per-task stacks.
 
 
-### Add static analysis to CI
-
-**Status:** defined
-**Scope:** `.github/workflows/main.yml`, `platformio.ini`
-
-The workflow only runs `pio run`: it checks that it compiles, nothing more.
-PlatformIO ships cppcheck integrated in `pio check`, which costs nothing to add to
-the existing job.
-
-It is not theoretical: the pointer arithmetic of *[Fix the pointer arithmetic in
-the unknown-message `STATUSTEXT`]* and the unchecked `pvPortMalloc` calls are
-exactly the kind of defect cppcheck flags.
-
-To decide: which severities fail the build. Start by warning without breaking the
-job, see the real noise level over this code and only then tighten it — if the first
-`pio check` comes out with a hundred warnings and takes CI down, it ends up disabled.
-
 ## To change
 
 ### Check the result of `pvPortMalloc` in the four places that don't
@@ -593,6 +540,45 @@ To decide: a default file size that actually rotates within a mission (a few
 hundred kilobytes to a few megabytes puts rotation at hours or days), and whether
 the size is a compile-time constant or a ground-settable parameter under *[Implement
 the MAVLink parameter protocol]*.
+
+### `SdData::begin()` is not idempotent, and the Unity tests delete its open file
+
+**Status:** defined
+**Scope:** `lib/SdData`, `test/test_libs/test_main.cpp`
+
+`SdData::begin()` opens the log file only when it does not already hold one:
+
+```cpp
+_fileIdx = readLogIndex();
+if (!_dataFile) {
+    _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
+}
+```
+
+There is no `end()` and nothing ever closes `_dataFile`, so a second `begin()` is a
+no-op that silently keeps the first file — even when `_fileIdx` has changed and a
+different file is what should be open.
+
+`test/test_libs/test_main.cpp` walks straight into it. `setUp()` calls
+`cleanSdFiles()` and then `begin()`; `tearDown()` calls `cleanSdFiles()` again, which
+`SD.remove()`s a file `sdData` still has open. From the second case onwards `begin()`
+sees a truthy `_dataFile` and does not reopen, so the remaining cases write through a
+handle to a deleted file. The suite passes — it asserts on `SD.exists()`, not on the
+bytes — which is what makes this worth writing down rather than noticing the day it
+matters.
+
+In flight `begin()` is called exactly once, from `TaskSdWrite`, so nothing is broken
+today. It becomes real the moment anything restarts the logger: a card remount, an
+error-recovery path, or the SD failure handling of *[SD logging failure is silent]*.
+
+To decide: whether `begin()` closes and reopens unconditionally, or gains an `end()`
+and the tests call it; and whether `cleanSdFiles()` should refuse to remove a file the
+object still holds, which would have made this visible immediately.
+
+Found by Copilot reviewing the pull request that split `test/` into `test_libs` and
+`test_hil`. It is not a regression of that change: the code is untouched and only
+moved.
+
 
 ### `setup()` asserts on the RTC before the console exists
 
@@ -807,8 +793,10 @@ even when there is nothing to read.
 
 To decide: whether it moves to a genuinely blocking wait (a task notification from
 the receive path, or a semaphore) or the polling period is simply shortened. The
-former is the right answer but depends on what the port chosen in *[Move the MAVLink
-link to `Serial1`...]* exposes, so it is better resolved after that entry.
+former is the right answer but depends on what the port chosen in the
+`move-mavlink-link-to-serial1` change exposes, so it is better resolved after it.
+Note that the premise above needs re-checking: `SERIAL_BUFFER_SIZE` on this core is
+512, not 64, and the ring is filled by the receive ISR, so a late task loses nothing.
 
 
 ### Have Dependabot watch the PlatformIO libraries too
@@ -880,8 +868,10 @@ Small, unrelated things worth getting out of the way in one go:
   initialisers (`.unixtime = ...`) are the standard equivalent.
 - `src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
   with no braces of its own, which puts a declaration in the scope of the rest of
-  the switch. It compiles because it has no initialiser, but it is exactly what
-  *[Add static analysis to CI]* will flag.
+  the switch. It compiles because it has no initialiser. Note that cppcheck does
+  **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
+  actually reports, and this is not in it. It does report the GCC initialiser syntax
+  above, as three `unusedLabel` findings in `src/logger.cpp`.
 - `test/test_main.cpp` uses `StaticJsonDocument`, deprecated in ArduinoJson 7, while
   `src/sdwrite.cpp` already uses `JsonDocument`.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
