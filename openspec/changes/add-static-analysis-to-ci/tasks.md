@@ -24,14 +24,12 @@ both run without hardware, and the firmware binary is byte-identical before and 
 
 ## 2. Wire it into CI
 
-- [ ] 2.1 Add a `pio check` step to `.github/workflows/main.yml` after the build step,
+- [x] 2.1 Add a `pio check` step to `.github/workflows/main.yml` after the build step,
       with no `--fail-on-defect`, so defects are reported without failing the job;
-      verify the YAML parses. **Written and verified, but not in the repository**: the
-      push was rejected because the OAuth token in use lacks GitHub's `workflow` scope,
-      which is required to modify anything under `.github/workflows/`. The step is
-      recorded verbatim below and must be applied by hand, or after
-      `gh auth refresh -h github.com -s workflow`.
-- [ ] 2.2 Push and confirm on the pull request that the step runs, prints the defect
+      verify the YAML parses. Applied by the repository owner in commit `a0e410e`: the
+      push from this session was rejected for lacking GitHub's `workflow` OAuth scope,
+      which is required to modify anything under `.github/workflows/`.
+- [x] 2.2 Push and confirm on the pull request that the step runs, prints the defect
       table, and reports success.
 
 ## 3. Backlog
@@ -83,10 +81,11 @@ Two claims in the backlog were checked and found wrong, both now corrected in pl
   unbraced `case` in `src/mavlink.cpp:175`. It does not. That entry now says so, and
   points at the three `unusedLabel` findings it does produce.
 
-Tasks 2.1 and 2.2 stay open. The step below is written and its YAML verified, but it
-could not be committed: pushing a change under `.github/workflows/` needs the `workflow`
-OAuth scope, which the token in use does not have. Commenting the step out does not help
-— GitHub rejects any modification to that path, comment or not.
+The CI step could not be pushed from this session: modifying anything under
+`.github/workflows/` needs the `workflow` OAuth scope, which the token in use does not
+have, and commenting the step out does not help — GitHub rejects any modification to
+that path, comment or not. The repository owner applied it by hand as `a0e410e`, with
+the same content:
 
 ```yaml
     - name: Static analysis
@@ -96,7 +95,9 @@ OAuth scope, which the token in use does not have. Commenting the step out does 
       run: pio check
 ```
 
-It goes at the end of `.github/workflows/main.yml`, directly after the existing
-`Run PlatformIO` step. Everything it depends on — the `check_*` configuration in
-`platformio.ini` — is committed, so `pio check` already behaves correctly when run by
-hand; only the CI wiring is missing.
+It sits at the end of `.github/workflows/main.yml`, directly after the existing
+`Run PlatformIO` step.
+
+**Confirmed on CI** (run 34447638123, commit `a0e410e`): the `Static analysis` step
+runs and succeeds, reporting the same 12 defects measured locally — 0 HIGH, 0 MEDIUM,
+12 LOW — in 17.9 s on the runner. The job passes, as intended for a warning-only check.
