@@ -8,7 +8,7 @@ Every entry is defined here before any code is written for it.
 ```markdown
 ### Short feature title
 
-**Status:** proposed | defined | in progress | done
+**Status:** proposed | defined
 **Scope:** affected files or modules (`src/*.cpp`, `lib/*`, ...)
 
 What it should do and why. If it adds a task or a queue, state the priority

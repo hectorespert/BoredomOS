@@ -65,11 +65,16 @@ and no ground station attached.
 - **THEN** it begins receiving telemetry at the normal rates without the board being
   reset
 
-### Requirement: Transmitting a frame does not disturb unrelated periodic work
+### Requirement: Link traffic does not disturb periodic cadences
 
-Transmitting a MAVLink frame SHALL NOT prevent lower-priority periodic work from
-running for the duration of the transmission. Housekeeping sampling and telemetry
-cadences SHALL hold regardless of link traffic.
+Transmitting MAVLink frames SHALL NOT shift the firmware's periodic cadences:
+housekeeping sampling stays at 1 Hz and telemetry keeps its declared rates
+regardless of link traffic.
+
+This is a cadence guarantee, not a latency one. Transmission occupies the CPU for
+the duration of a frame — a few milliseconds at link speed — and lower-priority
+tasks do not run while it does. What SHALL hold is that this delay is absorbed
+within each task's period rather than accumulating into drift.
 
 #### Scenario: Sustained telemetry on a slow link
 

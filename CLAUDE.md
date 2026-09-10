@@ -12,19 +12,28 @@ mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
 
 **Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything.** It is the single source of truth for the design: the task and queue model, the three pipelines, which file owns which resource, and the constraints that explain why the code looks the way it does. This file does not repeat it.
 
-Planned and in-progress work is tracked in [TODO.md](TODO.md); check it before starting a
-feature, and add or update the entry there when one is defined or finished. Entries are
-written in English, one per feature or defect, and defined before any code is written.
+Planned work is tracked in [TODO.md](TODO.md); check it before starting a feature, and
+add an entry there when one is defined. Entries are written in English, one per feature
+or defect, and defined before any code is written. `TODO.md` holds only work that has
+**not** been picked up, so an entry is never `in progress`. The `Done` section at the
+end predates this rule and is kept as a record; nothing new is added to it.
 
 Three places hold planning, and they do not overlap. **`ARCHITECTURE.md` is structure and
 why** — how the firmware is put together, and the constraints behind it. **`TODO.md` is the
 backlog** — everything planned that nobody is implementing right now. **`openspec/` is the
 change in flight**: when a `TODO.md` entry is picked up, `/opsx:propose` turns it into a
-change under `openspec/changes/` with its proposal, design, spec deltas and tasks; the
-`TODO.md` entry moves to `in progress` and names the change id. Archiving the change moves
-the entry to *Done* and leaves the behaviour described in `openspec/specs/`, which fills up
-as changes are archived rather than being written up front. Do not open a change for an
-entry that is not being implemented, and do not restate the architecture in a spec.
+change under `openspec/changes/` with its proposal, design, spec deltas and tasks, and the
+`TODO.md` entry is **deleted in the same commit**. The change now owns that work; leaving a
+copy behind in the backlog means two descriptions of the same thing drifting apart.
+
+Deleting it has a consequence worth stating: nothing is left to mark *Done* later, so
+`openspec/specs/` and the git history are the record of what was built. `openspec/specs/`
+fills up as changes are archived rather than being written up front. Before deleting an
+entry, re-point any other entry that cross-references it at the change id, or the reference
+dangles.
+
+Do not open a change for an entry that is not being implemented, and do not restate the
+architecture in a spec.
 
 ## Commands
 

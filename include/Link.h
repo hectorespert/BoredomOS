@@ -3,7 +3,8 @@
 #define BOREDOMOS_LINK_H
 
 // The port carrying the MAVLink link and its speed. Override from build_flags:
-// -D LINK_SERIAL=Serial puts the link back on USB CDC for bench work.
+// -D LINK_SERIAL=Serial puts the link back on USB CDC for bench work, where
+// LINK_BAUD is ignored because a CDC port has no real line rate.
 // LINK_SERIAL must name a concrete port, never a HardwareSerial reference: a
 // base-class reference selects Print::write and transmits one byte at a time.
 

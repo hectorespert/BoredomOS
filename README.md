@@ -57,9 +57,12 @@ adapter on the bench. **`/dev/ttyACM0` no longer carries MAVLink.**
 To test without a radio, build the link back onto USB and nothing else changes:
 
 ```bash
-PLATFORMIO_BUILD_FLAGS="-D LINK_SERIAL=Serial" pio run -t upload
+PLATFORMIO_BUILD_FLAGS="-D LINK_SERIAL=Serial -D LINK_BAUD=115200" pio run -t upload
 mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
 ```
+
+`LINK_BAUD` is pinned here only to keep both sides reading the same number: a USB
+CDC port has no real line rate and ignores it.
 
 The satellite identifies itself as system `1`, component `MAV_COMP_ID_AUTOPILOT1`,
 type `MAV_TYPE_ROCKET`. It emits `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and

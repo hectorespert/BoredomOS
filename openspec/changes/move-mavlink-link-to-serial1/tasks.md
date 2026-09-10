@@ -153,3 +153,39 @@ was then settled anyway: the new firmware runs past both `configASSERT` calls, s
 DS1307 and the SD card both answer, and the earlier silence was a stale binary — most
 likely the Unity test binary from an old `pio test`, which prints once at boot and then
 idles. Do not use the 1200-baud touch on this board as a reset.
+
+
+## Post-review record
+
+Copilot reviewed the PR and raised four points. Three were correct and are fixed:
+
+1. **The transmit requirement contradicted the design.** It said transmitting SHALL
+   NOT prevent lower-priority work from running for the duration of the frame, while
+   `design.md` states the opposite in Risks. The requirement is now a cadence
+   guarantee — periods hold, the few milliseconds of a frame are absorbed within each
+   period rather than accumulating — which is what the implementation does and what
+   the board checks confirm.
+2. **`setup()` initialised the same port twice** whenever `LINK_SERIAL` was overridden
+   onto `Serial`, and the second call won, so `LINK_BAUD` meant nothing on that build.
+   Fixed by deleting `Serial.begin(115200)`: the core's `main()` already calls it
+   before `setup()`, so the line was redundant even on the default build. No
+   preprocessor branch is needed and all three cases are now correct — default,
+   overridden onto USB, and overridden onto another UART.
+3. **The README's USB example did not pin `LINK_BAUD`.** It now passes
+   `-D LINK_BAUD=115200`, with a note that a CDC port has no real line rate.
+
+The fourth point — that deleting the `TODO.md` entry departs from the documented
+workflow — was factually right but described a deliberate decision. `CLAUDE.md` and
+`openspec/config.yaml` were updated so deletion **is** the documented workflow, rather
+than the entry being restored.
+
+Re-verified on the board after fix 2, since it changes port initialisation in
+`setup()` and a build does not check that. With the USB build: `HEARTBEAT` 1.04 Hz,
+`SYSTEM_TIME` 0.97 Hz, `BATTERY_STATUS` 0.52 Hz, identity `(1, 1)`, heartbeat type 9,
+inbound `SYSTEM_TIME` accepted, `TIMESYNC` answered with `ts1` intact — identical to
+the first run. With the default build, USB is silent again: zero messages, zero raw
+bytes. The clock was only 1 s off before being re-set, which incidentally confirms the
+DS1307 seeds the internal RTC across power cycles.
+
+Tasks 5.4 and 5.5 remain open for the same reasons as before: the stack high-water
+marks are only on the SD card, and battery-only boot needs physical access.
