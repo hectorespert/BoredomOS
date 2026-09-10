@@ -11,36 +11,50 @@ from collections import Counter
 
 DEFAULT_BAUD = 57600  # matches LINK_BAUD in include/Link.h
 ARDUINO_VID = 0x2341
+PORT_WAIT = 25.0  # seconds; a CDC port re-enumerates slowly after an upload
 
 
 class NoLinkError(Exception):
     """Raised when no port could be opened. Reported as skipped, not failed."""
 
 
-def find_port():
+def find_port(wait=PORT_WAIT):
     """Return the port to talk to, or raise NoLinkError.
 
     Order: --port/HIL_PORT, then an Arduino CDC device, then a lone USB serial
     adapter. The adapter case matters because with the default build the link is
     on Serial1 (D0/D1), so the board's own CDC port carries nothing.
+
+    Waits for the port to appear. Under `pio test` this runs seconds after the
+    upload, and a USB CDC port takes a moment to re-enumerate after the board
+    resets -- without the wait every case would be skipped for no real reason.
     """
     from serial.tools import list_ports
 
     override = os.environ.get("HIL_PORT")
     if override:
+        deadline = time.time() + wait
+        while not os.path.exists(override) and time.time() < deadline:
+            time.sleep(0.5)
         return override
 
-    candidates = list(list_ports.comports())
-    arduino = [p.device for p in candidates if p.vid == ARDUINO_VID]
-    if arduino:
-        return arduino[0]
+    deadline = time.time() + wait
+    while True:
+        candidates = list(list_ports.comports())
+        arduino = [p.device for p in candidates if p.vid == ARDUINO_VID]
+        if arduino:
+            return arduino[0]
 
-    usb = [p.device for p in candidates if "USB" in p.device or "ACM" in p.device]
-    if len(usb) == 1:
-        return usb[0]
-    if not usb:
-        raise NoLinkError("no serial port found")
-    raise NoLinkError(f"several candidate ports ({', '.join(usb)}); set HIL_PORT")
+        usb = [p.device for p in candidates if "USB" in p.device or "ACM" in p.device]
+        if len(usb) == 1:
+            return usb[0]
+        if len(usb) > 1:
+            raise NoLinkError(
+                f"several candidate ports ({', '.join(usb)}); set HIL_PORT"
+            )
+        if time.time() >= deadline:
+            raise NoLinkError(f"no serial port found after {wait:.0f}s")
+        time.sleep(0.5)
 
 
 class Link:

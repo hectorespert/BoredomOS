@@ -41,19 +41,26 @@ architecture in a spec.
 pio run                  # build (this is all CI runs)
 pio run -t upload        # flash the board
 pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text)
-pio test                 # Unity tests — ON DEVICE ONLY, needs board + DS1307 + SD card
+pio test                 # HIL: flashes this firmware, then checks it from the host
+pio test -e bench        # same, with the link on USB so no adapter is needed
+pio test -e libs         # Unity library tests — DESTRUCTIVE, see below
 ```
 
-There is no host/native test environment. `test/` holds two suites:
+There is no host/native test environment. `test/` holds two suites, and **`pio test`
+means the HIL one**: it flashes this firmware and then interrogates it from the host,
+leaving the board running what it would fly.
 
+- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases, aligned with the scenarios in `openspec/specs/mavlink-link/spec.md`. Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
 - **`test/test_libs/`** — the Unity suite. `test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so it never runs in CI. It runs on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All cases live in that one file, dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test *directories*, so it picks a suite, not a case.
 - **`test/test_hil/`** — host-side Python that interrogates the flashed firmware over the MAVLink link. `platformio.ini` excludes it with `test_ignore = test_hil`, since PlatformIO would try to compile it as C++. Run these by hand; see its `README.md`.
 
-**`test_libs` covers `lib/` and nothing else.** `test_build_src` defaults to `no`, so `src/` is not in the test binary: no task, no queue, no scheduler, no stack high-water mark. A green `pio test` proves nothing about a task body — only the SD log's high-water marks or a HIL check can.
+**`test_libs` covers `lib/` and nothing else.** In that environment `test_build_src` is off, so `src/` is not in the test binary: no task, no queue, no scheduler, no stack high-water mark. A green `pio test -e libs` proves nothing about a task body — only the SD log's high-water marks or a HIL check can.
 
 Adding any `test_*` subdirectory is what makes PlatformIO stop treating `test/` itself as a suite: it falls back to the root only when there are none. Keep every suite in its own directory, or one of them stops running with no warning.
 
-`pio test` is not a read-only check: it reflashes the board with the test binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational.
+**`pio test -e libs` is the destructive one**: it replaces the firmware with the Unity binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational. That is why it is opt-in and HIL is the default — `pio test` and `pio test -e bench` flash real firmware and leave the board running, and neither touches the card. After `-e bench` the link is on USB rather than D0/D1, so `pio run -t upload` restores the flight configuration.
+
+Three environments, one board: `uno_r4_minima` is what flies and is the default for every command; `bench` is the same firmware with the link on USB; `libs` exists only to run the Unity suite. `default_envs` keeps a bare `pio run`, `pio check` or `pio test` on the first of them.
 
 A change that touches `lib/` or a task body is not verified by building it. Run the tests on the board, or say plainly that you did not.
 

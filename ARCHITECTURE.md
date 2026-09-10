@@ -321,10 +321,14 @@ running must claim one.
 **There is no host test environment.** `test/` holds two suites, and they test
 different things:
 
-| Suite | What runs where | Covers |
-|---|---|---|
-| `test/test_libs/` | Unity on the board, replacing the firmware | `lib/` only — `Battery`, `SystemTime`, `SdData`, linked against the Arduino core |
-| `test/test_hil/` | Python on the development machine, over the link | whatever firmware is already flashed, seen as the ground station sees it |
+| Suite | Command | What runs where | Covers |
+|---|---|---|---|
+| `test/test_hil/` | `pio test`, `pio test -e bench` | Python on the development machine, over the link | the real firmware, seen as the ground station sees it |
+| `test/test_libs/` | `pio test -e libs` | Unity on the board, replacing the firmware | `lib/` only — `Battery`, `SystemTime`, `SdData`, linked against the Arduino core |
+
+**The default is the HIL suite**, and that is deliberate. It flashes the firmware that
+flies and leaves it running; the Unity suite replaces the firmware with a test binary
+and erases the log from the card on every case, so it is opt-in.
 
 `test_libs/test_main.cpp` asserts against a real battery voltage, a real DS1307 and a
 real SD card, so `pio test` needs the assembled board and cannot run in CI. All its
@@ -339,10 +343,19 @@ section sizes show it — the application links 16828 bytes of RAM, the test bin
 5368, too little to hold the 8 KB FreeRTOS heap. A green `pio test` says nothing
 about a task body.
 
-`test_hil/` is what does exercise the assembled firmware, but it is a set of scripts
-run by hand rather than a suite: `platformio.ini` excludes it with
-`test_ignore = test_hil`, because PlatformIO would try to compile Python as a test
-suite. Its `README.md` states what is missing to wire it in.
+`test_hil/` is what exercises the assembled firmware. `run.py` discovers the cases,
+prints Unity's line format so `pio test` counts them natively, and reports anything it
+cannot check — no board, no adapter — as skipped rather than failed. The cases follow
+the scenarios in `openspec/specs/mavlink-link/spec.md`.
+
+Its `build_stub.cpp` is not a test. PlatformIO counts the sources it compiled from the
+suite directory and refuses to build before it ever reaches `src/`, so a suite that is
+entirely host-side Python needs one translation unit to exist at all.
+
+Three environments share the board: `uno_r4_minima` is the flight build and the
+default for every command, `bench` is the same firmware with the link on USB so the
+HIL suite runs without an adapter on D0/D1, and `libs` exists only to run the Unity
+suite.
 
 ## What is not here
 

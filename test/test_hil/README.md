@@ -55,13 +55,22 @@ raising: `AssertionError` for something wrong, `hil.NoLinkError` for something t
 cannot be checked here. `link.sample()` returns one shared 12-second observation, so
 the rate checks cost one wait between them rather than one each.
 
-## Not wired into `pio test`
+## Under `pio test`
 
-Deliberately. Doing that needs an `[env:hil]` with `test_testing_command` pointing at
-`run.py` and `test_build_src = yes`, and a decision about what a bare `pio test`
-should mean — today it means the Unity suite, which reflashes the board and erases
-the SD card. Inverting that so the destructive suite is the opt-in one is the open
-question.
+`pio test` runs this suite: it builds `src/`, flashes it, and then runs `run.py`
+against the board. `pio test -e bench` does the same with the link moved to USB, so
+no adapter is needed. The Unity suite is opt-in as `pio test -e libs`, because that
+one replaces the firmware and erases the card.
+
+Two details make it work, and neither is obvious:
+
+- **`build_stub.cpp`.** PlatformIO counts the sources it compiled from the suite
+  directory and bails out before it ever reaches `src/`, so `test_build_src = yes` is
+  not enough on its own — a suite that is entirely host-side Python still needs one
+  translation unit to exist.
+- **`find_port()` waits.** Under `pio test` the checks start seconds after the
+  upload, and a USB CDC port takes a moment to re-enumerate after the board resets.
+  Without the wait every case is skipped for no real reason.
 
 ## One thing not to do
 
