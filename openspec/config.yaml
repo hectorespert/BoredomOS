@@ -34,7 +34,7 @@ context: |
     shared objects via extern, a [[noreturn]] extern declaration in src/main.cpp,
     its static storage beside it, and an xTaskCreateStatic in setup(). Tasks and
     queues are created nowhere else, and never with the dynamic xTaskCreate or
-    xQueueCreate. Nothing enforces this yet; it is on review.
+    xQueueCreate — CI greps src/ for both and fails.
   - One owner per resource: src/serial.cpp the UART, src/sdwrite.cpp the card,
     lib/SystemTime the clocks, lib/Battery the ADC. Everything else goes through a
     queue or the library wrapper — this is what makes the absence of mutexes safe.

@@ -72,9 +72,8 @@ and it would have to be re-applied silently on every fresh checkout.
 
 **Consequence handled here rather than deferred:** because every kernel-object
 creation in `src/` is converted by this change, a grep for `xTaskCreate(` or
-`xQueueCreate(` outside their `...Static` forms is a complete check today, and belongs
-in CI. Landing it needs a token with the `workflow` scope, so it is planned here and
-not yet done — tasks 5.3 and 5.4 stay open. That is a different question from `pvPortMalloc`,
+`xQueueCreate(` outside their `...Static` forms is a complete check today, and it goes
+into CI as part of this change. That is a different question from `pvPortMalloc`,
 which stays in `src/` on the message path and cannot be guarded until the by-value
 item lands.
 

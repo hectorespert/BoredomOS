@@ -95,12 +95,12 @@ board is unreachable.
   `--gc-sections` and dead-store elimination remove an unused array and the build goes
   green at an unchanged RAM figure. Remove the task afterwards and verify `pio run`
   succeeds again.
-- [ ] 5.3 Add a CI step that greps `src/` for `xTaskCreate(` and `xQueueCreate(`
+- [x] 5.3 Add a CI step that greps `src/` for `xTaskCreate(` and `xQueueCreate(`
   outside their `...Static` forms and fails if either is found, and verify it passes
   on the converted tree and fails on a reverted line. This is a complete check today
   because this change converts every kernel-object creation in `src/`; it says nothing
   about `pvPortMalloc`, which stays on the message path.
-- [ ] 5.4 Change CI from a bare `pio run` to `pio run -e uno_r4_minima -e bench -e libs`
+- [x] 5.4 Change CI from a bare `pio run` to `pio run -e uno_r4_minima -e bench -e libs`
   and verify all three build, since `default_envs` otherwise pins CI to the flight
   environment and leaves the new budget policed in one configuration of three
 - [x] 5.5 Verify `pio test -e libs --without-uploading --without-testing` still builds

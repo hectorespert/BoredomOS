@@ -38,7 +38,7 @@ architecture in a spec.
 ## Commands
 
 ```bash
-pio run                  # build the flight environment (this is all CI runs)
+pio run                  # build the flight environment (CI builds all three)
 pio run -t upload        # flash the board
 pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text)
 pio test                 # HIL: flashes this firmware, then checks it from the host
@@ -68,7 +68,7 @@ A change that touches `lib/` or a task body is not verified by building it. Run 
 
 These are the invariants that are easiest to break silently. `ARCHITECTURE.md` explains why each one exists.
 
-- **Adding a subsystem is four edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, its static storage (`StackType_t xStack[N]` and a `StaticTask_t`) beside it, and an `xTaskCreateStatic` in `setup()`. Tasks and queues are created nowhere else, and never with the dynamic `xTaskCreate` / `xQueueCreate` — nothing enforces this yet, so it is on review. Note `portable/FSP/port.c` contains its own `xTaskCreate` of 1024 words: it is unreachable only because no build here defines `AUTOSTART_FREERTOS` or `EARLY_AUTOSTART_FREERTOS`, and with the current heap it could not succeed. Do not define either.
+- **Adding a subsystem is four edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, its static storage (`StackType_t xStack[N]` and a `StaticTask_t`) beside it, and an `xTaskCreateStatic` in `setup()`. Tasks and queues are created nowhere else, and never with the dynamic `xTaskCreate` / `xQueueCreate` — CI greps `src/` for both and fails. Note `portable/FSP/port.c` contains its own `xTaskCreate` of 1024 words: it is unreachable only because no build here defines `AUTOSTART_FREERTOS` or `EARLY_AUTOSTART_FREERTOS`, and with the current heap it could not succeed. Do not define either.
 - **Queues carry heap pointers, never values.** Producer `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`. The consumer frees after use. A leak is still fatal within minutes: the heap is `0x1800` and backs the queued items only. Changing a queue's depth means re-deriving what backs it — depth plus one block per producer that can hold an unsent item and one per consumer holding an unreleased one, not depth alone.
 - **Stack sizes in `xTaskCreateStatic` are words, not bytes**, and are tuned tight (96–256). The count must match the length of the `StackType_t` array passed alongside it. After changing a task body, check that task's high-water mark in the SD log before assuming it still fits.
 - **Priorities come from `include/Priority.h`**, never raw numbers.
