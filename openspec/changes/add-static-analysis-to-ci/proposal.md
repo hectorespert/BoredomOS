@@ -11,7 +11,7 @@ own code is 0.4% of the output, which is precisely how a check ends up disabled.
 
 ## What Changes
 
-- `platformio.ini` gains a `pio check` configuration: cppcheck only, scoped to `src/`,
+- `platformio.ini` gains a `pio check` configuration: cppcheck **and clang-tidy**, scoped to `src/`,
   `include/` and `lib/`, skipping installed packages, with `unusedFunction` and
   everything under `.pio/libdeps/` suppressed. The path suppression is the load-bearing
   part — MAVLink is header-only, so its defects surface inside our translation units and
@@ -31,8 +31,12 @@ cannot see that task bodies are reached through `xTaskCreate` function pointers,
 `setup()` and `loop()` are called by the Arduino core, or that `lib/` functions are
 used from another translation unit.
 
-With that configuration the check reports **12 defects, all LOW, none HIGH or MEDIUM**:
-eight C-style casts, three `unusedLabel` in `src/logger.cpp`, and one `constVariable`.
+With that configuration cppcheck reports **12 defects, all LOW**: eight C-style casts,
+three `unusedLabel` in `src/logger.cpp`, and one `constVariable`.
+
+clang-tidy is enabled alongside it because the two tools do not overlap: it finds
+**5 MEDIUM defects cppcheck does not see at all**, two of which are real. Its default
+check set had to be replaced — see `design.md`, Decision 6.
 
 ## Correcting the backlog entry that asked for this
 

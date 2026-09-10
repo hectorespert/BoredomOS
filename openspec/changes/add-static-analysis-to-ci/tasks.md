@@ -22,6 +22,15 @@ both run without hardware, and the firmware binary is byte-identical before and 
       whole build is zero, and that RAM and flash are unchanged at 16828 and 88900
       bytes.
 
+## 1c. Second analyser
+
+- [x] 1c.1 Add `clangtidy` to `check_tool` alongside cppcheck, with
+      `--checks=-*,bugprone-*,cert-*,clang-analyzer-*,-cert-err58-cpp`; verify the
+      default check set is not used, since it reports 248 mostly-irrelevant defects
+      against the curated set's 5.
+- [x] 1c.2 Confirm the combined run reports 5 MEDIUM and 12 LOW, no HIGH, and that the
+      firmware is unchanged.
+
 ## 2. Wire it into CI
 
 - [x] 2.1 Add a `pio check` step to `.github/workflows/main.yml` after the build step,

@@ -118,6 +118,38 @@ cheap to establish while the count is already zero.
 It also makes `-Werror` a defensible future step, which it would not be against a
 codebase carrying a backlog of warnings.
 
+### 6. clang-tidy earns a place, but only with its default checks thrown away
+
+Run with PlatformIO's defaults, clang-tidy reports **248 MEDIUM defects** against
+cppcheck's 12. Practically none are about this firmware: they are LLVM house style —
+`modernize-use-trailing-return-type`, `readability-magic-numbers`,
+`hicpp-uppercase-literal-suffix`, `llvm-header-guard`, and
+`llvmlibc-implementation-in-namespace`, which asks that `Battery::voltage` be declared
+inside `__llvm_libc`.
+
+Restricted to the families that look for defects rather than for style —
+`bugprone-*`, `cert-*`, `clang-analyzer-*`, minus `cert-err58-cpp`, which warns about
+static constructors throwing on a target with no exceptions — it reports 5, and is
+three times faster (7 s against 24 s).
+
+Those 5, and what each is worth:
+
+| Finding | Verdict |
+|---|---|
+| `lib/SdData/SdData.cpp:6` — two adjacent `int` parameters easily swapped | **Real.** `SdData(int files, size_t size)` is exactly the confusion behind `TEST_FILE_SIZE_MB = 1024UL` being bytes, which the backlog already tracks |
+| `src/mavlink.cpp:177` — narrowing `unsigned long long` to `time_t` | **Real.** This is the timestamp arriving from the ground; it belongs with the backlog entry about validating what the GCS sends |
+| `src/main.cpp:62` — suspicious `sizeof(A*)` | Deliberate: it is the queue-carries-pointers protocol |
+| `src/mavlink.cpp:154,170` — consecutive identical switch branches | Deliberate: the reserved empty cases documented in ARCHITECTURE.md |
+
+The three deliberate ones are left visible rather than suppressed. A checker pointing at
+the two most easily misread constructs in the firmware is doing its job, and a reader who
+has to look up why `sizeof(Data*)` is intentional will find the answer in
+`ARCHITECTURE.md` §4.
+
+What clang-analyzer did **not** find is worth recording too: no null-dereference on the
+unchecked `pvPortMalloc` calls. Path-sensitive analysis does not help when the tool does
+not know the function allocates.
+
 ## Risks / Trade-offs
 
 - **A warning-only check is a check nobody reads** → accepted for now, because the
@@ -130,6 +162,11 @@ codebase carrying a backlog of warnings.
   cross-TU calls), not to quiet an inconvenient result.
 - **cppcheck's version is whatever PlatformIO ships** (2.11 today), so results can
   shift under a toolchain update → this is exactly why the step cannot fail the build.
+  The same applies to clang-tidy, and more sharply: check names come and go between
+  releases, and a `--checks=` list can silently stop matching.
+- **clang-tidy adds ~7 s locally and a one-time toolchain download on a cold CI cache**
+  → acceptable against a build that already takes longer, and the PlatformIO cache step
+  already in the workflow covers the repeat cost.
 - **The check runs on the same job as the build**, so a cppcheck crash would show as a
   CI failure even though it cannot fail on defects → acceptable; a crashing analyser is
   worth knowing about.
