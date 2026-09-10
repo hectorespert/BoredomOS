@@ -84,7 +84,7 @@ inaccurate; both are updated in this change.
 ### 3. The readiness guards are deleted, not replaced
 
 `while (!Serial)` in `src/serial.cpp` (twice) and `waitSerial()` in `src/mavlink.cpp`
-(four call sites) exist because the USB CDC is not ready until a host opens the port.
+(three call sites) exist because the USB CDC is not ready until a host opens the port.
 On a `UART`, `operator bool()` returns `true` unconditionally, so after the move they
 are not a wait — they are code that always falls straight through.
 
@@ -113,14 +113,16 @@ One owner each, unchanged in spirit from `ARCHITECTURE.md`:
 | Resource | Owner after this change |
 |---|---|
 | `LINK_SERIAL` (the UART on D0/D1) | `src/serial.cpp` — the only file that reads or writes it |
-| `Serial` (USB CDC console) | **No owner.** Opened in `src/main.cpp`, written by nobody. |
+| `Serial` (USB CDC console) | **No owner.** Opened in `src/main.cpp`; the only writer is the stack-overflow hook in `src/hooks.cpp`, which runs after the scheduler has stopped. |
 | MAVLink protocol semantics | `src/mavlink.cpp` |
 | Task and queue creation | `src/main.cpp` |
 | SD card, ADC, clocks | unchanged |
 
 The console having no owner is deliberate and is what keeps this change small: a port
-nobody writes to needs no arbitration. The first code that writes to it must pick an
-owner in the same change that introduces it.
+that nothing writes to *while tasks are running* needs no arbitration. The overflow
+hook is not an exception to that — by the time it runs, nothing else is executing. The
+first code that writes to the console from a task must pick an owner in the same
+change that introduces it.
 
 ## Risks / Trade-offs
 

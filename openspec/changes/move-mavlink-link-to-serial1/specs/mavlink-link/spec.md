@@ -24,7 +24,9 @@ over the USB CDC port.
 
 - **WHEN** a host opens the USB CDC port at 115200
 - **THEN** it receives no MAVLink frames
-- **AND** it receives no text, because nothing writes to the console in this change
+- **AND** it receives no text while the firmware is running normally; the console is
+  reserved and its only writer is the stack-overflow handler, which runs only after
+  the scheduler has stopped
 
 ### Requirement: The link port and baud rate are defined in one place
 

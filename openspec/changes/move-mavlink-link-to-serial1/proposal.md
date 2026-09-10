@@ -19,11 +19,13 @@ whole system for the duration of its transmission.
   `LINK_SERIAL` and `LINK_BAUD`. Both are overridable from `build_flags`, so
   `-D LINK_SERIAL=Serial` returns the link to USB without touching protocol code.
 - `TaskSerialWrite` drops from `PRIORITY_HIGHEST` to `PRIORITY_HIGH`.
-- The `while (!Serial)` guards in `src/serial.cpp` and `waitSerial()` in
-  `src/mavlink.cpp` are removed. On a `UART` the core's `operator bool()` returns
-  `true` unconditionally, so they are not a wait — they are dead code.
-- `Serial` stays open at 115200 as a text console, but nothing writes to it in this
-  change. It is reserved, not used.
+- The two `while (!Serial)` guards in `src/serial.cpp` and `waitSerial()` with its
+  three call sites in `src/mavlink.cpp` are removed. On a `UART` the core's
+  `operator bool()` returns `true` unconditionally, so they are not a wait — they are
+  dead code.
+- `Serial` stays open at 115200 as a text console. Nothing writes to it while tasks
+  are running; the only writer remains the stack-overflow hook in `src/hooks.cpp`,
+  unchanged by this change.
 - **BREAKING** for the ground station: `mavproxy.py --master=/dev/ttyACM0` no longer
   sees the vehicle. The link is reachable over the UART pins, or over USB again with
   `-D LINK_SERIAL=Serial`.
@@ -48,6 +50,11 @@ None. `openspec/specs/` is empty; this change introduces the first capability.
 
 **RAM.** No task, queue or library is added or removed, so the cost against the 8 KB
 FreeRTOS heap is **zero**. Task count stays at seven and total stack at 1152 words.
+
+Static RAM does grow: instantiating the `UART` brings its two `SafeRingBufferN<512>`
+buffers into `.bss`. Measured with `pio run`, total RAM goes from 15584 bytes on the
+`-D LINK_SERIAL=Serial` build to 16828 on the default build — **+1244 bytes**, 51.4%
+of the 32 KB. None of it comes out of the FreeRTOS heap.
 
 **MAVLink surface.** Unchanged. Same message set, same rates (`HEARTBEAT` and
 `SYSTEM_TIME` at 1 Hz, `BATTERY_STATUS` every 2 s), same identity triple: system id

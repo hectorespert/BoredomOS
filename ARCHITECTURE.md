@@ -36,7 +36,7 @@ flowchart LR
         direction LR
 
         SR["TaskSerialRead<br/>HIGHEST · 96 w"]
-        SW["TaskSerialWrite<br/>HIGHEST · 192 w"]
+        SW["TaskSerialWrite<br/>HIGH · 192 w"]
         MV["TaskMavlink<br/>LOW · 256 w"]
         HB["TaskHeartbeat<br/>HIGH · 128 w"]
         BS["TaskMavlinkBatteryStatus<br/>HIGH · 128 w"]
@@ -52,14 +52,14 @@ flowchart LR
         SDD["SdData<br/>(lib)"]
     end
 
-    USB(["USB CDC · 115200"])
+    LINK(["Serial1 UART · D0/D1<br/>LINK_BAUD"])
     CARD[("microSD<br/>SPI, CS 9")]
     ADC(["Solar charger<br/>A0"])
     RTC(["DS1307<br/>I2C"])
 
-    GCS <--> USB
-    USB --> SR
-    SW --> USB
+    GCS <--> LINK
+    LINK --> SR
+    SW --> LINK
 
     SR --> RQ --> MV
     MV --> WQ
@@ -107,17 +107,26 @@ touches the card.
 
 **Priorities are named, never numeric.** `include/Priority.h` defines
 `PRIORITY_LOWEST` (0) through `PRIORITY_HIGHEST` (3). The ordering encodes what
-must not be starved: serial I/O is `HIGHEST` because bytes are lost if the UART is
-not drained, periodic telemetry is `HIGH`, protocol handling and sampling are
-`LOW`, and SD writing is `LOWEST` because it blocks on SPI and nothing waits for
-it.
+must not be starved: reading the link is `HIGHEST` so the receive ring is drained
+before it overflows, periodic telemetry and link writing are `HIGH`, protocol
+handling and sampling are `LOW`, and SD writing is `LOWEST` because it blocks on
+SPI and nothing waits for it.
+
+`TaskSerialWrite` is deliberately **not** `HIGHEST`, even though it is serial I/O.
+The core's `UART::write()` busy-waits until the frame is on the wire rather than
+buffering and returning, and this port builds with `configUSE_TIME_SLICING` at `0`,
+so a task that never blocks is not preempted by its equals. At `HIGHEST` a single
+68-byte `BATTERY_STATUS` would stall every other task for ~11.8 ms at 57600 baud.
+Nothing is lost by transmitting late — the frame waits in `serialWriteQueue` — so
+the writer sits at `HIGH`, level with its own producers, which yield every cycle on
+`vTaskDelayUntil`.
 
 **The seven tasks:**
 
 | Task | File | Stack | Priority | Cadence |
 |---|---|---|---|---|
 | `TaskSerialRead` | `src/serial.cpp` | 96 w | HIGHEST | polls every 10 ms |
-| `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGHEST | blocks on `serialWriteQueue` |
+| `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGH | blocks on `serialWriteQueue` |
 | `TaskHeartbeat` | `src/mavlink.cpp` | 128 w | HIGH | `HEARTBEAT` and `SYSTEM_TIME`, alternating every 500 ms |
 | `TaskMavlinkBatteryStatus` | `src/mavlink.cpp` | 128 w | HIGH | every 2 s |
 | `TaskMavlink` | `src/mavlink.cpp` | 256 w | LOW | blocks on `serialReadQueue` |
@@ -160,10 +169,18 @@ something** before writing through the pointer.
 
 ### 5.1 Serial ↔ MAVLink
 
-`src/serial.cpp` **owns the UART**. It is the only file that performs I/O on
-`Serial`; everything else that wants to talk to the ground posts a message to a
-queue. Other tasks may wait on `while (!Serial)` before publishing, because the USB
-CDC is not ready until a host opens the port, but they never read or write it.
+`src/serial.cpp` **owns the link port**. It is the only file that performs I/O on
+`LINK_SERIAL`; everything else that wants to talk to the ground posts a message to a
+queue. No task waits for the port to become ready: a hardware UART has none to wait
+for, and the satellite must transmit whether or not anyone is listening.
+
+The port and its speed are named once, in `include/Link.h`, as `LINK_SERIAL` and
+`LINK_BAUD`. Both are `#ifndef`-guarded so `build_flags` can override them —
+`-D LINK_SERIAL=Serial` puts the link back on USB CDC for bench work without
+touching any protocol code. The alias must stay a macro naming a concrete port:
+`UART` overloads `write(uint8_t*, size_t)` as non-const and never overrides `Print`'s
+virtual const version, so reaching the port through a `HardwareSerial&` would
+silently select the per-byte fallback.
 
 - `TaskSerialRead` drains available bytes and feeds them one at a time to
   `mavlink_parse_char`. When a complete message is parsed it is copied to the heap
@@ -240,7 +257,8 @@ Wiring is hardcoded, not configurable. Changing a pin means changing the code.
 
 | Resource | Where | Owned by |
 |---|---|---|
-| USB CDC serial, 115200 | `Serial` | `src/serial.cpp` |
+| MAVLink link, `LINK_BAUD` | `LINK_SERIAL` — `Serial1` on **D0** (`RX`) / **D1** (`TX`) | `src/serial.cpp` |
+| USB CDC console, 115200 | `Serial` | **no owner** — only `src/hooks.cpp` writes, from the stack-overflow hook |
 | microSD card | SPI, CS on pin **9** | `src/sdwrite.cpp` via `lib/SdData` |
 | Battery / solar charger sense | **A0** | `lib/Battery` |
 | DS1307 real-time clock | I2C, address `0x68` | `lib/SystemTime` |
@@ -285,13 +303,20 @@ Missing hardware stops the board on purpose.
 ```bash
 pio run                  # build — this is all CI runs
 pio run -t upload        # flash the board
-pio device monitor       # serial console at 115200
-mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
+pio device monitor       # USB console at 115200 — silent today, see below
+mavproxy.py --master=<link port>,57600 --load-module system_time
 ```
 
-Note that `pio device monitor` shows raw MAVLink frames, not text: the same port
-carries the binary link, so the monitor is only useful for confirming that bytes
-are moving.
+`<link port>` is whatever is wired to D0/D1: the telemetry radio, or a USB-TTL
+adapter on the bench. `/dev/ttyACM0` no longer carries MAVLink. To reach the link
+over USB again, build with `-D LINK_SERIAL=Serial` and point MAVProxy at
+`/dev/ttyACM0,115200` as before.
+
+`pio device monitor` now opens the USB console, which is silent in normal operation.
+The only code that writes to it is the stack-overflow hook in `src/hooks.cpp`, which
+runs after the scheduler has stopped. `Serial` is otherwise reserved for diagnostics
+and a CLI and has **no owner**; the first code that writes to it while tasks are
+running must claim one.
 
 **There is no host test environment.** `test/test_main.cpp` asserts against a real
 battery voltage, a real DS1307 and a real SD card, so `pio test` needs the assembled
