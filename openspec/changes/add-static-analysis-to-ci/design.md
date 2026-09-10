@@ -103,6 +103,21 @@ line on its first run is the check earning its place.
 Left unfixed here, deliberately — changing that initialiser is firmware work and belongs
 with the `energy` defect, not with a CI change.
 
+### 5. Compiler warnings are enabled because they are free, not because they help here
+
+`-Wall -Wextra` were added after measuring, not before. A full rebuild of all 104
+translation units produces **zero warnings** — not zero in `src/`, zero anywhere,
+dependencies included — and the firmware is byte-identical with and without them.
+
+Being honest about what that buys: nothing today. GCC at any warning level tried,
+including `-Wpedantic`, reports neither of the two defects the backlog cares about.
+What it buys is that the counter is at zero, so the first warning that ever appears is
+signal rather than something to scroll past. That property is worth having and is only
+cheap to establish while the count is already zero.
+
+It also makes `-Werror` a defensible future step, which it would not be against a
+codebase carrying a backlog of warnings.
+
 ## Risks / Trade-offs
 
 - **A warning-only check is a check nobody reads** → accepted for now, because the

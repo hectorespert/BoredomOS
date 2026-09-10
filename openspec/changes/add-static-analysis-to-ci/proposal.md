@@ -17,6 +17,11 @@ own code is 0.4% of the output, which is precisely how a check ends up disabled.
   part — MAVLink is header-only, so its defects surface inside our translation units and
   source filters alone do not silence them (4823 defects with filters only, 12 with the
   suppression).
+- `platformio.ini` gains `-Wall -Wextra` to `build_flags`. The tree already builds
+  clean under them: measured 0 warnings across the whole build, dependencies included,
+  and the firmware is byte-identical (16828 bytes of RAM, 88900 of flash, before and
+  after). They cost nothing today and catch the next regression rather than the next
+  reader.
 - `.github/workflows/main.yml` gains a `pio check` step that runs after the build and
   **does not fail the job**. `pio check` exits 0 unless `--fail-on-defect` is passed,
   so warning-only is the default behaviour rather than something to arrange.
