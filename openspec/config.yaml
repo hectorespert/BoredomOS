@@ -75,6 +75,6 @@ operations:
         `pio run -t upload` afterwards if the board should stay operational.'
   archive:
     guidance:
-      - Update ARCHITECTURE.md in the same change when it becomes inaccurate. There
-        is no TODO.md entry to close out: it was deleted when the change was
-        proposed, and openspec/specs/ plus the git history are the record.
+      - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
+        There is no TODO.md entry to close out: it was deleted when the change
+        was proposed, and openspec/specs/ plus the git history are the record.'
