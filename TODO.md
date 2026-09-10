@@ -418,23 +418,6 @@ Partial alternative: `MEMINFO` (152) for the heap, although it is ArduPilot-spec
 and does not cover the per-task stacks.
 
 
-### Add static analysis to CI
-
-**Status:** defined
-**Scope:** `.github/workflows/main.yml`, `platformio.ini`
-
-The workflow only runs `pio run`: it checks that it compiles, nothing more.
-PlatformIO ships cppcheck integrated in `pio check`, which costs nothing to add to
-the existing job.
-
-It is not theoretical: the pointer arithmetic of *[Fix the pointer arithmetic in
-the unknown-message `STATUSTEXT`]* and the unchecked `pvPortMalloc` calls are
-exactly the kind of defect cppcheck flags.
-
-To decide: which severities fail the build. Start by warning without breaking the
-job, see the real noise level over this code and only then tighten it — if the first
-`pio check` comes out with a hundred warnings and takes CI down, it ends up disabled.
-
 ## To change
 
 ### Check the result of `pvPortMalloc` in the four places that don't
@@ -846,8 +829,10 @@ Small, unrelated things worth getting out of the way in one go:
   initialisers (`.unixtime = ...`) are the standard equivalent.
 - `src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
   with no braces of its own, which puts a declaration in the scope of the rest of
-  the switch. It compiles because it has no initialiser, but it is exactly what
-  *[Add static analysis to CI]* will flag.
+  the switch. It compiles because it has no initialiser. Note that cppcheck does
+  **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
+  actually reports, and this is not in it. It does report the GCC initialiser syntax
+  above, as three `unusedLabel` findings in `src/logger.cpp`.
 - `test/test_main.cpp` uses `StaticJsonDocument`, deprecated in ArduinoJson 7, while
   `src/sdwrite.cpp` already uses `JsonDocument`.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
