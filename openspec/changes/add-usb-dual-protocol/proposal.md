@@ -84,7 +84,7 @@ know about.
 | New queue | none — the USB transmit path writes directly, by design | — |
 | Second MAVLink parser state (`mavlink_message_t` + `mavlink_status_t`) | ~300 B | `.bss` |
 | `MAVLINK_MAX_PACKET_LEN` transmit buffer | 280 B | **stack** |
-| Console task stack, 192 -> ~384 words to hold that buffer | 4 x 192 = **768 B** | heap |
+| Console task stack, 192 -> ~384 words to hold that buffer | 4 x 192 = **768 B** | `.bss` — the `StackType_t` array declared in `src/main.cpp` grows with it |
 | | **768 B of 8192 (9%) on top of `add-console-cli`** | |
 
 The stack growth is the whole cost, and it is the same shape as `src/serial.cpp`,

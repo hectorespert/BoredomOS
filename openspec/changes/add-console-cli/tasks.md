@@ -22,7 +22,8 @@ check that runs without hardware.
       opened `Serial`), poll `CLI_SERIAL` for bytes into a bounded line buffer, and
       dispatch on newline; verify with `pio run`
 - [ ] 2.2 Declare `[[noreturn]] extern void TaskCli(void *)` in `src/main.cpp` and add
-      the `xTaskCreate` at `PRIORITY_LOWEST` with a provisional 192 words and a
+      the `xTaskCreateStatic` at `PRIORITY_LOWEST` with a provisional 192 words, its
+      `StackType_t` array and `StaticTask_t` declared beside it, and a
       `taskCliHandler`; verify `pio run` builds and the three-edit pattern in
       `ARCHITECTURE.md` is followed
 - [ ] 2.3 Implement line framing: bounded buffer, overlong lines discarded rather than
@@ -59,7 +60,8 @@ check that runs without hardware.
 ## 4. Stack and heap verification
 
 - [ ] 4.1 **[board]** Run `ps` and read the CLI task's own row; resize the
-      `xTaskCreate` stack from the provisional 192 words to the measured need plus
+      `xTaskCreateStatic` stack, and the `StackType_t` array beside it, from the
+      provisional 192 words to the measured need plus
       margin, and record the measured figure in the commit message
 - [ ] 4.2 **[board]** Re-read every other task's high-water mark after enabling the
       trace facility — it adds 8 bytes to each TCB — and confirm none has lost the

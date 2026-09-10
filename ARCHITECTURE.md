@@ -94,12 +94,15 @@ declarations rather than headers. `src/logger.cpp` declares
 `extern QueueHandle_t sdWriteQueue;` and `extern SystemTime systemTime;`; nothing
 is passed through `pvParameters`, which is `(void)`-cast away in every task.
 
-Adding a subsystem therefore means three edits, always the same three:
+Adding a subsystem therefore means four edits, always the same four:
 
 1. Write the task body in a new `src/*.cpp`, reaching what it needs by `extern`.
 2. Declare it `[[noreturn]] extern void TaskX(void *pvParameters);` in `src/main.cpp`.
-3. `xTaskCreate` it in `setup()` with a priority from `include/Priority.h` and a
-   stack size in words.
+3. Declare its storage there too — a `StackType_t xStack[N]` and a `StaticTask_t` — so
+   the linker accounts for the task by name before it exists.
+4. `xTaskCreateStatic` it in `setup()` with a priority from `include/Priority.h`, a
+   stack size in words, and the storage from step 3. `configASSERT` the handle: with
+   static storage a `NULL` can only mean a bad argument.
 
 The one exception to the composition root is `sdData` in `src/sdwrite.cpp`: the
 SD ring object is a file-scope global next to its only user, because nothing else
@@ -142,10 +145,32 @@ cadence does not drift with the work done in the body. Consumer tasks block on
 This is the rule most easily broken, so it is stated on its own.
 
 **Queues carry heap pointers, never values.** All three queues are declared with
-`sizeof(T*)` as their element size. A queue of 16 `mavlink_message_t` by value
-would be 4.6 KB of the 8 KB heap standing permanently reserved; a queue of 16
-pointers is 64 bytes, and the messages themselves exist only while they are in
-flight.
+`sizeof(T*)` as their element size. A queue of `mavlink_message_t` by value would
+stand permanently reserved at 291 bytes a slot; a queue of pointers is four bytes a
+slot, and the messages themselves exist only while they are in flight.
+
+The queue structures and the slot arrays are static, in `.bss`. What is not static is
+the items, and the heap is sized to back them — from the number that can *exist*, not
+the number that fits in the queues:
+
+| Queue | Depth | Also in existence | Blocks | Bytes |
+|---|---|---|---|---|
+| `serialReadQueue` | 8 | 1 producer, 1 consumer | 10 x 304 | 3040 |
+| `serialWriteQueue` | 4 | 3 producers, 1 consumer | 8 x 304 | 2432 |
+| `sdWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 56 | 336 |
+| | | | **Total** | **5808** |
+
+against 6136 usable of `configTOTAL_HEAP_SIZE`. The extra blocks are not slack: a
+producer allocates *before* it sends, so learning that a queue is full costs a block
+beyond the depth; a consumer holds one between `xQueueReceive` and `vPortFree`; and
+`serialWriteQueue` has three producer tasks — `TaskHeartbeat`,
+`TaskMavlinkBatteryStatus` and `TaskMavlink`'s timesync reply — that can each be
+holding one at the same instant.
+
+**The consequence is which failure a burst finds.** Because the depths are backed, a
+saturated queue reports itself through `xQueueSend`, which every producer handles by
+freeing the item. Before, the allocator ran out first and returned `NULL` — the path
+that is not handled everywhere.
 
 The protocol has exactly three rules, and every producer and consumer follows them:
 
@@ -265,6 +290,18 @@ Wiring is hardcoded, not configurable. Changing a pin means changing the code.
 | Internal RTC | on-chip | `lib/SystemTime` |
 | Status LED | `LED_BUILTIN` | `src/hooks.cpp` |
 
+The status LED carries the two faults that stop the board, and the patterns are
+chosen to be told apart with nothing attached — which is the case they exist for:
+
+| Pattern | Means |
+|---|---|
+| Slow symmetric blink, 2 s on and 2 s off | A task overflowed its stack |
+| Two rapid blinks, then a pause of about a second | An allocation could not be satisfied |
+
+Both hooks mask interrupts and never return, so neither pattern can be produced by a
+board that is still running. Neither uses `delay()` or the serial port: the tick and
+the USB interrupt are gone by the time they blink, so both busy-wait instead.
+
 "Owned by" is the operative column: each of these has exactly one owner, and code
 outside that owner reaches the resource through a queue or through the library
 wrapper, never directly. That is what makes the absence of mutexes safe.
@@ -278,23 +315,28 @@ for a single LiPo cell and honest about being an estimate.
 
 Most of what looks unusual in this firmware follows from four numbers.
 
-**8 KB of FreeRTOS heap.** `configTOTAL_HEAP_SIZE` is `0x2000` on this port, out of
-32 KB of RAM total. Task stacks, TCBs and every queued message come out of it. This
-is why queues carry pointers, why messages are freed the instant they are consumed,
-and why adding a library is a decision rather than a detail.
+**2652 bytes of headroom.** Not 32 KB, and not the 37 % that `pio run` appears to
+leave free. Task stacks, control blocks and queue structures are in `.bss`, counted by
+the linker; `configTOTAL_HEAP_SIZE` is `0x1800` and backs the queued items only; and
+`g_heap`, the main stack and the vector table take another 9472 bytes that the printed
+figure omits. `scripts/ram_budget.py` prints the honest total after every link and
+fails the build before the headroom runs out. This is why queues carry pointers, why
+messages are freed the instant they are consumed, and why adding a library or a task
+is a decision rather than a detail — but it is now a decision the build can refuse.
 
 **Stack sizes are in words, not bytes**, and they are tuned tight — 96 to 256 words,
 384 to 1024 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled and
 `src/hooks.cpp` traps an overflow into a slow `LED_BUILTIN` blink with interrupts
-disabled. **A board blinking slowly on boot means a stack is too small, not a wiring
-fault.** After changing any task body, check that task's high-water mark in the SD
+disabled, and an allocation failure into a fast double blink. **A blinking board means
+a stack is too small or memory ran out, not a wiring fault** — the two patterns are in
+section 6. After changing any task body, check that task's high-water mark in the SD
 log before assuming it still fits.
 
 **Four priority levels**, from `include/Priority.h`, never raw numbers. FreeRTOS is
 configured with `configMAX_PRIORITIES` of 5 and a 1000 Hz tick.
 
 **`configASSERT` halts rather than degrades.** `setup()` asserts on the RTC, the SD
-card and each queue creation. A CubeSat with no clock or no log is not a CubeSat
+card, each queue creation and each task creation. A CubeSat with no clock or no log is not a CubeSat
 flying in a degraded mode; it is a CubeSat whose data cannot be trusted afterwards.
 Missing hardware stops the board on purpose.
 
@@ -337,11 +379,22 @@ a single one, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters
 *directories*, so it selects a suite, not a case.
 
 **`test_libs` does not cover `src/` at all.** `test_build_src` defaults to `no`, so
-the test binary contains no `main.cpp`, no `xTaskCreate` and no scheduler: it cannot
+the test binary contains no `main.cpp`, no task creation and no scheduler: it cannot
 observe a task, a queue, a stack high-water mark or the ownership protocol. The
-section sizes show it — the application links 16828 bytes of RAM, the test binary
-5368, too little to hold the 8 KB FreeRTOS heap. A green `pio test` says nothing
-about a task body.
+section sizes show it — the Unity binary links 5340 bytes of RAM and contains no
+`ucHeap`, no `vTaskStartScheduler` and no `xTaskCreateStatic` at all. A green
+`pio test -e libs` says nothing about a task body. Note that `test_build_src` governs
+`pio test`, not `pio run`: `pio run -e libs` builds the application and carries the
+same static storage as the flight build.
+
+**What the build reports, and what it does not.** `pio run` prints
+`.data + .noinit + .bss` — 20644 of 32768, about 63 % — which now moves when a task is
+added, because the stacks and control blocks are in `.bss`. It still leaves out
+`g_heap`, the main stack and the vector table, another 9472 bytes, so on its own it
+understates the commitment. `scripts/ram_budget.py` runs after every link and prints
+the honest figure: **30116 bytes committed of 32768, 2652 bytes of headroom.** That
+headroom is what a new subsystem has to fit into, and the build fails if it drops
+below the floor in `platformio.ini`.
 
 `test_hil/` is what exercises the assembled firmware. `run.py` discovers the cases,
 prints Unity's line format so `pio test` counts them natively, and reports anything it

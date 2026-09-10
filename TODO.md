@@ -443,75 +443,13 @@ from the allocation to the `xQueueSend` in `if (msg != NULL) { ... }`.
 It matters more than it looks because the first three are **periodic** senders: a
 momentarily full heap does not give a one-off failure, it repeats it every cycle.
 
-Made more likely by *[The two serial queues cannot fit in the FreeRTOS heap]*: with
-8 KB of heap this is not a remote condition.
+Made less likely, but not impossible, by the `use-static-allocation` change: the heap
+now backs every declared queue depth with the in-flight items counted, so a producer
+meets a full queue before the allocator runs out. The checks are still wanted, and
+`configUSE_MALLOC_FAILED_HOOK` now makes a failure visible rather than silent.
 
 To decide: whether failing to allocate should leave a trace (a counter in `Data`
 towards the SD log) or whether silently skipping the send is enough.
-
-### The two serial queues cannot fit in the FreeRTOS heap
-
-**Status:** defined
-**Scope:** `src/main.cpp`, `src/serial.cpp`, `src/mavlink.cpp`, `platformio.ini`
-
-`configTOTAL_HEAP_SIZE` on this port is `0x2000` — 8 KB — and task stacks, TCBs and
-the queue structures themselves all come out of that same heap. With this
-configuration a TCB is 96 bytes, and `heap_4` adds an 8-byte header to every block
-and rounds up to 8, so **a task costs `4 × stack_words + 112` bytes**. The full
-accounting at boot:
-
-| | Bytes |
-|---|---|
-| The seven tasks (1152 words of stack in total) | 5392 |
-| Idle task (128 words, `configMINIMAL_STACK_SIZE`) | 624 |
-| Timer daemon (128 words) and its command queue | 864 |
-| The three queue structures (`Queue_t` is 68 bytes, plus 16 × 4) | 432 |
-| **Committed** | **7312** |
-| **Free** | **~870** |
-
-Every message travelling through `serialReadQueue` and `serialWriteQueue` is a
-`mavlink_message_t`, which is packed and measures 291 bytes — 304 as a heap block.
-So the real ceiling is **two or three messages in flight**, against the depth 16
-that `src/main.cpp:61` and `src/main.cpp:64` declare for each of the two queues. The
-32 slots are unreachable by a wide margin: `pvPortMalloc` fails long before a queue
-reports itself full.
-
-Two findings from the accounting that were not obvious before:
-
-- Nothing in `src/`, `lib/` or the dependencies calls `xTimerCreate`. The timer
-  daemon and its queue are 864 bytes paid for a feature the firmware does not use,
-  and `-D configUSE_TIMERS=0` reclaims them outright.
-- There is more RAM headroom than the 32 KB figure suggests. `arm-none-eabi-nm`
-  puts `ucHeap` (8 KB) inside `.bss`, `g_heap` — the separate newlib malloc heap —
-  at `0x20003ce0` (another 8 KB), and `g_main_stack` (1 KB) at `0x20007b00`, which
-  leaves **7712 bytes between them that no section claims**. The RAM percentage
-  PlatformIO prints after a build counts none of those three.
-
-These numbers are computed from the map file and the kernel headers, not measured on
-the board. The free-heap field `TaskLogger` already writes to the SD log is the
-check.
-
-The consequence is not a full queue with a clean `vPortFree`, which the code does
-handle, but a `NULL` allocation — see *[Check the result of `pvPortMalloc`...]* —
-and, in the meantime, a heap that can be exhausted by a burst of traffic from the
-GCS.
-
-To decide:
-
-- Whether the queue depths drop to something the heap can really back, or whether
-  `configTOTAL_HEAP_SIZE` is raised in `build_flags` (the RA4M1 has 32 KB of RAM
-  total, so there is some room, but it is shared with everything the Arduino core
-  and the SD and MAVLink libraries use).
-- Whether it is worth queueing something smaller than the whole
-  `mavlink_message_t`: `mavlink_msg_to_send_buffer` already runs in
-  `TaskSerialWrite`, and the wire frame of a typical message is far smaller than the
-  291-byte struct. Two routes, and they differ: the serialised frame is still a heap
-  pointer allocated per message, while *[Queue the message intent by value instead of
-  a packed `mavlink_message_t`]* removes the **per-message** `pvPortMalloc` and
-  `vPortFree` churn — the queue's own storage is still heap, reserved once at
-  `xQueueCreate`. That entry owns the question now.
-- Whether the free heap and the failed allocations reach the ground, which is what
-  *[Emit `SYS_STATUS`]* proposes with `errors_count1..4`.
 
 ### Queue the message intent by value instead of a packed `mavlink_message_t`
 
@@ -553,8 +491,7 @@ watched one. The producer fills a local struct and sends it; the consumer receiv
 local copy and packs it into a `static mavlink_message_t` in `.bss` — the pattern
 `src/serial.cpp:29` already uses for the read path.
 
-The ledger, against the accounting in *[The two serial queues cannot fit in the
-FreeRTOS heap]*:
+The ledger, against the accounting in the `use-static-allocation` change:
 
 | | Today | Proposed |
 |---|---|---|
@@ -1042,6 +979,36 @@ To decide:
 Until this is settled, the guidance in `CLAUDE.md` and the `tasks` rule in
 `openspec/config.yaml` overstate what a test run proves for a change to a task
 body, and both should be narrowed to `lib/`.
+
+### Recover the bricked board
+
+**Status:** defined
+**Scope:** hardware, `test/test_hil/`
+
+The board has been unreachable since a firmware built from the `add-console-cli`
+change was flashed 72 bytes short of the FreeRTOS heap. It does not enumerate as a
+USB CDC device, so the 1200-baud touch that puts the bootloader into DFU cannot be
+delivered: that path runs entirely inside `tud_task()`, which this core services from
+the USB interrupt, and both plausible death paths mask interrupts.
+
+Recovery therefore needs physical access — a double tap of RESET puts the bootloader
+in DFU regardless of what the sketch is doing, after which `pio run -t upload`
+restores a working firmware.
+
+Until this is done, every step marked **[board]** in an OpenSpec change is blocked,
+and `pio test` reports every HIL case as `IGNORE` and exits 0 — so a green run proves
+nothing.
+
+To decide:
+
+- Whether anything should be added so this cannot recur silently. `VBTBKR[1..511]`,
+  the RA4M1's battery-backed registers, survive any reset and are untouched by this
+  firmware and by the bootloader, which uses only `VBTBKR[0]`. A boot counter there
+  could park the board in DFU after N failed starts, or select a reduced task set.
+  That is a change of its own, not part of recovering the board.
+- Whether the SWD pads are worth wiring for a probe, which would make this
+  recoverable without the enclosure open.
+
 
 ## Done
 

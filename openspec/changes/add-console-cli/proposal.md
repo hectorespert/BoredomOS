@@ -31,11 +31,12 @@ console owner that `ARCHITECTURE.md:317` says the first writer must claim.
   `Serial`, mirroring how `include/Link.h` names `LINK_SERIAL`. The `bench`
   environment — which moves the MAVLink link onto USB — overrides it to `Serial1`, so
   the two ports swap roles and no build has both protocols on one port.
-- **`-D configUSE_TIMERS=0`.** Required, not optional: the CLI task does not fit in the
-  heap otherwise. Nothing calls `xTimerCreate`, so the timer daemon and its command
-  queue are 864 bytes spent on an unused feature. This removes the timer-service task
-  from the running system, which is why `ps` is specified to report whatever the
-  scheduler holds rather than a fixed roster.
+- **The CLI task is created statically**, like every other: a `StackType_t` array and
+  a `StaticTask_t` declared in `src/main.cpp` beside an `xTaskCreateStatic`, per the
+  four-edit pattern that `use-static-allocation` established. `-D configUSE_TIMERS=0`
+  is already set by that change and must not be added again; its consequence still
+  holds, which is why `ps` reports whatever the scheduler holds rather than a fixed
+  roster.
 - **The four unchecked `pvPortMalloc` results in `src/mavlink.cpp` are checked.** This
   change absorbs `TODO.md`'s *Check the result of `pvPortMalloc` in the four places
   that don't*, whose entry is deleted in the same commit. It is not a tidy-up: with the
@@ -74,30 +75,36 @@ previously emitted nothing now answers text.
 
 ## Impact
 
-**RAM — this is the part that has to be justified.** Against the 8 KB FreeRTOS heap
-(`configTOTAL_HEAP_SIZE` 0x2000), starting from the boot accounting in `TODO.md`'s
-*The two serial queues cannot fit in the FreeRTOS heap*:
+**RAM — re-derived after `use-static-allocation`.** That change moved task stacks and
+control blocks out of the FreeRTOS heap into `.bss`, so the CLI task no longer competes
+with queued messages and no longer costs `4 x words + 112` of an 880-byte heap. It
+costs `.bss` that the linker counts, against the headroom that change leaves:
 
 | Item | Cost | Where |
 |---|---|---|
-| Committed at boot before this change | 7312 B | heap |
-| **Free before this change** | **880 B** | heap |
-| CLI task at a provisional 192 words | 4 x 192 + 112 = **880 B** | heap |
-| `configUSE_TRACE_FACILITY` adds `uxTCBNumber` + `uxTaskNumber` to every TCB | 8 B x 9 tasks = **72 B** | heap |
-| **Required** | **952 B** | heap |
-| Timer daemon and its command queue, reclaimed by `-D configUSE_TIMERS=0` | **+864 B** | heap |
-| **Free after this change** | **792 B** | heap |
-| `TaskStatus_t` snapshot buffer, 36 B x 12 slots | 432 B | `.bss`, **not** the heap |
+| Headroom after `use-static-allocation` | 2652 B | `.bss` |
+| CLI task at a provisional 192 words, plus its `StaticTask_t` | 4 x 192 + 76 = **844 B** | `.bss` |
+| `configUSE_TRACE_FACILITY` adds `uxTCBNumber` + `uxTaskNumber` to every control block | 8 B x 9 = **72 B** | `.bss` |
+| `TaskStatus_t` snapshot buffer, 36 B x 12 slots | **432 B** | `.bss` |
+| **Headroom after this change** | **~1304 B** | `.bss` |
 | New queue | none | — |
 
-**The change does not fit without reclaiming the timer daemon.** 952 bytes are needed
-and 880 are free: a deficit of 72. Nothing in `src/`, `lib/` or the dependencies calls
-`xTimerCreate`, so its task and command queue are 864 bytes paid for a feature the
-firmware does not use, and `-D configUSE_TIMERS=0` returns them. That flag is
-therefore part of this change, not an optimisation deferred to later — without it the
-CLI task cannot be created, and because no `xTaskCreate` result is checked in
-`src/main.cpp` the failure is silent and leaves the heap with nothing left for the
-periodic senders.
+**It fits, and the build will say so if that stops being true.** The 72-byte deficit
+this proposal originally described no longer exists: it was arithmetic against an 8 KB
+heap that no longer holds the tasks. `scripts/ram_budget.py` fails the build before the
+headroom runs out, so the silent `xTaskCreate` failure that bricked the board in the
+first attempt is not available any more — `xTaskCreateStatic` cannot fail for want of
+memory, and `src/main.cpp` `configASSERT`s every handle.
+
+`-D configUSE_TIMERS=0` is **already set** by `use-static-allocation` and is no longer
+part of this change. Do not add it a second time. It still has the consequence this
+proposal relies on — the timer-service task is not in the running system — which is why
+`ps` reports whatever the scheduler holds rather than a fixed roster.
+
+Note that `configUSE_TRACE_FACILITY=1` enlarges `TCB_t`, and `StaticTask_t` is sized
+from the same macros, so the two stay consistent as long as the flag is set for every
+environment in one `build_flags` block. Setting it per environment would corrupt every
+control block.
 
 This was found by flashing it. The first build of this change bricked the board: the
 task creation failed, the heap went to zero, and a periodic sender wrote a packed
