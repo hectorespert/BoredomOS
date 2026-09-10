@@ -541,6 +541,45 @@ hundred kilobytes to a few megabytes puts rotation at hours or days), and whethe
 the size is a compile-time constant or a ground-settable parameter under *[Implement
 the MAVLink parameter protocol]*.
 
+### `SdData::begin()` is not idempotent, and the Unity tests delete its open file
+
+**Status:** defined
+**Scope:** `lib/SdData`, `test/test_libs/test_main.cpp`
+
+`SdData::begin()` opens the log file only when it does not already hold one:
+
+```cpp
+_fileIdx = readLogIndex();
+if (!_dataFile) {
+    _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
+}
+```
+
+There is no `end()` and nothing ever closes `_dataFile`, so a second `begin()` is a
+no-op that silently keeps the first file — even when `_fileIdx` has changed and a
+different file is what should be open.
+
+`test/test_libs/test_main.cpp` walks straight into it. `setUp()` calls
+`cleanSdFiles()` and then `begin()`; `tearDown()` calls `cleanSdFiles()` again, which
+`SD.remove()`s a file `sdData` still has open. From the second case onwards `begin()`
+sees a truthy `_dataFile` and does not reopen, so the remaining cases write through a
+handle to a deleted file. The suite passes — it asserts on `SD.exists()`, not on the
+bytes — which is what makes this worth writing down rather than noticing the day it
+matters.
+
+In flight `begin()` is called exactly once, from `TaskSdWrite`, so nothing is broken
+today. It becomes real the moment anything restarts the logger: a card remount, an
+error-recovery path, or the SD failure handling of *[SD logging failure is silent]*.
+
+To decide: whether `begin()` closes and reopens unconditionally, or gains an `end()`
+and the tests call it; and whether `cleanSdFiles()` should refuse to remove a file the
+object still holds, which would have made this visible immediately.
+
+Found by Copilot reviewing the pull request that split `test/` into `test_libs` and
+`test_hil`. It is not a regression of that change: the code is untouched and only
+moved.
+
+
 ### `setup()` asserts on the RTC before the console exists
 
 **Status:** defined

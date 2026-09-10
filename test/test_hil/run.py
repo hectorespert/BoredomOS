@@ -71,7 +71,11 @@ def main():
         import hil
     except ImportError as exc:
         print(f"run.py:1:hil_imports:FAIL: {exc}", flush=True)
-        print("pymavlink and pyserial are required: pip install pymavlink", flush=True)
+        print(
+            "The checks need pymavlink and pyserial:\n"
+            "  pip install -r test/test_hil/requirements.txt",
+            flush=True,
+        )
         return 1
 
     try:

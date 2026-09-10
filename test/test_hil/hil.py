@@ -33,9 +33,15 @@ def find_port(wait=PORT_WAIT):
 
     override = os.environ.get("HIL_PORT")
     if override:
+        # Only a device path can be waited for. pymavlink also accepts endpoints
+        # like udp:127.0.0.1:14550, which never exist on the filesystem.
+        if not override.startswith("/") and not override.upper().startswith("COM"):
+            return override
         deadline = time.time() + wait
         while not os.path.exists(override) and time.time() < deadline:
             time.sleep(0.5)
+        if not os.path.exists(override):
+            raise NoLinkError(f"{override} did not appear after {wait:.0f}s")
         return override
 
     deadline = time.time() + wait
