@@ -44,7 +44,14 @@ pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text
 pio test                 # Unity tests — ON DEVICE ONLY, needs board + DS1307 + SD card
 ```
 
-There is no host/native test environment: `test/test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so tests never run in CI. They do run on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All test cases live in one file and are dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines — `pio test -f` filters test *directories*, of which there is only one.
+There is no host/native test environment. `test/` holds two suites:
+
+- **`test/test_libs/`** — the Unity suite. `test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so it never runs in CI. It runs on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All cases live in that one file, dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test *directories*, so it picks a suite, not a case.
+- **`test/test_hil/`** — host-side Python that interrogates the flashed firmware over the MAVLink link. `platformio.ini` excludes it with `test_ignore = test_hil`, since PlatformIO would try to compile it as C++. Run these by hand; see its `README.md`.
+
+**`test_libs` covers `lib/` and nothing else.** `test_build_src` defaults to `no`, so `src/` is not in the test binary: no task, no queue, no scheduler, no stack high-water mark. A green `pio test` proves nothing about a task body — only the SD log's high-water marks or a HIL check can.
+
+Adding any `test_*` subdirectory is what makes PlatformIO stop treating `test/` itself as a suite: it falls back to the root only when there are none. Keep every suite in its own directory, or one of them stops running with no warning.
 
 `pio test` is not a read-only check: it reflashes the board with the test binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational.
 

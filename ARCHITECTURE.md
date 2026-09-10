@@ -318,12 +318,31 @@ runs after the scheduler has stopped. `Serial` is otherwise reserved for diagnos
 and a CLI and has **no owner**; the first code that writes to it while tasks are
 running must claim one.
 
-**There is no host test environment.** `test/test_main.cpp` asserts against a real
-battery voltage, a real DS1307 and a real SD card, so `pio test` needs the assembled
-board and cannot run in CI or on a development machine. All cases live in that one
-file and are dispatched by hand from `runUnityTests()`; to run a single one, comment
-out the other `RUN_TEST(...)` lines, since `pio test -f` filters test *directories*
-and there is only one.
+**There is no host test environment.** `test/` holds two suites, and they test
+different things:
+
+| Suite | What runs where | Covers |
+|---|---|---|
+| `test/test_libs/` | Unity on the board, replacing the firmware | `lib/` only — `Battery`, `SystemTime`, `SdData`, linked against the Arduino core |
+| `test/test_hil/` | Python on the development machine, over the link | whatever firmware is already flashed, seen as the ground station sees it |
+
+`test_libs/test_main.cpp` asserts against a real battery voltage, a real DS1307 and a
+real SD card, so `pio test` needs the assembled board and cannot run in CI. All its
+cases live in that one file and are dispatched by hand from `runUnityTests()`; to run
+a single one, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test
+*directories*, so it selects a suite, not a case.
+
+**`test_libs` does not cover `src/` at all.** `test_build_src` defaults to `no`, so
+the test binary contains no `main.cpp`, no `xTaskCreate` and no scheduler: it cannot
+observe a task, a queue, a stack high-water mark or the ownership protocol. The
+section sizes show it — the application links 16828 bytes of RAM, the test binary
+5368, too little to hold the 8 KB FreeRTOS heap. A green `pio test` says nothing
+about a task body.
+
+`test_hil/` is what does exercise the assembled firmware, but it is a set of scripts
+run by hand rather than a suite: `platformio.ini` excludes it with
+`test_ignore = test_hil`, because PlatformIO would try to compile Python as a test
+suite. Its `README.md` states what is missing to wire it in.
 
 ## What is not here
 
