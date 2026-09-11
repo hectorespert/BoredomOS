@@ -64,12 +64,35 @@ rules:
       4 x stack_words + 76 bytes of .bss; a queued item comes from the 0x1800 heap.
     - State explicitly when a change alters the MAVLink surface (new message id,
       new stream rate, changed identity triple).
+    - Read the other active changes under openspec/changes/ before writing, not
+      only openspec/specs/ and TODO.md. State which of their claims this change
+      invalidates. One change landing first has already made another's entire RAM
+      justification false and claimed a build flag that other one also claimed,
+      and nothing detected it.
+
+  specs:
+    - Write each requirement as a standing property of the system, not as a
+      statement about this change. A requirement phrased around "before and
+      after" or "unchanged by the move" is meaningless once archived, and one has
+      already had to be removed for exactly that.
+    - Every scenario's THEN must name something someone could check. The observer
+      is a ground station on the link, an operator with the board in hand, or the
+      build -- one of those three. If none of them can see it, it is not a
+      scenario.
+    - A requirement that could stop being true without any of those three
+      noticing is a build or configuration decision, not behaviour. It belongs in
+      design.md.
+    - Do not promise more than the toolchain delivers. A requirement about the
+      build must be true of the build as it actually behaves, checked by running
+      it, not as it ought to behave.
+
   design:
     - Name which file owns each resource the change touches, and keep it to one
       owner. Reaching a peripheral from a second file is what would force mutexes.
   tasks:
-    - Mark every step that needs the assembled board. `pio run` is the only check
-      that runs without hardware.
+    - Mark every step that needs the assembled board. Without it the only checks
+      that run are the CI ones -- `pio run` on the three environments, the grep
+      that guards static creation, and `pio check`.
     - A change touching lib/ or a task body needs a `pio test` run and a look at
       the high-water marks in the SD log before it is called done.
 
@@ -79,11 +102,17 @@ operations:
     guidance:
       - Never report a task body or a lib/ change as verified on the basis of a
         successful build. Say what was and was not run.
-      - '`pio test` reflashes the board with the test binary and wipes data*.mpk
-        and index.bin from the card. Ask before running it, and reflash with
-        `pio run -t upload` afterwards if the board should stay operational.'
+      - '`pio test` means the HIL suite: it flashes this firmware, interrogates it
+        from the host and leaves the board running what it would fly. It does not
+        touch the card. `pio test -e libs` is the destructive one -- it replaces
+        the firmware with the Unity binary and deletes data*.mpk and index.bin on
+        every case. Ask before running that one, and follow it with
+        `pio run -t upload` to leave the board operational.'
   archive:
     guidance:
+      - 'Before archiving, check the other active changes for claims this one
+        makes false -- figures, build flags, the patterns their tasks follow.
+        Nothing detects that automatically and it has already happened once.'
       - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
         There is no TODO.md entry to close out: it was deleted when the change
         was proposed, and openspec/specs/ plus the git history are the record.'
