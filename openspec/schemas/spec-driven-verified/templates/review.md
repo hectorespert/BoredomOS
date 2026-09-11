@@ -1,13 +1,13 @@
 ## Reviewers
 
-<!-- Which angles ran, and why any were skipped. Scale to the change: a one-file
-     configuration change does not need three. -->
+<!-- Every agent under .claude/agents/ takes part, on every change. One row each.
+     An agent outside its domain answers in a line and stops -- record that, because
+     "considered and irrelevant" is information that an absent reviewer does not
+     give you. -->
 
-| Agent | Angle | Ran |
+| Agent | Angle | Outcome |
 |---|---|---|
-| `spec-reviewer` | the delta as a behaviour contract | yes / no, because... |
-| `fact-checker` | every figure verified by building | yes / no, because... |
-| `change-auditor` | completeness, ordering, conflicts with other active changes | yes / no, because... |
+| `<name>` | <its domain> | <findings, or "outside its domain because..."> |
 
 ## Findings
 

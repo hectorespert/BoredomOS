@@ -235,6 +235,9 @@ artifacts:
       angles below earned their place by what they actually caught -- keep them
       distinct, because overlapping reviewers cost three times and find one thing:
 
+      The roster is whatever .claude/agents/ holds at the time, so it grows without
+      this instruction needing to change. The angles as they stand:
+
       - **spec-reviewer** -- the delta as a behaviour contract. Durability,
         observables, whether a requirement is really a build decision, whether the
         toolchain delivers what it promises, house style against the specs already
@@ -248,8 +251,15 @@ artifacts:
         order given, what does this change break in the other active changes, and
         is the board-blocked split drawn honestly.
 
-      Scale it to the change. A one-file configuration change does not need three
-      agents; say in the document that you ran fewer, and why.
+      Every agent defined under .claude/agents/ takes part, on every change. Not a
+      subset chosen by whoever is writing, and not scaled down because the change
+      looks small -- the change that bricked this board looked small, and the one
+      that touched the whole memory model was caught by the linker in three
+      seconds. How risky a change looks is not evidence about how risky it is.
+
+      An agent outside its domain says so in a line and stops. That is a cheap
+      answer, and it is information: it records that the angle was considered and
+      found irrelevant, which an absent reviewer does not.
 
       Then write review.md yourself from what they report. Do not paste their
       output: rank the findings across all of them, drop the duplicates, and judge
