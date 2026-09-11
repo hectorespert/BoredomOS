@@ -169,53 +169,6 @@ artifacts:
     requires:
       - proposal
 
-  - id: test-plan
-    generates: test-plan.md
-    description: How each scenario in the spec deltas gets exercised, and which cannot be
-    template: test-plan.md
-    instruction: |
-      Say how every scenario in this change's spec deltas would be exercised, and
-      name the ones nothing can exercise yet.
-
-      When to include test-plan.md (create only if the change has spec deltas). A
-      change with `skip_specs: true` in its .openspec.yaml has no scenarios and
-      needs no plan -- record the skip and move on.
-
-      Write it as a table, one row per scenario, in the order the deltas declare
-      them. For each row give:
-
-      - **Scenario** -- the requirement and the scenario name, so a reader can find
-        it without opening the delta.
-      - **How it runs** -- the suite, and the case within it. Read the suites before
-        deciding: test/test_hil/run.py discovers cases by globbing check_*.py and
-        collecting their test_* functions, so a new case is a new function and needs
-        no registration. test/test_libs covers lib/ only. Some scenarios are
-        exercised by the build itself, or by a check in scripts/.
-      - **Needs the board** -- yes or no. Be strict. Without hardware the HIL suite
-        reports every case as IGNORE and exits 0, so "it passes" off the board means
-        nothing.
-      - **Status** -- exists, new, or none.
-
-      A row of "none" is not a failure of this artifact, it is its point. A
-      requirement whose scenarios nothing can exercise is still worth writing when
-      the behaviour matters -- but it has to be visible now, while the requirement
-      can still be reworded or the change resized, rather than after the change is
-      archived and the spec reads as contract with nothing distinguishing a proven
-      requirement from a hoped-for one.
-
-      Close with what the change leaves unverified and why, in prose. If everything
-      is covered, say that in one line rather than padding.
-
-      Do not name test files inside the spec deltas themselves. Those are internal
-      names in a behaviour contract and they rot when the tests move. They belong
-      here.
-
-      This artifact is a plan, not a result. It says how a scenario would be
-      exercised, never that it was. Whether a step actually ran belongs in tasks.md
-      and only after it did.
-    requires:
-      - specs
-
   - id: tasks
     generates: tasks.md
     description: Implementation checklist with trackable tasks
@@ -258,10 +211,9 @@ artifacts:
     requires:
       - specs
       - design
-      - test-plan
 
 apply:
-  requires: [ tasks ]
+  requires: [tasks]
   tracks: tasks.md
   instruction: |
     Read context files, work through pending tasks, mark complete as you go.
