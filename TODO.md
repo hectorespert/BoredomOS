@@ -1010,6 +1010,79 @@ To decide:
   recoverable without the enclosure open.
 
 
+### Gate the watchdog refresh on the link still emitting
+
+**Status:** proposed
+**Scope:** `src/serial.cpp`, `src/mavlink.cpp`, `src/hooks.cpp`, `include/`
+
+The watchdog added by the `add-degraded-mode` change is refreshed from
+`vApplicationIdleHook()`, which detects **starvation** — a task running and not
+yielding. It cannot detect **silence**, because a firmware in which every task is
+legitimately blocked is indistinguishable from an idle one: the idle task runs, the
+refresh happens, and the watchdog is satisfied.
+
+That failure is reachable. If the producers into `serialWriteQueue` all stopped,
+`TaskSerialWrite` would wait on `xQueueReceive(..., portMAX_DELAY)` for ever,
+`TaskMavlink` likewise on its own queue, and `TaskSerialRead` would poll every 10 ms and
+find nothing. All four tasks correct, all four yielding, satellite mute — and the
+watchdog reporting it healthy. **The current mechanism proves the firmware is running,
+not that the satellite is working.**
+
+The gate is to refresh only when a frame has recently left the link:
+
+```c
+// src/serial.cpp, after LINK_SERIAL.write(buf, len) -- UART::write() busy-waits
+// until the frame is on the wire, so returning means the bytes are out
+linkFramesSent++;
+
+// src/hooks.cpp, in the idle hook
+// refresh only while that counter keeps advancing
+```
+
+Counting anywhere earlier proves less, and the difference matters:
+
+| Where | What it proves |
+|---|---|
+| In `TaskHeartbeat` | that `TaskHeartbeat` lives — and `sendHeartbeat()` ignores whether `xQueueSend` succeeded, so it lives happily while nothing drains the queue |
+| After `xQueueSend` | that the queue accepted it, not that anyone drains it |
+| After `LINK_SERIAL.write()` | that it left the satellite |
+
+`TaskHeartbeat` alternates `HEARTBEAT` and `SYSTEM_TIME` every 500 ms and stays in the
+reduced task set, so at least two frames a second leave in any working configuration.
+The staleness threshold follows from that rather than being invented.
+
+**What this still would not cover, and the reason is in the specs.** Outbound liveness
+is observable; inbound liveness is not, because silence on the inbound link is the
+normal flight condition — `openspec/specs/mavlink-link/spec.md` requires that a board
+powered with nothing attached reaches its steady-state cadence. Requiring inbound
+traffic would reset the satellite on every gap between passes.
+
+But the two inbound tasks differ, and only one of them is genuinely unobservable:
+
+- `TaskSerialRead` polls unconditionally every 10 ms whether or not bytes arrive, so a
+  counter in its loop would prove it alive with nothing attached.
+- `TaskMavlink` blocks on `xQueueReceive(..., portMAX_DELAY)`, so with no traffic it
+  never wakes and its idleness is indistinguishable from its death.
+
+That is the worst one to lose. `TaskMavlink` is the task the reduced configuration keeps
+precisely so the ground can command an exit: the one task that must not die is the one
+whose death cannot be seen. Replacing `portMAX_DELAY` with a bounded timeout — a second,
+say — and counting each wake makes it observable, at the cost of one wake per second in a
+task that currently costs nothing when idle.
+
+To decide:
+
+- **The staleness threshold**, against the ~2 Hz floor, and whether it is the same in the
+  reduced configuration.
+- **Whether `TaskMavlink`'s timeout belongs here or on its own.** It changes a task body,
+  so it needs a board and a look at the high-water mark.
+- **Whether three counters is one too many.** Outbound frames, `TaskSerialRead` polls and
+  `TaskMavlink` wakes would each be a `volatile uint32_t` with one writer and one reader —
+  cheap individually, but it is three pieces of cross-task state in a firmware whose
+  freedom from mutexes rests on single ownership, and that argument should be made
+  deliberately rather than by accretion.
+
+
 ## Done
 
 ### Write the architecture document
