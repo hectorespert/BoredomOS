@@ -212,8 +212,68 @@ artifacts:
       - specs
       - design
 
+  - id: review
+    generates: review.md
+    description: Independent review of the finished proposal, before any code is written
+    template: review.md
+    instruction: |
+      Have the finished change reviewed by independent agents and record what they
+      found. This runs after every other artifact exists and before `apply`, which
+      is blocked until it does.
+
+      Why it is agents and not you re-reading your own work: self-review fails
+      here, repeatedly and by evidence. A previous change shipped a spec claiming
+      the build would "produce no firmware image" when the check enforcing it runs
+      after the link; another shipped a requirement phrased as a migration that
+      stops meaning anything once archived. Both were written and re-read by the
+      same author without noticing, and caught by someone else. Fresh readers who
+      did not write it are the point.
+
+      This is the project's standing instruction to use subagents at this step, so
+      invoke them rather than asking whether to. Spawn them in parallel, one per
+      angle, and give each the change directory and the repository. The three
+      angles below earned their place by what they actually caught -- keep them
+      distinct, because overlapping reviewers cost three times and find one thing:
+
+      - **spec-reviewer** -- the delta as a behaviour contract. Durability,
+        observables, whether a requirement is really a build decision, whether the
+        toolchain delivers what it promises, house style against the specs already
+        in openspec/specs/. Reads; runs nothing.
+      - **fact-checker** -- every figure verified against the tree by building, not
+        by reading. It may run throwaway builds through PLATFORMIO_BUILD_FLAGS and
+        must restore the tree afterwards. Numbers quoted from another document are
+        the failure mode to hunt.
+      - **change-auditor** -- completeness and risk. Does every requirement have a
+        task, does every task trace to a requirement, would the steps build in the
+        order given, what does this change break in the other active changes, and
+        is the board-blocked split drawn honestly.
+
+      Scale it to the change. A one-file configuration change does not need three
+      agents; say in the document that you ran fewer, and why.
+
+      Then write review.md yourself from what they report. Do not paste their
+      output: rank the findings across all of them, drop the duplicates, and judge
+      each one -- a reviewer that is confident and wrong is a normal occurrence and
+      has already happened on this project, where one agent "verified as correct" a
+      claim another had disproved. Where two disagree, check it yourself and say
+      which was right.
+
+      For each finding give the file and line, what is wrong, why it matters, and
+      its disposition: fixed, rejected with the reason, or deferred with where it
+      went. A review that changes no artifact is either a perfect proposal or a
+      review nobody acted on, and the document has to make clear which.
+
+      Close with whether the change is ready to apply, and name anything a reader
+      should know before starting -- particularly work that cannot be verified with
+      the hardware currently available.
+    requires:
+      - proposal
+      - specs
+      - design
+      - tasks
+
 apply:
-  requires: [tasks]
+  requires: [tasks, review]
   tracks: tasks.md
   instruction: |
     Read context files, work through pending tasks, mark complete as you go.

@@ -110,6 +110,11 @@ rules:
 operations:
   apply:
     guidance:
+      - 'review.md is written before apply and apply is blocked until it exists.
+        Read it first: its findings were meant to change the artifacts, so a
+        finding recorded as fixed should already be reflected in what you are
+        about to implement, and one recorded as deferred should not surprise you
+        halfway through.'
       - Never report a task body or a lib/ change as verified on the basis of a
         successful build. Say what was and was not run.
       - '`pio test` means the HIL suite: it flashes this firmware, interrogates it
