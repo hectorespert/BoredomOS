@@ -30,6 +30,43 @@ QueueHandle_t serialReadQueue = NULL;
 
 QueueHandle_t serialWriteQueue = NULL;
 
+// Static storage for every task the scheduler will run. The word counts are the ones
+// xTaskCreateStatic is given below, and together with the queue storage further down
+// they are this firmware's RAM budget: the linker counts each array by name, so a
+// build that does not fit fails here rather than on the board.
+StackType_t serialReadStack[96];
+StaticTask_t serialReadTcb;
+
+StackType_t serialWriteStack[192];
+StaticTask_t serialWriteTcb;
+
+StackType_t heartbeatStack[128];
+StaticTask_t heartbeatTcb;
+
+StackType_t mavlinkStack[256];
+StaticTask_t mavlinkTcb;
+
+StackType_t loggerStack[96];
+StaticTask_t loggerTcb;
+
+StackType_t statusStack[128];
+StaticTask_t statusTcb;
+
+StackType_t sdWriteStack[256];
+StaticTask_t sdWriteTcb;
+
+// Queue structures and item storage. Each queue carries pointers, so the storage is
+// depth x sizeof(pointer); what backs the items themselves is the FreeRTOS heap,
+// sized in platformio.ini against the worst case computed in the change design.
+StaticQueue_t sdWriteQueueBuffer;
+uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
+
+StaticQueue_t serialReadQueueBuffer;
+uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t*)];
+
+StaticQueue_t serialWriteQueueBuffer;
+uint8_t serialWriteQueueStorage[4 * sizeof(mavlink_message_t*)];
+
 QueueHandle_t sdWriteQueue = NULL;
 
 [[noreturn]] extern void TaskSerialWrite(void *pvParameters);
@@ -59,28 +96,37 @@ void setup()
 
   configASSERT(SD.begin(9));
 
-  sdWriteQueue = xQueueCreate(16, sizeof(Data*));
+  sdWriteQueue = xQueueCreateStatic(4, sizeof(Data*), sdWriteQueueStorage, &sdWriteQueueBuffer);
   configASSERT(sdWriteQueue != NULL);
 
-  serialReadQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
+  serialReadQueue = xQueueCreateStatic(8, sizeof(mavlink_message_t*), serialReadQueueStorage, &serialReadQueueBuffer);
   configASSERT(serialReadQueue != NULL);
 
-  serialWriteQueue = xQueueCreate(16, sizeof(mavlink_message_t*));
+  serialWriteQueue = xQueueCreateStatic(4, sizeof(mavlink_message_t*), serialWriteQueueStorage, &serialWriteQueueBuffer);
   configASSERT(serialWriteQueue != NULL);
 
-  xTaskCreate(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, &taskSerialReadHandler);
+  // With static storage these cannot fail for want of memory, so a NULL handle means
+  // an argument is wrong -- a programming error, and worth trapping at boot.
+  taskSerialReadHandler = xTaskCreateStatic(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, serialReadStack, &serialReadTcb);
+  configASSERT(taskSerialReadHandler != NULL);
 
-  xTaskCreate(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, &taskSerialWriteHandler);
+  taskSerialWriteHandler = xTaskCreateStatic(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, serialWriteStack, &serialWriteTcb);
+  configASSERT(taskSerialWriteHandler != NULL);
 
-  xTaskCreate(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, &taskHeartbeatHandler);
+  taskHeartbeatHandler = xTaskCreateStatic(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, heartbeatStack, &heartbeatTcb);
+  configASSERT(taskHeartbeatHandler != NULL);
 
-  xTaskCreate(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, &taskMavlinkHandler);
-  
-  xTaskCreate(TaskLogger, "Logger", 96, NULL, PRIORITY_LOW, &taskLoggerHandler);
+  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, mavlinkStack, &mavlinkTcb);
+  configASSERT(taskMavlinkHandler != NULL);
 
-  xTaskCreate(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, &taskStatusHandler);
+  taskLoggerHandler = xTaskCreateStatic(TaskLogger, "Logger", 96, NULL, PRIORITY_LOW, loggerStack, &loggerTcb);
+  configASSERT(taskLoggerHandler != NULL);
 
-  xTaskCreate(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, &taskSdWriteHandler);
+  taskStatusHandler = xTaskCreateStatic(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, statusStack, &statusTcb);
+  configASSERT(taskStatusHandler != NULL);
+
+  taskSdWriteHandler = xTaskCreateStatic(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, sdWriteStack, &sdWriteTcb);
+  configASSERT(taskSdWriteHandler != NULL);
 
   vTaskStartScheduler();
 }

@@ -12,7 +12,7 @@ tree and the installed toolchain:
   `INCLUDE_eTaskGetState` is not required, because `uxTaskGetSystemState` derives
   `eCurrentState` from the list each task is queued on rather than calling
   `eTaskGetState`.
-- `configUSE_TIMERS` is 1 and `configUSE_MUTEXES` is 0. So the timer-service task
+- `configUSE_TIMERS` is 0 since `use-static-allocation` and `configUSE_MUTEXES` is 0. So the timer-service task
   exists today and appears in `ps`, and there is no priority inheritance — a task has
   one priority, not a base and a current one. `TODO.md`'s *[The two serial queues
   cannot fit in the FreeRTOS heap]* proposes `-D configUSE_TIMERS=0` to reclaim

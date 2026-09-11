@@ -38,7 +38,7 @@ architecture in a spec.
 ## Commands
 
 ```bash
-pio run                  # build (this is all CI runs)
+pio run                  # build the flight environment (CI builds all three)
 pio run -t upload        # flash the board
 pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text)
 pio test                 # HIL: flashes this firmware, then checks it from the host
@@ -68,12 +68,13 @@ A change that touches `lib/` or a task body is not verified by building it. Run 
 
 These are the invariants that are easiest to break silently. `ARCHITECTURE.md` explains why each one exists.
 
-- **Adding a subsystem is three edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, and an `xTaskCreate` there. Tasks and queues are created nowhere else.
-- **Queues carry heap pointers, never values.** Producer `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`. The consumer frees after use. On 8 KB of heap a leak is fatal within minutes.
-- **Stack sizes in `xTaskCreate` are words, not bytes**, and are tuned tight (96–256). After changing a task body, check that task's high-water mark in the SD log before assuming it still fits.
+- **Adding a subsystem is four edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, its static storage (`StackType_t xStack[N]` and a `StaticTask_t`) beside it, and an `xTaskCreateStatic` in `setup()`. Tasks and queues are created nowhere else, and never with the dynamic `xTaskCreate` / `xQueueCreate` — CI greps `src/` for both and fails. Note `portable/FSP/port.c` contains its own `xTaskCreate` of 1024 words: it is unreachable only because no build here defines `AUTOSTART_FREERTOS` or `EARLY_AUTOSTART_FREERTOS`, and with the current heap it could not succeed. Do not define either.
+- **Queues carry heap pointers, never values.** Producer `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`. The consumer frees after use. A leak is still fatal within minutes: the heap is `0x1800` and backs the queued items only. Changing a queue's depth means re-deriving what backs it — depth plus one block per producer that can hold an unsent item and one per consumer holding an unreleased one, not depth alone.
+- **Stack sizes in `xTaskCreateStatic` are words, not bytes**, and are tuned tight (96–256). The count must match the length of the `StackType_t` array passed alongside it. After changing a task body, check that task's high-water mark in the SD log before assuming it still fits.
 - **Priorities come from `include/Priority.h`**, never raw numbers.
 - **Only the owning file touches its resource:** `src/serial.cpp` the UART, `src/sdwrite.cpp` the card, `lib/SystemTime` the clocks, `lib/Battery` the ADC. Everything else goes through a queue or the library wrapper. This is what makes the absence of mutexes safe — do not break it by reaching for a peripheral directly.
 - **Every outbound MAVLink message uses the same identity triple:** system id `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - **Wiring is hardcoded** (SD `CS` on 9, battery on `A0`, DS1307 on I2C). If a change adds a pin, document it in `ARCHITECTURE.md`.
-- **`configASSERT` in `setup()` halts the board on purpose** for missing RTC, SD or queues. Do not soften it into a degraded boot without an explicit decision.
+- **`configASSERT` in `setup()` halts the board on purpose** for missing RTC, SD, queues or tasks. Do not soften it into a degraded boot without an explicit decision.
+- **The RAM budget is a build-time fact.** `scripts/ram_budget.py` runs after every link, prints the true commitment — which the `RAM:` line does not, omitting 9472 bytes — and fails the build when headroom drops below `custom_ram_min_headroom`. A change that does not fit fails on your desk, which is the point; do not lower the floor to make one pass.
 - When a change makes `ARCHITECTURE.md` inaccurate, update it in the same commit.
