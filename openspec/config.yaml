@@ -83,6 +83,13 @@ rules:
     - Do not promise more than the toolchain delivers. A requirement about the
       build must be true of the build as it actually behaves, checked by running
       it, not as it ought to behave.
+    - Know how each scenario would be verified before writing it -- which suite
+      would run it, and whether it needs the assembled board. Do not name the test
+      in the spec -- that is an internal name and it rots when tests move. A
+      requirement whose scenarios nothing can exercise is still worth writing when
+      the behaviour matters, but then say so in the proposal's Impact, because
+      once the change is archived the spec reads as contract and nothing
+      distinguishes a proven requirement from a hoped-for one.
 
   design:
     - Name which file owns each resource the change touches, and keep it to one
@@ -93,6 +100,11 @@ rules:
       that guards static creation, and `pio check`.
     - A change touching lib/ or a task body needs a `pio test` run and a look at
       the high-water marks in the SD log before it is called done.
+    - Every scenario in the change's delta specs needs at least one task that
+      exercises it, and that task names the scenario it covers. A scenario nothing
+      exercises is how a spec turns into a promise nobody checks. Where the only
+      task that could exercise it needs the board, mark it and leave it unticked
+      rather than quietly dropping the scenario.
 
 # Advisory guidance, injected when these operations run.
 operations:
