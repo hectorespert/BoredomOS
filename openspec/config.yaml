@@ -47,8 +47,9 @@ context: |
     the absence of mutexes safe, and it is the one most easily broken by accident.
 
   There is a roster of reviewer roles under .claude/agents/, defined by domain -- the
-  program, the device, the requirements baseline, flying it from the ground, and
-  whether the data is worth having. Each one's own file says what it owns and where it
+  program, the device, the requirements baseline, flying it from the ground, whether
+  the data is worth having, and how an obligation gets demonstrated and whether it
+  was. Each one's own file says what it owns and where it
   stops, so read that rather than guessing from the name. They are not only for the
   review step: consult one while exploring or proposing whenever a question is
   squarely in its domain and the answer would change what gets written. They do not
@@ -114,6 +115,24 @@ rules:
       task that could exercise it needs the board, mark it and leave it unticked
       rather than quietly dropping the scenario.
 
+  verify:
+    - 'A tick is a claim, and this is the document where it stops being taken on
+      trust. For every ticked task say where the evidence is -- the command and what
+      it printed, the HIL line, the SD log entry, the figure the build reported. A
+      tick whose receipt cannot be located outranks every other finding here.'
+    - Read coverage off the delta, not off the tick count. A scenario whose only task
+      is unticked is unverified, and the word to use is unverified.
+    - 'Off the board the HIL suite reports every case as IGNORE and exits 0, so a
+      green run is not evidence that anything ran. A receipt from it has to show the
+      cases firing.'
+    - 'Close with the canonical line and nothing else on it: DECISION: PASS,
+      DECISION: PASS_PENDING_BOARD, or DECISION: FAIL. PASS_PENDING_BOARD is the
+      ordinary outcome on this project and not a failure -- it means what remains is
+      listed with the step that would close each item. Keep FAIL for something
+      claimed that is not true, or a tick with no receipt.'
+    - The agents that fill this in read the record and do not produce it. They do not
+      run the suites and do not touch the board, and the document says so every time.
+
 # Advisory guidance, injected when these operations run.
 operations:
   apply:
@@ -139,3 +158,11 @@ operations:
       - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
         There is no TODO.md entry to close out: it was deleted when the change
         was proposed, and openspec/specs/ plus the git history are the record.'
+      - 'Do not archive without verify.md. Its DECISION line is what a reader a year
+        from now has instead of the tasks, which go into the archive and stop being
+        read. One change was archived with five steps unticked and nothing recorded
+        the debt anywhere.'
+      - 'Whatever verify.md lists as still to demonstrate becomes a TODO.md entry in
+        the archiving commit, naming the change it came from. Unverified work that is
+        nobody''s is exactly what the backlog is for, and the alternative is that it
+        disappears with the change directory.'

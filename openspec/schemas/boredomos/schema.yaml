@@ -1,6 +1,7 @@
 name: boredomos
-version: 1
-description: BoredomOS workflow - proposal → specs → design → tasks → independent review, which gates apply
+version: 2
+description: BoredomOS workflow - proposal → specs → design → tasks → independent review,
+  which gates apply, then a post-apply verify auditing what was actually demonstrated
 artifacts:
   - id: proposal
     generates: proposal.md
@@ -284,6 +285,71 @@ artifacts:
       - specs
       - design
       - tasks
+
+  - id: verify
+    generates: verify.md
+    description: Post-apply audit of what was actually demonstrated, not what was claimed
+    template: verify.md
+    instruction: |
+      Produced after apply, not before it. This is not a gate on apply -- it is the
+      record of what apply actually demonstrated, written once the code exists.
+
+      Why it exists as its own document: a ticked checkbox is a claim, and on this
+      project claims have outlived the evidence for them. One change was archived
+      with five of its steps unticked and nothing carried the debt anywhere. The HIL
+      suite states in its README that its cases map one-to-one onto the scenarios of
+      a live spec; there are nine cases and eight scenarios, six of the cases name no
+      scenario at all, and one names a scenario that no longer exists. Nothing in the
+      workflow was positioned to notice either, because nothing read the record after
+      the work was called done.
+
+      What this audits:
+
+      1. Task completion. Every `- [x]`, and every `- [ ]` still open with the reason
+         recorded. A `[board]` step left open because the board is unreachable is an
+         honest outcome; the same step left open silently is the defect.
+      2. The receipt behind each tick. For every ticked task, where the evidence is --
+         the command and what it printed, the HIL line, the SD log entry, the figure
+         the build reported. A tick whose receipt cannot be located is the finding
+         this document exists to catch, and it outranks everything else here.
+      3. Scenario coverage. Every scenario in the delta still has a task naming it,
+         and what state that task is in. A scenario whose only task is unticked is
+         unverified -- say that in those words. A count of ticks is not coverage.
+      4. The review's dispositions. Everything review.md recorded as fixed is fixed,
+         and everything deferred went where it said it went. Nothing else closes that
+         loop.
+      5. Any figure the change asserted, re-read from the tree rather than quoted
+         from the artifacts that asserted it.
+
+      Who takes part: not the whole roster. This step is narrower than review, and a
+      five-way sweep here mostly produces out-of-domain lines. The qa engineer always.
+      Any role whose finding review.md recorded as fixed, to confirm it landed. The
+      firmware engineer whenever a stack high-water mark moved. Others only where the
+      change reached their domain.
+
+      The hard limit, and say it in the document every time: these agents read the
+      record, they do not produce it. They do not run the suites and they do not touch
+      the board. Their Bash is for reading -- grepping the tasks, parsing the output of
+      a run somebody else did, `git diff` over test/, reading what the build printed.
+      Off the board the HIL suite reports every case as IGNORE and exits 0, so a green
+      run is not evidence that anything ran; the receipt has to show the cases firing.
+
+      Close with the canonical line, on its own line, exactly one of:
+
+        DECISION: PASS
+        DECISION: PASS_PENDING_BOARD
+        DECISION: FAIL
+
+      PASS means everything the change promised was demonstrated. PASS_PENDING_BOARD
+      means everything reachable without the assembled board was demonstrated and what
+      remains is listed, each item naming the step that would close it -- on this
+      project that is the ordinary outcome, not a failure. FAIL means something was
+      claimed and is not true, or a tick has no receipt. Keep those distinct: a
+      verdict that always reads the same stops carrying information, which is how the
+      README claim above survived.
+    requires:
+      - tasks
+      - review
 
 apply:
   requires: [tasks, review]
