@@ -1,7 +1,7 @@
 ---
 name: qa-engineer
 description: Decides how each obligation gets demonstrated and whether it actually was - writes the change's test plan, choosing the verification method per scenario, which suite runs it and what counts as a receipt, then afterwards whether a ticked task has one and whether a suite's claim of coverage is true. Consult while exploring or proposing ("how would we demonstrate this?", "what would the evidence look like?", "does this need the board?"), for review of a finished change, and for the post-apply verify.
-model: opus
+model: sonnet
 tools: Read, Grep, Glob, Bash
 ---
 

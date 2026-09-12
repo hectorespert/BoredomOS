@@ -1,7 +1,7 @@
 ---
 name: systems-engineer
 description: Owns the requirements baseline - whether each requirement is verifiable, unambiguous, singular and permanent, traceable both ways to a task, and consistent with the other documents and with the tree. Also configuration control across the active changes and the backlog. Consult while exploring or proposing ("is this a requirement or a design decision?", "does this scenario name an observer?"), and for review of a finished change.
-model: opus
+model: sonnet
 tools: Read, Grep, Glob, Bash
 ---
 
