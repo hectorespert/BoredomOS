@@ -337,15 +337,24 @@ artifacts:
       Close with the canonical line, on its own line, exactly one of:
 
         DECISION: PASS
+        DECISION: PASS_WITH_WARNINGS
         DECISION: PASS_PENDING_BOARD
         DECISION: FAIL
 
-      PASS means everything the change promised was demonstrated. PASS_PENDING_BOARD
-      means everything reachable without the assembled board was demonstrated and what
-      remains is listed, each item naming the step that would close it -- on this
-      project that is the ordinary outcome, not a failure. FAIL means something was
-      claimed and is not true, or a tick has no receipt. Keep those distinct: a
-      verdict that always reads the same stops carrying information, which is how the
+      PASS means everything the change promised was demonstrated and the record cuts
+      clean. PASS_WITH_WARNINGS means it was demonstrated but the record carries
+      something to fix before archiving, typically a figure that contradicts the tree
+      or contradicts itself. PASS_PENDING_BOARD means everything reachable without the
+      assembled board was demonstrated and what remains is listed, each item naming
+      the step that would close it -- on this project that is the ordinary outcome,
+      not a failure.
+
+      FAIL is narrower than it reads: the delivered change does not do what it
+      promised, or a tick has no receipt at all. A miscounted figure is a warning, not
+      a failure. The first change this document was run against had two wrong figures
+      and behaved exactly as specified, and filing that under the same word as a change
+      that bricked the board would throw away the distinction the line exists to carry.
+      A verdict that always reads the same stops carrying information, which is how the
       README claim above survived.
     requires:
       - tasks

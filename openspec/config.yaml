@@ -125,11 +125,14 @@ rules:
     - 'Off the board the HIL suite reports every case as IGNORE and exits 0, so a
       green run is not evidence that anything ran. A receipt from it has to show the
       cases firing.'
-    - 'Close with the canonical line and nothing else on it: DECISION: PASS,
-      DECISION: PASS_PENDING_BOARD, or DECISION: FAIL. PASS_PENDING_BOARD is the
-      ordinary outcome on this project and not a failure -- it means what remains is
-      listed with the step that would close each item. Keep FAIL for something
-      claimed that is not true, or a tick with no receipt.'
+    - 'Close with the canonical line and nothing else on it, one of DECISION: PASS,
+      DECISION: PASS_WITH_WARNINGS, DECISION: PASS_PENDING_BOARD or DECISION: FAIL.
+      PASS_WITH_WARNINGS is for a change that was demonstrated but left a figure to
+      fix before archiving. PASS_PENDING_BOARD is the ordinary outcome here and not a
+      failure -- it means what remains is listed with the step that would close each
+      item. Keep FAIL narrow: the delivered change does not do what it promised, or a
+      tick has no receipt. A miscounted figure is a warning, and filing it as a
+      failure costs the line its meaning.'
     - The agents that fill this in read the record and do not produce it. They do not
       run the suites and do not touch the board, and the document says so every time.
 
