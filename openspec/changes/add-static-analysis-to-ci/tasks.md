@@ -19,8 +19,10 @@ both run without hardware, and the firmware binary is byte-identical before and 
 
 - [x] 1b.1 Add `-Wall -Wextra` to `build_flags` in `platformio.ini`; verify with a full
       rebuild (`pio run -t clean` then `pio run`) that the warning count across the
-      whole build is zero, and that RAM and flash are unchanged at 16828 and 88900
-      bytes.
+      whole build is zero, and that RAM and flash are unchanged by adding them. They
+      were 16828 and 88900 bytes when this change landed; `use-static-allocation`
+      moved RAM afterwards, so read the current figure from ARCHITECTURE.md rather
+      than from here.
 
 ## 2. Wire it into CI
 
@@ -56,14 +58,16 @@ The middle row is the finding worth keeping: source filters cut the *time* but n
 *output*, because MAVLink is header-only and its defects are reported inside our
 translation units. Anyone who tunes this later needs to know that.
 
-Final result: 12 defects, all LOW, no HIGH or MEDIUM — eight `cstyleCast`, three
+Final result: 12 defects, all LOW, no HIGH or MEDIUM — seven `cstyleCast`, three
 `unusedLabel` in `src/logger.cpp`, one `constVariable` in `src/mavlink.cpp`, one
 `shadowFunction` in `lib/Battery`. All left unfixed on purpose; a first run should show
 what the checker actually sees.
 
-`pio run` still produces the same firmware: 88900 bytes of flash, 16828 of RAM,
-unchanged from before this change — including after `-Wall -Wextra` were added, which
-produce zero warnings across all 104 translation units and do not affect codegen.
+`pio run` still produces the same firmware — including after `-Wall -Wextra` were
+added, which produce zero warnings across all 104 translation units and do not affect
+codegen. Measured at 88900 bytes of flash and 16828 of RAM on the tree this change was
+built against; RAM has since moved with `use-static-allocation`, and what this change
+demonstrated is that it left both figures untouched, not what they are now.
 
 Warning flags were chosen on evidence, and the evidence also bounds what they are
 worth. Measured on this tree: GCC reports nothing at `-Wall -Wextra -Wpedantic`;

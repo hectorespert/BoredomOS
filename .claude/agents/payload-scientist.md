@@ -1,7 +1,7 @@
 ---
 name: payload-scientist
 description: Whether the satellite's measurements are worth having and survive to the ground - fitness of a measurement for its stated purpose, sampling and timestamping, whether data reaches a recorder and can be downlinked, and what a proposed sensor would actually be for. Consult while exploring or proposing ("what would this sensor be for?", "is 1 Hz the right rate?", "can we get this data down?"), and for review of a finished change.
-model: opus
+model: sonnet
 tools: Read, Grep, Glob, Bash
 ---
 

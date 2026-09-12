@@ -47,8 +47,9 @@ context: |
     the absence of mutexes safe, and it is the one most easily broken by accident.
 
   There is a roster of reviewer roles under .claude/agents/, defined by domain -- the
-  program, the device, the requirements baseline, flying it from the ground, and
-  whether the data is worth having. Each one's own file says what it owns and where it
+  program, the device, the requirements baseline, flying it from the ground, whether
+  the data is worth having, and how an obligation gets demonstrated and whether it
+  was. Each one's own file says what it owns and where it
   stops, so read that rather than guessing from the name. They are not only for the
   review step: consult one while exploring or proposing whenever a question is
   squarely in its domain and the answer would change what gets written. They do not
@@ -102,17 +103,55 @@ rules:
   design:
     - Name which file owns each resource the change touches, and keep it to one
       owner. Reaching a peripheral from a second file is what would force mutexes.
+  test-plan:
+    - 'The qa engineer writes this, not whoever is writing the rest. It has no write
+      tool, so it reports and you transcribe -- and you check any suite or figure it
+      cites before the task list is built on top of it.'
+    - 'Name the receipt, not the intention. "The suite passes" is not a receipt on this
+      project: off the board the HIL suite reports every case as IGNORE and exits 0, so
+      a row satisfied by a green run has to say which cases fired.'
+    - Give every row an id and keep it stable. tasks.md names it and verify.md reads it
+      back, and renumbering breaks both silently.
+    - Say which rows need hands as well as which need the board. Pressing RESET, pulling
+      the card and stalling a task are the bulk of this project's verification and no
+      script observes any of them.
+    - A row nothing available can reach belongs in the document, said plainly. Inventing
+      a method that cannot run is worse than recording that none exists, because the
+      first looks closed.
+
   tasks:
     - Mark every step that needs the assembled board. Without it the only checks
       that run are the CI ones -- `pio run` on the three environments, the grep
       that guards static creation, and `pio check`.
     - A change touching lib/ or a task body needs a `pio test` run and a look at
       the high-water marks in the SD log before it is called done.
-    - Every scenario in the change's delta specs needs at least one task that
-      exercises it, and that task names the scenario it covers. A scenario nothing
-      exercises is how a spec turns into a promise nobody checks. Where the only
-      task that could exercise it needs the board, mark it and leave it unticked
-      rather than quietly dropping the scenario.
+    - Every row of test-plan.md needs at least one task that names its id. That is the
+      chain a coverage audit walks -- scenario to row to task -- and it replaces
+      inferring coverage from the scenario list. Where the only task that could close a
+      row needs the board, mark it and leave it unticked rather than quietly dropping the
+      row. A row you cannot write a task for is a finding against the plan; take it back
+      there.
+
+  verify:
+    - 'A tick is a claim, and this is the document where it stops being taken on
+      trust. For every ticked task say where the evidence is -- the command and what
+      it printed, the HIL line, the SD log entry, the figure the build reported. A
+      tick whose receipt cannot be located outranks every other finding here.'
+    - Read coverage off the delta, not off the tick count. A scenario whose only task
+      is unticked is unverified, and the word to use is unverified.
+    - 'Off the board the HIL suite reports every case as IGNORE and exits 0, so a
+      green run is not evidence that anything ran. A receipt from it has to show the
+      cases firing.'
+    - 'Close with the canonical line and nothing else on it, one of DECISION: PASS,
+      DECISION: PASS_WITH_WARNINGS, DECISION: PASS_PENDING_BOARD or DECISION: FAIL.
+      PASS_WITH_WARNINGS is for a change that was demonstrated but left a figure to
+      fix before archiving. PASS_PENDING_BOARD is the ordinary outcome here and not a
+      failure -- it means what remains is listed with the step that would close each
+      item. Keep FAIL narrow: the delivered change does not do what it promised, or a
+      tick has no receipt. A miscounted figure is a warning, and filing it as a
+      failure costs the line its meaning.'
+    - The agents that fill this in read the record and do not produce it. They do not
+      run the suites and do not touch the board, and the document says so every time.
 
 # Advisory guidance, injected when these operations run.
 operations:
@@ -139,3 +178,11 @@ operations:
       - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
         There is no TODO.md entry to close out: it was deleted when the change
         was proposed, and openspec/specs/ plus the git history are the record.'
+      - 'Do not archive without verify.md. Its DECISION line is what a reader a year
+        from now has instead of the tasks, which go into the archive and stop being
+        read. One change was archived with five steps unticked and nothing recorded
+        the debt anywhere.'
+      - 'Whatever verify.md lists as still to demonstrate becomes a TODO.md entry in
+        the archiving commit, naming the change it came from. Unverified work that is
+        nobody''s is exactly what the backlog is for, and the alternative is that it
+        disappears with the change directory.'

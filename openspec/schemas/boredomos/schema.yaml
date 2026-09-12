@@ -1,6 +1,8 @@
 name: boredomos
-version: 1
-description: BoredomOS workflow - proposal → specs → design → tasks → independent review, which gates apply
+version: 3
+description: BoredomOS workflow - proposal → specs → design → tasks → independent review,
+  with a qa-written test plan ahead of the tasks, a review that gates apply, and a
+  post-apply verify auditing what was actually demonstrated
 artifacts:
   - id: proposal
     generates: proposal.md
@@ -169,6 +171,62 @@ artifacts:
     requires:
       - proposal
 
+  - id: test-plan
+    generates: test-plan.md
+    description: What must be demonstrated for each scenario, and by what method, decided before the task list exists
+    template: test-plan.md
+    instruction: |
+      State what would count as having demonstrated each scenario, before anybody writes
+      the steps that claim to do it.
+
+      Why it comes before tasks and not with them: otherwise the same person decides what
+      to build, what "verified" means, and writes the step asserting it. The method then
+      gets chosen to fit the work rather than the obligation, and nothing independent has
+      said what proof would look like. The rule for specs already requires knowing the
+      method before writing a scenario and forbids naming the test there -- so until this
+      artifact existed, the method had to be known and had nowhere to live until two
+      artifacts later.
+
+      **The qa engineer writes this one.** It owns the method and what counts as a
+      receipt, so spawn it and give it the change directory and the repository. It has no
+      write tool, by design -- every agent on this project is read-only -- so it reports
+      the plan and you transcribe it into test-plan.md. Do not paste its output raw: if a
+      row claims a suite or a figure, check it before it becomes the thing tasks are
+      built from.
+
+      If the roster holds no qa engineer, say so in the document rather than choosing the
+      methods yourself and calling it a plan.
+
+      One row per `#### Scenario:` in the change's delta specs, and every scenario gets
+      one -- a scenario missing from this document is a defect here, not something the
+      task list can paper over. Each row carries:
+
+      - the requirement it belongs to, as well as the scenario. A spec file holds several
+        requirements and requirement-level traceability is what a coverage audit needs
+      - a stable row id, because tasks.md names it and verify.md reads it back
+      - the method: Test, Analysis, Inspection, Review of design, or Demonstration --
+        that last one being a person at the board doing a physical act, which is the bulk
+        of this project and has no automation path
+      - where it runs: which suite, which script, or which act
+      - what the receipt is -- the concrete artifact that would show it happened
+      - whether it needs the assembled board, and whether it needs hands
+
+      The mapping is a floor, not a ceiling. Extra cases, regression checks and unit
+      tests of internals are welcome and need no row. They never substitute for a row.
+
+      "No method we have reaches this" is a legitimate row and a valuable one, but it has
+      to be said here, while the requirement can still be reworded -- not after it is
+      contract. Do not invent a method that cannot run to make a row look closed.
+
+      Do not name a test function that does not exist yet as though it did. Name what the
+      case will be called if that is decided, but the receipt is what matters: a row whose
+      receipt is "the suite passes" says nothing, because off the board this project's HIL
+      suite reports every case as IGNORE and exits 0.
+    requires:
+      - proposal
+      - specs
+      - design
+
   - id: tasks
     generates: tasks.md
     description: Implementation checklist with trackable tasks
@@ -207,8 +265,13 @@ artifacts:
       - [ ] 2.2 Add CSV formatting utilities and verify unit tests cover quoting and delimiters
       ```
 
-      Reference specs for what needs to be built, design for how to build it.
+      Reference test-plan.md for what has to be demonstrated, specs for what needs to
+      be built, and design for how to build it. Every row of the plan needs at least one
+      task that names its id -- that is the traceability a coverage audit walks, and it
+      replaces guessing at coverage from the scenario list. A row you cannot write a task
+      for is a finding against the plan; take it back there rather than dropping it.
     requires:
+      - test-plan
       - specs
       - design
 
@@ -250,6 +313,14 @@ artifacts:
       that touched the whole memory model was caught by the linker in three
       seconds. How risky a change looks is not evidence about how risky it is.
 
+      One exception to "every agent takes part", and it is the same principle the step
+      rests on: an agent does not review an artifact it wrote. The qa engineer authors
+      test-plan.md, so the plan is reviewed by the others -- the firmware and hardware
+      engineers on whether a method would actually prove anything on this device, the
+      systems engineer on whether every scenario reached a row. The qa engineer reviews
+      everything else as usual, and says in its section which artifact it is standing
+      aside from and why.
+
       An agent outside its domain says so in a line and stops. That is a cheap
       answer, and it is information: it records that the angle was considered and
       found irrelevant, which an absent reviewer does not.
@@ -283,7 +354,87 @@ artifacts:
       - proposal
       - specs
       - design
+      - test-plan
       - tasks
+
+  - id: verify
+    generates: verify.md
+    description: Post-apply audit of what was actually demonstrated, not what was claimed
+    template: verify.md
+    instruction: |
+      Produced after apply, not before it. This is not a gate on apply -- it is the
+      record of what apply actually demonstrated, written once the code exists.
+
+      Why it exists as its own document: a ticked checkbox is a claim, and on this
+      project claims have outlived the evidence for them. One change was archived
+      with five of its steps unticked and nothing carried the debt anywhere. The HIL
+      suite states in its README that its cases map one-to-one onto the scenarios of
+      a live spec; there are nine cases and eight scenarios, six of the cases name no
+      scenario at all, and one names a scenario that no longer exists. Nothing in the
+      workflow was positioned to notice either, because nothing read the record after
+      the work was called done.
+
+      What this audits:
+
+      1. Task completion. Every `- [x]`, and every `- [ ]` still open with the reason
+         recorded. A `[board]` step left open because the board is unreachable is an
+         honest outcome; the same step left open silently is the defect.
+      2. The receipt behind each tick. For every ticked task, where the evidence is --
+         the command and what it printed, the HIL line, the SD log entry, the figure
+         the build reported. A tick whose receipt cannot be located is the finding
+         this document exists to catch, and it outranks everything else here.
+      3. Coverage, read off test-plan.md rather than off the tick count. Every row, the
+         task that names it, and what state that task is in. A row whose only task is
+         unticked is unverified -- say that in those words. Report a row with no task at
+         all as a defect in the plan or the task list, not as a gap in this document.
+         Check the receipt the row asked for against the receipt that exists: a row
+         satisfied by something other than what it specified is a finding, even when
+         that something looks adequate.
+      4. The review's dispositions. Everything review.md recorded as fixed is fixed,
+         and everything deferred went where it said it went. Nothing else closes that
+         loop.
+      5. Any figure the change asserted, re-read from the tree rather than quoted
+         from the artifacts that asserted it.
+
+      Who takes part: not the whole roster. This step is narrower than review, and a
+      five-way sweep here mostly produces out-of-domain lines. The qa engineer always.
+      Any role whose finding review.md recorded as fixed, to confirm it landed. The
+      firmware engineer whenever a stack high-water mark moved. Others only where the
+      change reached their domain.
+
+      The hard limit, and say it in the document every time: these agents read the
+      record, they do not produce it. They do not run the suites and they do not touch
+      the board. Their Bash is for reading -- grepping the tasks, parsing the output of
+      a run somebody else did, `git diff` over test/, reading what the build printed.
+      Off the board the HIL suite reports every case as IGNORE and exits 0, so a green
+      run is not evidence that anything ran; the receipt has to show the cases firing.
+
+      Close with the canonical line, on its own line, exactly one of:
+
+        DECISION: PASS
+        DECISION: PASS_WITH_WARNINGS
+        DECISION: PASS_PENDING_BOARD
+        DECISION: FAIL
+
+      PASS means everything the change promised was demonstrated and the record cuts
+      clean. PASS_WITH_WARNINGS means it was demonstrated but the record carries
+      something to fix before archiving, typically a figure that contradicts the tree
+      or contradicts itself. PASS_PENDING_BOARD means everything reachable without the
+      assembled board was demonstrated and what remains is listed, each item naming
+      the step that would close it -- on this project that is the ordinary outcome,
+      not a failure.
+
+      FAIL is narrower than it reads: the delivered change does not do what it
+      promised, or a tick has no receipt at all. A miscounted figure is a warning, not
+      a failure. The first change this document was run against had two wrong figures
+      and behaved exactly as specified, and filing that under the same word as a change
+      that bricked the board would throw away the distinction the line exists to carry.
+      A verdict that always reads the same stops carrying information, which is how the
+      README claim above survived.
+    requires:
+      - test-plan
+      - tasks
+      - review
 
 apply:
   requires: [tasks, review]
