@@ -46,6 +46,14 @@ context: |
   - Nothing reaches a peripheral except its owner. That single rule is what makes
     the absence of mutexes safe, and it is the one most easily broken by accident.
 
+  There is a roster of reviewer roles under .claude/agents/, defined by domain -- the
+  program, the device, the requirements baseline, flying it from the ground, and
+  whether the data is worth having. Each one's own file says what it owns and where it
+  stops, so read that rather than guessing from the name. They are not only for the
+  review step: consult one while exploring or proposing whenever a question is
+  squarely in its domain and the answer would change what gets written. They do not
+  act on their own, so nothing happens unless one is asked.
+
   Verification: CI builds and analyses, and that is the limit of what it can do.
   There is no host or native test environment. Whether a task body works is not
   something a build can tell you -- only the assembled board can, and saying which
