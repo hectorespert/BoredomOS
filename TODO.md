@@ -1099,6 +1099,39 @@ To decide:
   deliberately rather than by accretion.
 
 
+### Record which scenario each HIL case covers
+
+**Status:** defined
+**Scope:** `test/test_hil/check_*.py`, `test/test_hil/README.md`, `scripts/` (new check)
+
+The HIL suite claims a coverage it does not record, and the claim was false in three
+places until it was removed from `CLAUDE.md` and `test/test_hil/README.md`. Measured on
+this tree:
+
+- Nine `test_*` cases across four modules — `check_clock.py` 1, `check_silence.py` 1,
+  `check_timesync.py` 1, `check_telemetry.py` 6 — against **eight** `#### Scenario:`
+  headings in `openspec/specs/mavlink-link/spec.md`, so no one-to-one mapping is even
+  arithmetically possible.
+- The six cases in `check_telemetry.py`, two thirds of the suite, name no scenario at all.
+- `check_clock.py` says it covers the scenario *"inbound SYSTEM_TIME and TIMESYNC sent on
+  that port are acted upon"*. That text appears nowhere in the live spec — it is a
+  requirement phrasing that has since been rewritten.
+- `check_timesync.py` says "the scenario about TIMESYNC" without naming one.
+
+What to do: give each case a machine-readable declaration of the requirement and scenario
+it covers, rather than prose in a docstring, and add a check under `scripts/` that fails
+when a case names a scenario that does not exist, when a scenario has no case and no
+`[board]` step, or when the counts disagree. It needs no hardware — it compares text
+files — so it belongs beside `scripts/ram_budget.py` in CI, where a wrong claim lands on
+the author's desk.
+
+Two reasons this is worth doing before the next change touches the link. It is the
+prerequisite for `verify.md`'s coverage section to mean anything for `mavlink-link`, which
+is the one capability with a live spec and a real suite. And the failure mode it prevents
+is the one already demonstrated: every part of the false claim was checkable at any time
+by anyone, for months, and nothing was positioned to look.
+
+
 ## Done
 
 ### Write the architecture document

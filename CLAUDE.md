@@ -35,6 +35,24 @@ dangles.
 Do not open a change for an entry that is not being implemented, and do not restate the
 architecture in a spec.
 
+A change is more than its four planning artifacts. The schema is `boredomos`, forked so
+the chain does not end at `tasks.md`. **`review.md` is written before any code**, by the
+agents under `.claude/agents/`, and `apply` is blocked until it exists — self-review has
+shipped defects here more than once. **`verify.md` is written after apply** and audits what
+was demonstrated rather than what was ticked: the receipt behind every tick, coverage read
+off the delta rather than off the tick count, and the review's findings actually landing.
+It closes on a canonical `DECISION:` line, one of `PASS`, `PASS_WITH_WARNINGS`,
+`PASS_PENDING_BOARD` or `FAIL`. `openspec/config.yaml` carries the rules for each artifact
+and the guidance for apply and archive.
+
+Those agents are a roster by domain — the program, the device, the requirements baseline,
+how an obligation gets demonstrated and whether it was, flying it from the ground, and
+whether the data is worth having. Each file says what it owns and where it stops, so read
+that rather than guessing from the name. All of them take part in `review`, on every
+change and not scaled down because a change looks small; `verify` uses a narrower set.
+They are equally there to be consulted while exploring or proposing, and none of them acts
+on its own.
+
 ## Commands
 
 ```bash
@@ -50,7 +68,7 @@ There is no host/native test environment. `test/` holds two suites, and **`pio t
 means the HIL one**: it flashes this firmware and then interrogates it from the host,
 leaving the board running what it would fly.
 
-- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases, aligned with the scenarios in `openspec/specs/mavlink-link/spec.md`. Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
+- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases across four `check_*.py` modules, all of them about the `mavlink-link` capability. Which scenario each case covers is **not recorded** — see *Record which scenario each HIL case covers* in [TODO.md](TODO.md). Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
 - **`test/test_libs/`** — the Unity suite. `test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so it never runs in CI. It runs on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All cases live in that one file, dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test *directories*, so it picks a suite, not a case.
 - **`test/test_hil/`** — host-side Python that interrogates the flashed firmware over the MAVLink link. `platformio.ini` excludes it with `test_ignore = test_hil`, since PlatformIO would try to compile it as C++. Run these by hand; see its `README.md`.
 

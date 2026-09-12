@@ -7,8 +7,10 @@ flight.
 
 That is the point. `test_libs` links `lib/` against the Arduino core and cannot
 observe the RTOS at all — no task, no queue, no stack. These checks see only what
-the ground station sees, which is the firmware's actual contract, and they map
-one-to-one onto the scenarios in `openspec/specs/mavlink-link/spec.md`.
+the ground station sees, which is the firmware's actual contract. They exercise the
+`mavlink-link` capability, but which scenario each case covers is not recorded: nine
+cases against eight scenarios, and six of the cases name none. `TODO.md` carries the
+entry for fixing that.
 
 ## Running them
 
