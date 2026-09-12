@@ -1,89 +1,141 @@
-schema: spec-driven
+schema: boredomos
 
 # Project context. Shown to AI when creating artifacts. 50 KB limit.
 context: |
-  BoredomOS is the flight firmware of a CubeSat: Arduino UNO R4 Minima
-  (Renesas RA4M1, Cortex-M4 at 48 MHz, 32 KB RAM) running FreeRTOS, built with
-  PlatformIO. It presents itself to the ground station as a MAVLink vehicle over
-  USB CDC at 115200; MAVProxy is the reference GCS. There are no control loops,
-  no dynamic configuration, and no filesystem beyond a fixed ring of SD log files.
+  BoredomOS is the flight firmware of a CubeSat: an Arduino UNO R4 Minima
+  (Renesas RA4M1, Cortex-M4, 32 KB of RAM) running FreeRTOS, built with
+  PlatformIO. It presents itself to a ground station as a MAVLink vehicle, and
+  MAVProxy is the reference GCS. There are no control loops, no dynamic
+  configuration, and no filesystem beyond a fixed ring of SD log files. Nothing
+  about it can be serviced once it flies.
 
-  Three documents divide the work, and a change should not blur them:
-  - ARCHITECTURE.md is the single source of truth for the design — structure and
-    why. Read it before proposing anything, and update it in the same change when
-    it becomes inaccurate.
-  - TODO.md is the backlog: what is planned but not yet built, one entry per
-    feature or defect, in English, defined before any code is written.
-  - openspec/ holds the change being implemented right now, and the specs that
-    describe behaviour once it is archived.
+  This file deliberately states no figures, no file paths and no command
+  behaviour, and it is not the source of truth for any of them. It has been wrong
+  three times -- about which port carried the link, about what `pio test` does,
+  and about the memory model, and that last one produced a proposal that bricked
+  the board. Anything it copied from the repository drifted the moment the
+  repository moved. So read these, and believe them over anything recalled or
+  quoted:
 
-  Hard constraints every proposal must respect:
-  - About 2650 bytes of RAM headroom, out of 32 KB. Task stacks, control blocks and
-    queue structures are static, in .bss, counted by the linker; a new task costs
-    4 x stack_words + 76 bytes of it. configTOTAL_HEAP_SIZE is 0x1800 and backs the
-    queued items only. The `RAM:` figure a build prints omits 9472 bytes and is not
-    the commitment — scripts/ram_budget.py prints that, and fails the build before
-    the headroom runs out. Adding a library or a task is a decision, not a detail.
-  - Queues carry heap pointers, never values. The producer pvPortMallocs, checks
-    the result for NULL, and vPortFrees if xQueueSend does not return pdPASS; the
-    consumer frees after use. A leak is fatal within minutes.
-  - Stack sizes in xTaskCreateStatic are words, not bytes, are tuned tight (96-256),
-    and must match the length of the StackType_t array declared alongside.
-  - Four priority levels, from include/Priority.h, never raw numbers.
-  - Adding a subsystem is four edits: the task body in a new src/*.cpp reaching
-    shared objects via extern, a [[noreturn]] extern declaration in src/main.cpp,
-    its static storage beside it, and an xTaskCreateStatic in setup(). Tasks and
-    queues are created nowhere else, and never with the dynamic xTaskCreate or
-    xQueueCreate — CI greps src/ for both and fails.
-  - One owner per resource: src/serial.cpp the UART, src/sdwrite.cpp the card,
-    lib/SystemTime the clocks, lib/Battery the ADC. Everything else goes through a
-    queue or the library wrapper — this is what makes the absence of mutexes safe.
-  - Every outbound MAVLink message uses system id 1, MAV_COMP_ID_AUTOPILOT1,
-    MAV_TYPE_ROCKET.
-  - Wiring is hardcoded (SD CS on 9, battery on A0, DS1307 on I2C). A new pin must
-    be documented in ARCHITECTURE.md.
-  - configASSERT in setup() halts the board on a missing RTC, SD card, queue or
-    task. Do not propose softening it into a degraded boot as a side effect.
-  - A queue's declared depth must be backed by the heap: depth, plus one item block
-    per producer that can be holding an unsent item and one per consumer holding an
-    unreleased one. Proposing a depth is proposing that arithmetic.
+  - ARCHITECTURE.md is the design and the constraints behind it, with the current
+    numbers. Read it before proposing anything. Its section on constraints is the
+    one a proposal has to satisfy, and a change that makes it inaccurate updates
+    it in the same commit.
+  - CLAUDE.md is the conventions and the commands, including which of them need
+    the assembled board and which are destructive.
+  - platformio.ini is what is actually built, with which flags, in which
+    environments.
 
-  Verification: `pio run` is all that CI runs. There is no host or native test
-  environment — test/test_main.cpp asserts against a real battery, a real DS1307
-  and a real SD card, so `pio test` builds, flashes and runs on the board itself
-  (about 25 s for the 5 cases) and cannot run in CI. Running it reflashes the
-  board with the test binary and wipes data*.mpk and index.bin from the card, so
-  it is not a read-only check. A change touching lib/ or a task body is not
-  verified by building it; tasks must say which steps need the board.
+  Three documents divide the planning and a change should not blur them.
+  ARCHITECTURE.md is structure and why. TODO.md is the backlog: everything
+  planned that nobody is implementing right now, one entry per feature or defect,
+  in English, defined before any code is written. openspec/ is the change in
+  flight, and the specs that describe behaviour once it is archived. When a
+  TODO.md entry is picked up it becomes a change and the entry is deleted in the
+  same commit, so nothing is described twice.
 
-# Per-artifact rules.
+  What holds regardless of the numbers:
+
+  - RAM is the binding constraint. Adding a task, a queue or a library is a
+    decision, not a detail. The build refuses a firmware that does not fit and
+    reports the headroom on every link, so the figure is never something to
+    remember -- it is something to read.
+  - Priorities are named, never numeric.
+  - Wiring is hardcoded. A change that adds a pin documents it in
+    ARCHITECTURE.md.
+  - Nothing reaches a peripheral except its owner. That single rule is what makes
+    the absence of mutexes safe, and it is the one most easily broken by accident.
+
+  There is a roster of reviewer roles under .claude/agents/, defined by domain -- the
+  program, the device, the requirements baseline, flying it from the ground, and
+  whether the data is worth having. Each one's own file says what it owns and where it
+  stops, so read that rather than guessing from the name. They are not only for the
+  review step: consult one while exploring or proposing whenever a question is
+  squarely in its domain and the answer would change what gets written. They do not
+  act on their own, so nothing happens unless one is asked.
+
+  Verification: CI builds and analyses, and that is the limit of what it can do.
+  There is no host or native test environment. Whether a task body works is not
+  something a build can tell you -- only the assembled board can, and saying which
+  steps need it is part of writing the tasks.
+
 rules:
   proposal:
     - Any proposal that adds a task, a queue or a library must state its RAM cost
-      against the RAM headroom, currently about 2650 bytes. A task costs
-      4 x stack_words + 76 bytes of .bss; a queued item comes from the 0x1800 heap.
+      against the headroom the build reports, read from a current build rather
+      than quoted from anywhere. A task's stack and control block are counted by
+      the linker; a queued item comes from the FreeRTOS heap, and a queue's
+      declared depth must be backed by it -- depth, plus one block per producer
+      that can hold an unsent item and one per consumer holding an unreleased one.
+      Proposing a depth is proposing that arithmetic.
     - State explicitly when a change alters the MAVLink surface (new message id,
       new stream rate, changed identity triple).
+    - Read the other active changes under openspec/changes/ before writing, not
+      only openspec/specs/ and TODO.md. State which of their claims this change
+      invalidates. One change landing first has already made another's entire RAM
+      justification false and claimed a build flag that other one also claimed,
+      and nothing detected it.
+
+  specs:
+    - Write each requirement as a standing property of the system, not as a
+      statement about this change. A requirement phrased around "before and
+      after" or "unchanged by the move" is meaningless once archived, and one has
+      already had to be removed for exactly that.
+    - Every scenario's THEN must name something someone could check. The observer
+      is a ground station on the link, an operator with the board in hand, or the
+      build -- one of those three. If none of them can see it, it is not a
+      scenario.
+    - A requirement that could stop being true without any of those three
+      noticing is a build or configuration decision, not behaviour. It belongs in
+      design.md.
+    - Do not promise more than the toolchain delivers. A requirement about the
+      build must be true of the build as it actually behaves, checked by running
+      it, not as it ought to behave.
+    - Know how each scenario would be verified before writing it -- which suite
+      would run it, and whether it needs the assembled board. Do not name the test
+      in the spec -- that is an internal name and it rots when tests move. A
+      requirement whose scenarios nothing can exercise is still worth writing when
+      the behaviour matters, but then say so in the proposal's Impact, because
+      once the change is archived the spec reads as contract and nothing
+      distinguishes a proven requirement from a hoped-for one.
+
   design:
     - Name which file owns each resource the change touches, and keep it to one
       owner. Reaching a peripheral from a second file is what would force mutexes.
   tasks:
-    - Mark every step that needs the assembled board. `pio run` is the only check
-      that runs without hardware.
+    - Mark every step that needs the assembled board. Without it the only checks
+      that run are the CI ones -- `pio run` on the three environments, the grep
+      that guards static creation, and `pio check`.
     - A change touching lib/ or a task body needs a `pio test` run and a look at
       the high-water marks in the SD log before it is called done.
+    - Every scenario in the change's delta specs needs at least one task that
+      exercises it, and that task names the scenario it covers. A scenario nothing
+      exercises is how a spec turns into a promise nobody checks. Where the only
+      task that could exercise it needs the board, mark it and leave it unticked
+      rather than quietly dropping the scenario.
 
 # Advisory guidance, injected when these operations run.
 operations:
   apply:
     guidance:
+      - 'review.md is written before apply and apply is blocked until it exists.
+        Read it first: its findings were meant to change the artifacts, so a
+        finding recorded as fixed should already be reflected in what you are
+        about to implement, and one recorded as deferred should not surprise you
+        halfway through.'
       - Never report a task body or a lib/ change as verified on the basis of a
         successful build. Say what was and was not run.
-      - '`pio test` reflashes the board with the test binary and wipes data*.mpk
-        and index.bin from the card. Ask before running it, and reflash with
-        `pio run -t upload` afterwards if the board should stay operational.'
+      - '`pio test` means the HIL suite: it flashes this firmware, interrogates it
+        from the host and leaves the board running what it would fly. It does not
+        touch the card. `pio test -e libs` is the destructive one -- it replaces
+        the firmware with the Unity binary and deletes data*.mpk and index.bin on
+        every case. Ask before running that one, and follow it with
+        `pio run -t upload` to leave the board operational.'
   archive:
     guidance:
+      - 'Before archiving, check the other active changes for claims this one
+        makes false -- figures, build flags, the patterns their tasks follow.
+        Nothing detects that automatically and it has already happened once.'
       - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
         There is no TODO.md entry to close out: it was deleted when the change
         was proposed, and openspec/specs/ plus the git history are the record.'
