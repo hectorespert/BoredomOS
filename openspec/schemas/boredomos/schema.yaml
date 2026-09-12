@@ -1,6 +1,6 @@
-name: spec-driven-verified
+name: boredomos
 version: 1
-description: Default OpenSpec workflow - proposal → specs → design → tasks
+description: BoredomOS workflow - proposal → specs → design → tasks → independent review, which gates apply
 artifacts:
   - id: proposal
     generates: proposal.md

@@ -1,4 +1,4 @@
-schema: spec-driven-verified
+schema: boredomos
 
 # Project context. Shown to AI when creating artifacts. 50 KB limit.
 context: |
