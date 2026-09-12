@@ -56,9 +56,11 @@ To decide before implementing:
   magnetometer data, or a fused attitude (roll/pitch/yaw) as well. Fusion means
   floating point arithmetic on every sample: it has to be measured against the tight
   stacks and the 1 Hz cadence of the rest of the firmware before committing.
-- **Which libraries.** Each chip has its own and not all of them are lightweight;
-  with 8 KB of FreeRTOS heap the cost is worth looking at before adding them to
-  `lib_deps`.
+- **Which libraries.** Each chip has its own and not all of them are lightweight.
+  Since `use-static-allocation` the binding constraint is `.bss` headroom rather than
+  the FreeRTOS heap, and `scripts/ram_budget.py` reports it after every link and fails
+  the build when it runs out -- so the cost of a library is measurable before
+  committing to it, and a proposal should state it.
 - **Calibration.** The magnetometer needs offsets, and the gyroscope a zero. Where
   they are stored — compiled-in constants, a file on the SD card, parameters from
   the ground via *[Answer the GCS messages that are ignored today]* — is a design
@@ -495,17 +497,25 @@ The ledger, against the accounting in the `use-static-allocation` change:
 
 | | Today | Proposed |
 |---|---|---|
-| `serialWriteQueue` storage | 16 x 4 = 64 B | 8 x 64 = 512 B |
-| In flight | 291 B per message, from ~870 B free | 0 |
+| `serialWriteQueue` slots | 4 x 4 = 16 B, in `.bss` | 4 x 64 = 256 B, in `.bss` |
+| In flight | 304 B per message, from 6136 B of heap | 0 |
 | `.bss` | 0 | 291 B for the packing buffer |
 | Heap operations per message | 3 (`malloc`, `free` on failure, `free` after use) | 0 |
 
-It is not a net saving of bytes under normal load: about 448 bytes of fixed heap buy
-back a transient demand of the same order. What it buys is that the demand becomes
-**deterministic and reserved at boot** instead of competing, every second, for the
-~870 bytes that are left — which is precisely the competition that makes
-the `add-console-cli` change a repeating
-failure rather than a one-off.
+**What changed since this entry was written.** `use-static-allocation` moved the task
+and queue structures into `.bss` and sized the heap to 6144 bytes against a worst case
+of 5808, so scarcity is no longer the argument — the transient demand fits, with 328
+bytes of margin, and a producer no longer competes with a task stack for the same
+bytes. Two arguments survive that do not depend on scarcity, and one is new:
+
+- **The protocol stops being an available mistake.** Five places where the allocation
+  can be got wrong become zero, rather than five that are watched.
+- **It removes the last `pvPortMalloc` from `src/`**, which makes possible a CI check
+  that cannot exist today: the grep that guards `xTaskCreate` and `xQueueCreate`
+  could be extended to the allocator. That is a mechanical guarantee replacing a
+  convention.
+- **The heap could then go to nearly zero**, returning about 6 KB to the `.bss`
+  headroom the linker polices — which is where every future subsystem has to fit.
 
 It also retires an invariant with its reason rather than by decree. `CLAUDE.md` says
 queues carry heap pointers and never values, and that is correct **because the item
@@ -536,13 +546,15 @@ rather than by accretion.
 
 **What this entry unblocks.** Converging them means giving the USB endpoint its own
 write queue that the same producers fill, so one `HEARTBEAT` becomes one entry in each
-of two queues and each port drains its own at its own pace. That is impossible while
-the item is a `mavlink_message_t`: the block is 304 bytes in `heap_4`, there are about
-870 bytes free after boot, and a producer would have to allocate twice — 608 bytes for
-a single duplicated `HEARTBEAT`, and over 1200 if the battery sender fires in the same
-instant, which does not fit. `pvPortMalloc` returns `NULL` long before either queue
-reports itself full, and per *[Check the result of `pvPortMalloc` in the four places
-that don't]* three of the four senders would write to address 0.
+of two queues and each port drains its own at its own pace. That is still impossible while the
+item is a `mavlink_message_t`, though for a different reason than when this entry was
+written. The heap is no longer nearly empty — `use-static-allocation` left 6136 usable
+bytes — but the worst case already claims 5808 of them, and a second outbound queue
+would add its own depth plus its producers and consumer: another 8 blocks of 304, or
+2432 bytes, for a total of 8240 against 6136. It does not fit, and raising the heap to
+make it fit would take the bytes straight out of the `.bss` headroom that every future
+subsystem needs. At 64 bytes by value the second queue costs 256 bytes of `.bss` and
+nothing transient.
 
 Two arguments say the queue is not obviously the better model even once it fits, and
 both should be weighed rather than assumed:
@@ -951,10 +963,14 @@ set it. `src/` is therefore not compiled into the test binary: no `main.cpp`, no
 `xTaskCreate`, no `vTaskStartScheduler`. The five cases link `Battery`,
 `SystemTime` and `SdData` against the Arduino core and nothing else.
 
-The section sizes confirm it. The application firmware has a `.bss` of 14824 bytes,
-which contains `ucHeap`; the test firmware built from the same tree has a `.bss` of
-4608 bytes, too small to hold an 8192-byte array. The FreeRTOS heap is not in the
-test binary because FreeRTOS is not in the test binary.
+The section sizes confirm it. The application firmware has a `.bss` of 19876 bytes,
+which contains `ucHeap` and every task stack; the Unity binary built from the same tree
+has a `.bss` of 4608 bytes, too small to hold the 6144-byte heap array, and contains
+neither `vTaskStartScheduler` nor `xTaskCreateStatic` at all. FreeRTOS is simply not in
+the test binary.
+
+Note also that `test_build_src` governs `pio test`, not `pio run`: `pio run -e libs`
+builds the application and does carry the static storage.
 
 The consequence is that `pio test` covers the libraries in isolation and **cannot
 observe the RTOS at all**: not a stack size, not a queue depth, not the pointer
