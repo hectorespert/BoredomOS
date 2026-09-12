@@ -35,8 +35,12 @@ dangles.
 Do not open a change for an entry that is not being implemented, and do not restate the
 architecture in a spec.
 
-A change is more than its four planning artifacts. The schema is `boredomos`, forked so
-the chain does not end at `tasks.md`. **`review.md` is written before any code**, by the
+A change is more than the four artifacts `/opsx:propose` names. The schema is `boredomos`,
+forked so the chain neither starts at the task list nor ends at it. **`test-plan.md` comes
+before `tasks.md`**, written by the qa engineer: one row per scenario saying by what method
+it will be demonstrated and what the receipt is, decided before anyone writes the steps
+that claim to do it. Every row is then named by at least one task, which is the chain a
+coverage audit walks. **`review.md` is written before any code**, by the
 agents under `.claude/agents/`, and `apply` is blocked until it exists — self-review has
 shipped defects here more than once. **`verify.md` is written after apply** and audits what
 was demonstrated rather than what was ticked: the receipt behind every tick, coverage read
