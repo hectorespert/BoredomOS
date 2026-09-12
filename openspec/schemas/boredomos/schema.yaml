@@ -269,6 +269,16 @@ artifacts:
       Close with whether the change is ready to apply, and name anything a reader
       should know before starting -- particularly work that cannot be verified with
       the hardware currently available.
+
+      Say in that closing section, every time, that the review read the verification
+      steps and did not run them. It is a deliberate limit and not an oversight, but
+      it has to be visible: a step can trace to the right requirement, use the right
+      method and read correctly, and still not fire. One in this project asked for a
+      task too large to fit and expected the build to fail -- and the build went green
+      at an unchanged RAM figure, because the linker discarded the unused array. It was
+      caught by someone running it, which is the one thing this review does not do. So
+      a reader should treat these steps as reviewed, not as exercised, and the first
+      time any of them actually runs is during apply.
     requires:
       - proposal
       - specs

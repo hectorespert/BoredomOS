@@ -29,4 +29,9 @@
 ## Verdict
 
 <!-- Ready to apply, or not, and what a reader should know before starting --
-     particularly anything that cannot be verified with the hardware available. -->
+     particularly anything that cannot be verified with the hardware available.
+
+     State every time that the verification steps were read and not run. A step can
+     trace to the right requirement, use the right method, read correctly, and still
+     not fire. Treat them as reviewed, not exercised: the first time any of them runs
+     is during apply. -->
