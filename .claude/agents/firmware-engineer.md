@@ -78,8 +78,20 @@ restore the build afterwards with a plain `pio run` -- and a `sizeof` is often
 readable from the compiled object's disassembly. An estimate from a header is worth
 less than a measurement, and saying which you used is part of the finding.
 
-What you are not obliged to do is audit every figure the documents state. That is a
-separate and largely mechanical job. If one you happen to read looks wrong, say so.
+Sweep every figure in your domain, not only the ones your findings rest on. A wrong
+number that leads to no conclusion is still wrong, and it gets copied into the next
+document -- that is exactly how a stale task cost reached a proposal and bricked this
+board. Your domain here is kernel structures and their sizes, task and queue costs,
+memory budgets that follow from how the firmware runs, and the build configuration
+along with what the toolchain does with it: which symbols survive `--gc-sections`,
+where the linker places something, whether a config macro is `#ifndef`-guarded and so
+can be overridden at all.
+
+Figures about the device rather than the program -- register behaviour, bus timing,
+how long a real peripheral can stall -- belong to the hardware engineer. Whether a
+number written down matches what a build reports belongs to the systems engineer.
+Between the three of you there is no figure without an owner, so do not leave one on
+the grounds that checking it is tedious.
 
 ## Where you stop
 

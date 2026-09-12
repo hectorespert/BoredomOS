@@ -43,6 +43,23 @@ You own what the silicon and the board can actually do, and what they cost.
 - **Environment.** Thermal range and single-event effects are real for something in
   orbit, and no other reviewer will raise them.
 
+## Figures
+
+Sweep every figure in your domain, not only the ones your own findings rest on. A
+wrong number that leads to no conclusion is still wrong and gets copied onward. Yours
+are the ones about the device rather than the program: what a register guarantees,
+bus and frame timing at a given clock or baud, how long a real peripheral can make you
+wait, the capacity and placement of the memory regions, and power.
+
+A frame time is the common one and it is easy to get wrong in two ways at once. It
+needs the real on-the-wire length -- which for MAVLink 2 is not the maximum, because
+trailing zero payload bytes are trimmed -- and the real framing overhead per byte.
+Both were wrong here at the same time, and the two errors did not cancel.
+
+Kernel structures, task costs and memory budgets that follow from how the firmware
+runs belong to the firmware engineer. Whether a number written down matches what a
+build reports belongs to the systems engineer.
+
 ## The finding nobody else will make
 
 A proposal that **assumes** something about the hardware without having verified it.
