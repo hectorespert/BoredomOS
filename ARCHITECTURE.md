@@ -119,26 +119,60 @@ SPI and nothing waits for it.
 The core's `UART::write()` busy-waits until the frame is on the wire rather than
 buffering and returning, and this port builds with `configUSE_TIME_SLICING` at `0`,
 so a task that never blocks is not preempted by its equals. At `HIGHEST` a single
-68-byte `BATTERY_STATUS` would stall every other task for ~11.8 ms at 57600 baud.
+`BATTERY_STATUS` frame — 36 bytes of payload, 48 on the wire once MAVLink 2 trims
+the trailing zeroes — would stall every other task for 8.33 ms at 57600 baud.
 Nothing is lost by transmitting late — the frame waits in `serialWriteQueue` — so
 the writer sits at `HIGH`, level with its own producers, which yield every cycle on
 `vTaskDelayUntil`.
 
-**The seven tasks:**
+**The seven tasks, and which configuration starts them.** Every task's storage is
+declared unconditionally in `src/main.cpp` — the linker counts it whether or not
+the task is started — but `setup()` only calls `xTaskCreateStatic` for four of
+them in the reduced configuration described below.
 
-| Task | File | Stack | Priority | Cadence |
-|---|---|---|---|---|
-| `TaskSerialRead` | `src/serial.cpp` | 96 w | HIGHEST | polls every 10 ms |
-| `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGH | blocks on `serialWriteQueue` |
-| `TaskHeartbeat` | `src/mavlink.cpp` | 128 w | HIGH | `HEARTBEAT` and `SYSTEM_TIME`, alternating every 500 ms |
-| `TaskMavlinkBatteryStatus` | `src/mavlink.cpp` | 128 w | HIGH | every 2 s |
-| `TaskMavlink` | `src/mavlink.cpp` | 256 w | LOW | blocks on `serialReadQueue` |
-| `TaskLogger` | `src/logger.cpp` | 96 w | LOW | every 1 s |
-| `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` |
+| Task | File | Stack | Priority | Cadence | Reduced? |
+|---|---|---|---|---|---|
+| `TaskSerialRead` | `src/serial.cpp` | 96 w | HIGHEST | polls every 10 ms | yes |
+| `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGH | blocks on `serialWriteQueue` | yes |
+| `TaskHeartbeat` | `src/mavlink.cpp` | 128 w | HIGH | `HEARTBEAT` and `SYSTEM_TIME`, alternating every 500 ms | yes |
+| `TaskMavlinkBatteryStatus` | `src/mavlink.cpp` | 128 w | HIGH | every 2 s | no |
+| `TaskMavlink` | `src/mavlink.cpp` | 256 w | LOW | blocks on `serialReadQueue` | yes |
+| `TaskLogger` | `src/logger.cpp` | 96 w | LOW | every 1 s | no, and not with no SD card either |
+| `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
 
 Periodic tasks use `vTaskDelayUntil` against a `xLastWakeTime` seeded once, so the
 cadence does not drift with the work done in the body. Consumer tasks block on
 `xQueueReceive` with `portMAX_DELAY` and cost nothing when idle.
+
+**The boot decision.** `setup()` reads `R_SYSTEM->RSTSR0/1/2` to learn why the
+board reset, decodes it into one of five reasons (power-on, low-voltage,
+watchdog, software, external/unknown), and updates two counters kept in
+`R_SYSTEM->VBTBKR` — the RA4M1's battery-backed registers, which survive any
+reset: a count of consecutive boots that never ran stably, and a cumulative
+count only a ground command clears. After three consecutive unstable boots or
+ten cumulative resets, `setup()` starts only `TaskSerialRead`, `TaskSerialWrite`,
+`TaskHeartbeat` and `TaskMavlink` — the *reduced configuration*, which keeps the
+board reachable and commandable without the SD card, the real-time clock or the
+battery sense. `TaskHeartbeat` also carries the two mechanisms that get the board
+back out: it clears the consecutive counter once the firmware has run for the
+5-minute stability window, and, while reduced, retries the normal configuration
+every 30 minutes. Both figures are derived in `openspec/changes/add-degraded-mode/design.md`
+from the heap's worst-case leak rate, not guessed. An independent watchdog,
+refreshed only from the idle hook, turns a task that stops yielding into a
+watchdog reset within `WDT_TIMEOUT_MS`. `include/Recovery.h` and `src/recovery.cpp`
+own the register layout and the `PRCR`-unlocked access to it; `src/main.cpp` is
+the only file that reads or writes the reset reason, the phase marker and the
+counters, and `src/mavlink.cpp` reads them back for the heartbeat and the boot
+`STATUSTEXT`. A byte written at each milestone of `setup()` — link, clock, card,
+queues, tasks, scheduler-started, or one of the two fault hooks — is what makes a
+halt during initialisation nameable at the next boot instead of a silent hang.
+
+The reduced configuration and the watchdog are not finished: `vApplicationStackOverflowHook`
+and `vApplicationMallocFailedHook` still rely on the watchdog eventually
+underflowing to reset the board rather than resetting themselves, and a hang
+during `setup()` before the idle hook first runs is caught only if it occurs
+after the watchdog is opened. Both are open items, not this document's claim
+about current behaviour.
 
 ## 4. Queue memory ownership protocol
 
@@ -289,6 +323,8 @@ Wiring is hardcoded, not configurable. Changing a pin means changing the code.
 | DS1307 real-time clock | I2C, address `0x68` | `lib/SystemTime` |
 | Internal RTC | on-chip | `lib/SystemTime` |
 | Status LED | `LED_BUILTIN` | `src/hooks.cpp` |
+| Independent watchdog (WDT) | on-chip, opened in `setup()` | `src/main.cpp` opens it; `src/hooks.cpp`'s idle hook refreshes it |
+| Backup registers (`R_SYSTEM->VBTBKR`) | on-chip, `[0..3]` the bootloader's, `[4..11]` this firmware's | `include/Recovery.h` / `src/recovery.cpp` own the layout and access; `src/main.cpp` is the only writer of its content |
 
 The status LED carries the two faults that stop the board, and the patterns are
 chosen to be told apart with nothing attached — which is the case they exist for:
@@ -315,7 +351,7 @@ for a single LiPo cell and honest about being an estimate.
 
 Most of what looks unusual in this firmware follows from four numbers.
 
-**2652 bytes of headroom.** Not 32 KB, and not the 37 % that `pio run` appears to
+**2628 bytes of headroom.** Not 32 KB, and not the 37 % that `pio run` appears to
 leave free. Task stacks, control blocks and queue structures are in `.bss`, counted by
 the linker; `configTOTAL_HEAP_SIZE` is `0x1800` and backs the queued items only; and
 `g_heap`, the main stack and the vector table take another 9472 bytes that the printed
@@ -335,10 +371,18 @@ log before assuming it still fits.
 **Four priority levels**, from `include/Priority.h`, never raw numbers. FreeRTOS is
 configured with `configMAX_PRIORITIES` of 5 and a 1000 Hz tick.
 
-**`configASSERT` halts rather than degrades.** `setup()` asserts on the RTC, the SD
-card, each queue creation and each task creation. A CubeSat with no clock or no log is not a CubeSat
-flying in a degraded mode; it is a CubeSat whose data cannot be trusted afterwards.
-Missing hardware stops the board on purpose.
+**`configASSERT` halts only where recovery is impossible, not where hardware is
+missing.** The question `setup()` asks is not "is this important" but "does the
+firmware need it to be reachable" — and the answer is: the link, and nothing
+else. Absent RTC or SD card degrade instead of halting: the board runs on ticks
+since boot and accepts a time set from the ground without the DS1307, and skips
+the housekeeping log without the card, reporting the absence either way rather
+than staying silent about it. `configASSERT` remains on each queue creation and
+each task creation — with `configSUPPORT_STATIC_ALLOCATION` these cannot fail
+for want of memory, so a `NULL` handle there is a programming error, not a
+hardware fault, and stopping on it is still correct. See
+`openspec/changes/add-degraded-mode/` for the reasoning and
+`specs/fault-recovery/spec.md` for what a degraded board must still do.
 
 ## 8. Build, flash and test
 
@@ -388,18 +432,19 @@ section sizes show it — the Unity binary links 5340 bytes of RAM and contains 
 same static storage as the flight build.
 
 **What the build reports, and what it does not.** `pio run` prints
-`.data + .noinit + .bss` — 20644 of 32768, about 63 % — which now moves when a task is
+`.data + .noinit + .bss` — 20668 of 32768, about 63 % — which now moves when a task is
 added, because the stacks and control blocks are in `.bss`. It still leaves out
 `g_heap`, the main stack and the vector table, another 9472 bytes, so on its own it
 understates the commitment. `scripts/ram_budget.py` runs after every link and prints
-the honest figure: **30116 bytes committed of 32768, 2652 bytes of headroom.** That
+the honest figure: **30140 bytes committed of 32768, 2628 bytes of headroom.** That
 headroom is what a new subsystem has to fit into, and the build fails if it drops
 below the floor in `platformio.ini`.
 
 `test_hil/` is what exercises the assembled firmware. `run.py` discovers the cases,
 prints Unity's line format so `pio test` counts them natively, and reports anything it
-cannot check — no board, no adapter — as skipped rather than failed. The cases follow
-the scenarios in `openspec/specs/mavlink-link/spec.md`.
+cannot check — no board, no adapter — as skipped rather than failed. Nine of the twelve
+cases follow the scenarios in `openspec/specs/mavlink-link/spec.md`; the other three, in
+`check_recovery.py`, follow `fault-recovery`.
 
 Its `build_stub.cpp` is not a test. PlatformIO counts the sources it compiled from the
 suite directory and refuses to build before it ever reaches `src/`, so a suite that is

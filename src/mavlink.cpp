@@ -3,23 +3,59 @@
 #include <MAVLink.h>
 #include <Battery.h>
 #include <SystemTime.h>
+#include <Recovery.h>
+#include <string.h>
 
 extern QueueHandle_t serialWriteQueue;
 
 extern SystemTime systemTime;
 
+extern bool reducedConfiguration;
+extern Recovery::ResetReason previousResetReason;
+extern Recovery::BootPhase previousBootPhase;
+
+// How long the firmware must run before a boot counts as stable, and how long
+// the reduced configuration waits before trying the normal one again. Both are
+// derived in design.md from the heap's worst-case leak rate, not guessed
+// (review.md finding 15).
+constexpr uint32_t STABILITY_WINDOW_MS = 5UL * 60UL * 1000UL;
+constexpr uint32_t RETRY_INTERVAL_MS = 30UL * 60UL * 1000UL;
+
+// custom_mode is a uint32_t this firmware sent as zero before this change. It now
+// carries, one byte each, the reset reason, the phase the previous boot reached,
+// and both counters clamped to their thresholds for display -- the stored counts
+// themselves are not clamped (see include/Recovery.h) so the automatic retry can
+// still tell its own contribution apart from a further fault. See design.md.
+static uint32_t packCustomMode()
+{
+    uint8_t consecutive = Recovery::getConsecutiveCount();
+    if (consecutive > Recovery::CONSECUTIVE_THRESHOLD) consecutive = Recovery::CONSECUTIVE_THRESHOLD;
+    uint8_t cumulative = Recovery::getCumulativeCount();
+    if (cumulative > Recovery::CUMULATIVE_THRESHOLD) cumulative = Recovery::CUMULATIVE_THRESHOLD;
+
+    return (uint32_t)previousResetReason
+        | ((uint32_t)previousBootPhase << 8)
+        | ((uint32_t)consecutive << 16)
+        | ((uint32_t)cumulative << 24);
+}
+
 static void sendHeartbeat() {
     mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
 
+    uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
+    if (!reducedConfiguration) {
+        baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
+    }
+
     mavlink_msg_heartbeat_pack(
-        1, 
-        MAV_COMP_ID_AUTOPILOT1, 
-        heartbeatMsg, 
-        MAV_TYPE_ROCKET, 
-        MAV_AUTOPILOT_GENERIC, 
-        MAV_MODE_FLAG_AUTO_ENABLED | MAV_MODE_FLAG_SAFETY_ARMED, 
-        0, 
-        MAV_STATE_ACTIVE
+        1,
+        MAV_COMP_ID_AUTOPILOT1,
+        heartbeatMsg,
+        MAV_TYPE_ROCKET,
+        MAV_AUTOPILOT_GENERIC,
+        baseMode,
+        packCustomMode(),
+        reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
     );
 
     if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
@@ -67,9 +103,81 @@ static void sendStatusText(const char* text, uint8_t severity)
     }
 }
 
+static const char* resetReasonText(Recovery::ResetReason reason)
+{
+    switch (reason) {
+        case Recovery::ResetReason::PowerOn: return "power-on";
+        case Recovery::ResetReason::LowVoltage: return "low voltage";
+        case Recovery::ResetReason::Watchdog: return "watchdog";
+        case Recovery::ResetReason::Software: return "software";
+        case Recovery::ResetReason::ExternalUnknown: return "external/unknown";
+        case Recovery::ResetReason::BackupStateInvalid: return "backup state invalid";
+    }
+    return "unknown";
+}
+
+static const char* bootPhaseText(Recovery::BootPhase phase)
+{
+    switch (phase) {
+        case Recovery::BootPhase::Start: return "start";
+        case Recovery::BootPhase::LinkDone: return "link";
+        case Recovery::BootPhase::ClockDone: return "clock";
+        case Recovery::BootPhase::CardDone: return "card";
+        case Recovery::BootPhase::QueuesDone: return "queues";
+        case Recovery::BootPhase::TasksDone: return "tasks";
+        case Recovery::BootPhase::SchedulerStarted: return "scheduler";
+        case Recovery::BootPhase::StackOverflowFault: return "stack overflow";
+        case Recovery::BootPhase::MallocFailedFault: return "malloc failed";
+    }
+    return "unknown";
+}
+
+// Longest combination is 48 characters ("Reset: backup state invalid, phase
+// malloc failed"), under the 50-byte STATUSTEXT text field -- no printf family
+// involved, per review.md's note that newlib-nano's vsnprintf costs stack this
+// task's 128 words does not have to spare.
+static void sendBootStatusText()
+{
+    char text[50];
+    text[0] = '\0';
+    strncat(text, "Reset: ", sizeof(text) - 1);
+    strncat(text, resetReasonText(previousResetReason), sizeof(text) - 1 - strlen(text));
+    strncat(text, ", phase ", sizeof(text) - 1 - strlen(text));
+    strncat(text, bootPhaseText(previousBootPhase), sizeof(text) - 1 - strlen(text));
+
+    sendStatusText(text, MAV_SEVERITY_CRITICAL);
+}
+
+static void sendCommandAck(uint16_t command, uint8_t result)
+{
+    mavlink_message_t* ackMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (ackMsg != NULL) {
+        mavlink_msg_command_ack_pack(
+            1,
+            MAV_COMP_ID_AUTOPILOT1,
+            ackMsg,
+            command,
+            result,
+            0,
+            0,
+            0,
+            0
+        );
+        if (xQueueSend(serialWriteQueue, &ackMsg, 0) != pdPASS) {
+            vPortFree(ackMsg);
+        }
+    }
+}
+
 [[noreturn]] void TaskHeartbeat(void *pvParameters)
 {
     (void)pvParameters;
+
+    sendBootStatusText();
+
+    TickType_t bootTick = xTaskGetTickCount();
+    bool stabilityCleared = false;
+    bool retryAttempted = false;
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
@@ -82,6 +190,23 @@ static void sendStatusText(const char* text, uint8_t severity)
         sendSystemTime();
 
         vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
+
+        // Both live here because TaskHeartbeat is the only task that runs in
+        // every configuration -- reduced included -- so it is the only place
+        // that can be trusted to ever clear the counter or fire the retry
+        // (review.md finding 16).
+        uint32_t elapsedMs = (xTaskGetTickCount() - bootTick) * portTICK_PERIOD_MS;
+
+        if (!stabilityCleared && elapsedMs >= STABILITY_WINDOW_MS) {
+            Recovery::setConsecutiveCount(0);
+            stabilityCleared = true;
+        }
+
+        if (reducedConfiguration && !retryAttempted && elapsedMs >= RETRY_INTERVAL_MS) {
+            retryAttempted = true;
+            Recovery::setDeliberateReset(Recovery::DeliberateReset::Retry);
+            NVIC_SystemReset();
+        }
     }
 }
 
@@ -163,6 +288,30 @@ extern RTC_DS1307 rtc;
 
                     if (command.command == MAV_CMD_GET_HOME_POSITION) {
                         break;
+                    }
+
+                    if (command.command == MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN) {
+                        // Acknowledged rather than silently handled -- review.md
+                        // finding 17. This is a new message on the wire; the
+                        // closed-set HIL case (test/test_hil/check_recovery.py,
+                        // task 7.5) must expect it.
+                        sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+
+                        // reinitialise() clears the deliberate-reset field along
+                        // with both counters and the snapshot, so it has to run
+                        // *before* the marker is set, not after -- otherwise it
+                        // would wipe the very marker that stops this reboot from
+                        // counting as evidence of a fault (design.md's
+                        // deliberate-reset carve-out, review.md finding 4).
+                        Recovery::reinitialise();
+                        Recovery::setDeliberateReset(Recovery::DeliberateReset::Commanded);
+
+                        // Gives TaskSerialWrite, which is higher priority than
+                        // this task, a chance to drain the ack onto the link
+                        // before the reset -- see review.md's PRCR/timing notes.
+                        vTaskDelay(pdMS_TO_TICKS(50));
+
+                        NVIC_SystemReset();
                     }
 
                     break;

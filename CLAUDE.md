@@ -35,6 +35,26 @@ dangles.
 Do not open a change for an entry that is not being implemented, and do not restate the
 architecture in a spec.
 
+A change is the four artifacts `/opsx:propose` names — proposal, specs, design, tasks —
+using the default `spec-driven` schema. `openspec/config.yaml` carries the rules for each
+artifact and the guidance for apply and archive.
+
+There used to be a heavier custom schema, `boredomos`, forked so the chain neither started
+at the task list nor ended at it: a qa-written `test-plan.md` ahead of `tasks.md`, one row
+per scenario naming its method and receipt; a `review.md` from six domain-specific reviewer
+agents under `.claude/agents/`, blocking `apply` until it existed; and a `verify.md` audit
+after apply, closing on a `DECISION:` line before archiving. **It is retired** — the schema
+and the six-agent roster both cost more than this project can sustain running on every
+change. Changes now use `spec-driven` and are reviewed, applied and archived directly,
+without that apparatus, which means without the independent-review guarantee it existed
+for — read anything written under this arrangement with that in mind.
+
+`openspec/changes/add-degraded-mode/` still carries a `test-plan.md` and a `review.md` from
+when it used the old schema, migrated to `spec-driven` after the fact. They are not
+tracked artifacts anymore, just historical record, but `tasks.md` in that change cites
+their row ids and finding numbers throughout — don't delete either file without checking
+what in `tasks.md` goes dark.
+
 ## Commands
 
 ```bash
@@ -50,7 +70,7 @@ There is no host/native test environment. `test/` holds two suites, and **`pio t
 means the HIL one**: it flashes this firmware and then interrogates it from the host,
 leaving the board running what it would fly.
 
-- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases, aligned with the scenarios in `openspec/specs/mavlink-link/spec.md`. Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
+- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases across four `check_*.py` modules, all of them about the `mavlink-link` capability. Which scenario each case covers is **not recorded** — see *Record which scenario each HIL case covers* in [TODO.md](TODO.md). Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
 - **`test/test_libs/`** — the Unity suite. `test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so it never runs in CI. It runs on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All cases live in that one file, dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test *directories*, so it picks a suite, not a case.
 - **`test/test_hil/`** — host-side Python that interrogates the flashed firmware over the MAVLink link. `platformio.ini` excludes it with `test_ignore = test_hil`, since PlatformIO would try to compile it as C++. Run these by hand; see its `README.md`.
 
@@ -75,6 +95,6 @@ These are the invariants that are easiest to break silently. `ARCHITECTURE.md` e
 - **Only the owning file touches its resource:** `src/serial.cpp` the UART, `src/sdwrite.cpp` the card, `lib/SystemTime` the clocks, `lib/Battery` the ADC. Everything else goes through a queue or the library wrapper. This is what makes the absence of mutexes safe — do not break it by reaching for a peripheral directly.
 - **Every outbound MAVLink message uses the same identity triple:** system id `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - **Wiring is hardcoded** (SD `CS` on 9, battery on `A0`, DS1307 on I2C). If a change adds a pin, document it in `ARCHITECTURE.md`.
-- **`configASSERT` in `setup()` halts the board on purpose** for missing RTC, SD, queues or tasks. Do not soften it into a degraded boot without an explicit decision.
+- **`configASSERT` in `setup()` halts only where recovery is impossible.** A missing RTC or SD card degrades instead: the board runs on ticks since boot and accepts a time set from the ground without the DS1307, and skips the housekeeping log without the card, reporting the absence either way — see `openspec/specs/fault-recovery/spec.md`. Queue and task creation still assert: with `configSUPPORT_STATIC_ALLOCATION` these cannot fail for want of memory, so a `NULL` handle there is a programming error, not a hardware fault. `VBTBKR[0..3]` belongs to the bootloader's double-tap magic and must never be written by this firmware; `include/Recovery.h` owns everything from `[4]` on.
 - **The RAM budget is a build-time fact.** `scripts/ram_budget.py` runs after every link, prints the true commitment — which the `RAM:` line does not, omitting 9472 bytes — and fails the build when headroom drops below `custom_ram_min_headroom`. A change that does not fit fails on your desk, which is the point; do not lower the floor to make one pass.
 - When a change makes `ARCHITECTURE.md` inaccurate, update it in the same commit.

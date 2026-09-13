@@ -1,4 +1,4 @@
-schema: boredomos
+schema: spec-driven
 
 # Project context. Shown to AI when creating artifacts. 50 KB limit.
 context: |
@@ -46,13 +46,12 @@ context: |
   - Nothing reaches a peripheral except its owner. That single rule is what makes
     the absence of mutexes safe, and it is the one most easily broken by accident.
 
-  There is a roster of reviewer roles under .claude/agents/, defined by domain -- the
-  program, the device, the requirements baseline, flying it from the ground, and
-  whether the data is worth having. Each one's own file says what it owns and where it
-  stops, so read that rather than guessing from the name. They are not only for the
-  review step: consult one while exploring or proposing whenever a question is
-  squarely in its domain and the answer would change what gets written. They do not
-  act on their own, so nothing happens unless one is asked.
+  There used to be a roster of six domain-specific reviewer agents under .claude/agents/ --
+  the program, the device, the requirements baseline, flying it from the ground, whether
+  the data is worth having, and how an obligation gets demonstrated and whether it was.
+  It is retired: running it in parallel on every change cost more than this project can
+  sustain. review.md and verify.md are written directly now, without independent
+  per-domain review -- read both with that in mind.
 
   Verification: CI builds and analyses, and that is the limit of what it can do.
   There is no host or native test environment. Whether a task body works is not
@@ -102,27 +101,25 @@ rules:
   design:
     - Name which file owns each resource the change touches, and keep it to one
       owner. Reaching a peripheral from a second file is what would force mutexes.
+
   tasks:
     - Mark every step that needs the assembled board. Without it the only checks
       that run are the CI ones -- `pio run` on the three environments, the grep
       that guards static creation, and `pio check`.
     - A change touching lib/ or a task body needs a `pio test` run and a look at
       the high-water marks in the SD log before it is called done.
-    - Every scenario in the change's delta specs needs at least one task that
-      exercises it, and that task names the scenario it covers. A scenario nothing
-      exercises is how a spec turns into a promise nobody checks. Where the only
-      task that could exercise it needs the board, mark it and leave it unticked
-      rather than quietly dropping the scenario.
+    - Say which rows need hands as well as which need the board. Pressing RESET,
+      pulling the card and stalling a task are the bulk of this project's
+      verification and no script observes any of them.
+    - A step nothing available can reach belongs in the list, said plainly.
+      Inventing a check that cannot run is worse than recording that none exists,
+      because the first looks closed. Where the only way to close a step needs the
+      board, mark it and leave it unticked rather than quietly dropping it.
 
 # Advisory guidance, injected when these operations run.
 operations:
   apply:
     guidance:
-      - 'review.md is written before apply and apply is blocked until it exists.
-        Read it first: its findings were meant to change the artifacts, so a
-        finding recorded as fixed should already be reflected in what you are
-        about to implement, and one recorded as deferred should not surprise you
-        halfway through.'
       - Never report a task body or a lib/ change as verified on the basis of a
         successful build. Say what was and was not run.
       - '`pio test` means the HIL suite: it flashes this firmware, interrogates it
@@ -139,3 +136,12 @@ operations:
       - 'Update ARCHITECTURE.md in the same change when it becomes inaccurate.
         There is no TODO.md entry to close out: it was deleted when the change
         was proposed, and openspec/specs/ plus the git history are the record.'
+      - 'Do not archive with an unticked task left unexplained. tasks.md is the only
+        per-step record this schema keeps, and it goes into the archive and stops
+        being read -- a bare `[ ]` with no reason is exactly the debt this project
+        has previously lost track of. One change was archived with five steps
+        unticked and nothing recorded the debt anywhere.'
+      - 'Whatever tasks.md leaves open at archive time becomes a TODO.md entry in the
+        archiving commit, naming the change it came from. Unverified work that is
+        nobody''s is exactly what the backlog is for, and the alternative is that it
+        disappears with the change directory.'

@@ -7,8 +7,17 @@ flight.
 
 That is the point. `test_libs` links `lib/` against the Arduino core and cannot
 observe the RTOS at all — no task, no queue, no stack. These checks see only what
-the ground station sees, which is the firmware's actual contract, and they map
-one-to-one onto the scenarios in `openspec/specs/mavlink-link/spec.md`.
+the ground station sees, which is the firmware's actual contract. Nine of the twelve
+cases exercise the `mavlink-link` capability, but which scenario each of those covers
+is not recorded: nine cases against eight scenarios, and six of the cases name none.
+`TODO.md` carries the entry for fixing that.
+
+The other three, in `check_recovery.py`, exercise `fault-recovery`:
+`test_first_heartbeat_reports_reduced_state` covers *The ground can see the state
+without asking for it → A ground station connects long after a degraded boot*,
+`test_heartbeat_reports_operational` covers that requirement's *Normal operation is
+not reported as degraded* scenario, and `test_observed_message_set_is_closed` covers
+the same scenario's message-set clause.
 
 ## Running them
 
