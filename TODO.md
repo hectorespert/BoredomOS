@@ -18,6 +18,63 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what add-degraded-mode left open
+
+**Status:** defined
+**Scope:** `src/hooks.cpp`, `lib/SystemTime`, `platformio.ini`, `test/test_hil/`
+
+`openspec/changes/archive/2026-09-13-add-degraded-mode/` shipped 35 of its 44 tasks,
+board-verified against the recovered board. Nine remain, each already scoped in that
+change's own `tasks.md` (numbers below refer to it):
+
+- **3.2 / 3.3 — the fault hooks are still unsafe (review finding 9).**
+  `vApplicationStackOverflowHook` in `src/hooks.cpp` writes the new phase marker
+  correctly, but still does `taskDISABLE_INTERRUPTS()` then `while (!Serial) {}` then
+  two `delay(2000)` calls — `delay()` cannot work with interrupts disabled, and the
+  wait never completes with no host attached, which is the normal case in flight. Fix:
+  marker first (already true), then `NVIC_SystemReset()` immediately, no blink. Once
+  fixed, 3.3 needs rescoping too: it assumed pulling the SD card would produce a reset
+  at the card phase, but task 6.2 (shipped) makes a missing card a degradation instead,
+  so that act no longer reaches this hook at all.
+- **4.6 — `WDT_TIMEOUT_MS` is still the placeholder value (1398 ms), not a measured one.**
+  Needs `TaskSdWrite`'s worst case measured on the board, including a forced ring
+  rollover (`lib/SdData/SdData.cpp`'s rotation can delete a file up to 1 GiB inside one
+  call), then `platformio.ini`'s `-D WDT_TIMEOUT_MS` raised to match, bounded by the
+  5.592 s hardware ceiling `design.md` in the archived change derives.
+- **6.1 / 6.4 — the no-RTC path is implemented in `src/main.cpp` but not in `lib/`.**
+  `lib/SystemTime.cpp:11`'s `if (_ds1307.begin() && RTC.begin())` short-circuits, so the
+  internal RTC never begins when the DS1307 is absent, and `setUnixTime()` still calls
+  `_ds1307.adjust()` unconditionally. Needs the internal RTC begun regardless, and the
+  DS1307 write skipped when absent — then 6.4 (board, no RTC attached) can be
+  re-attempted; it was blocked on this both times it was tried.
+- **6.6 — the reduced configuration was never tested with both the SD card and the
+  DS1307 absent together.** Blocked on hardware access, not code: the DS1307 was not
+  disconnectable during that session. Needs hands at the board with both removed while
+  three consecutive faults (or ten cumulative resets) put it in the reduced
+  configuration.
+- **8.4 — the automatic 30-minute retry out of the reduced configuration has never
+  been observed firing.** Needs an uninterrupted capture spanning at least two retry
+  intervals (an hour-plus), with the inducing fault held present for the second half to
+  confirm it returns to reduced rather than oscillating.
+- **9.5 — one new `pio check` finding against the pre-change baseline.** `13` LOW
+  findings now, not `12`: `src/mavlink.cpp`'s new `sendCommandAck()` uses the same
+  C-style pointer cast six other functions in that file already use. Decide once:
+  convert all seven to `static_cast`, accept the one new hit, or suppress the rule —
+  don't let it drift as an unexplained baseline change.
+- **9.6 — the flight build (not `bench`) has never been run through `pio test` proper**,
+  and the reduced-configuration counter values were never decoded from a live heartbeat
+  and recorded alongside a HIL pass. Both need the board, with a USB-TTL adapter or the
+  radio on D0/D1 since this one specifically needs the flight configuration, not bench.
+
+Also worth doing before any of the above, found while reading back the archived
+`review.md` and `test-plan.md`: **`test-plan.md`'s own header claims "17 scenarios, 17
+rows" against the `fault-recovery` capability, but the delta actually has 21 — four
+scenarios (the supply voltage sags, the RESET pin is pressed, the board leaves the
+reduced configuration by its own action, the fault that caused it recurs) were never
+given a row.** Some of their substance got informal exercise during board testing, but
+none of it is tracked. If this capability changes again, add the missing rows first.
+
+
 ### Add the GY-87 IMU
 
 **Status:** proposed
