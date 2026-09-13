@@ -138,13 +138,29 @@ the lowest thing that runs.
 ## Risks / Trade-offs
 
 - **A blocking write stalls the task.** `Serial.write` on USB CDC can block when the
-  host stops draining. At `PRIORITY_LOWEST` that starves nothing, but the CLI task
-  itself can park indefinitely mid-reply. → Acceptable at this priority, and it is
-  bounded: the CLI holds no lock and owns nothing another task needs. It must not be
-  "fixed" by raising the priority.
+  host stops draining. **Revised during implementation (Copilot review):** the
+  original text here said "at `PRIORITY_LOWEST` that starves nothing," which is
+  false. `Print::write()` on this core busy-loops with no RTOS yield while waiting
+  for room, and `configUSE_TIME_SLICING=0` means a task that never yields is not
+  time-sliced away from equal-priority tasks — `TaskSdWrite` and the idle task both
+  sit at `PRIORITY_LOWEST` too, and the idle hook is what refreshes the watchdog. A
+  stalled host could therefore have stopped SD logging and eventually forced a
+  watchdog reset, the opposite of the "never delays a flight task" guarantee this
+  capability exists to give. → Fixed by writing through a helper that checks
+  `availableForWrite()` and `vTaskDelay(1)`s instead of spinning when there is no
+  room (`src/cli.cpp`'s `writeChunk()`), and by bounding how many input bytes one
+  pass of the read loop processes before yielding, so a host that streams input
+  continuously cannot cause the same starvation from the other direction. Priority
+  is still untouched, per the original instinct not to "fix" this by raising it —
+  the fix is making the wait itself yield, not who gets to wait.
 - **Formatting eats stack, and stacks here are tight.** → The 192-word figure is
   provisional. `ps` reports its own row, so the first thing the change verifies is its
-  own headroom, and `configCHECK_FOR_STACK_OVERFLOW=2` is already on.
+  own headroom, and `configCHECK_FOR_STACK_OVERFLOW=2` is already on. Measured on the
+  board (task 4.1 in `tasks.md`) at 128 words. The write-path rewrite above added its
+  own stack frames on top of what `Print` used; re-measured afterward at 38 of 128
+  words free under the same flood that produced the original 79-word worst case — more
+  used, but still comfortably inside the 128-word size, so it was kept rather than
+  grown again.
 - **~960 bytes of an 8 KB heap, ~12%.** → Real, and the reason the snapshot buffer was
   kept out of the heap. The measurement to take before calling this done is
   `free`'s minimum-ever figure with the CLI in place, not the build succeeding.

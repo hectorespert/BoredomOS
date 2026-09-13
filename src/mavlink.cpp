@@ -41,46 +41,48 @@ static uint32_t packCustomMode()
 
 static void sendHeartbeat() {
     mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (heartbeatMsg != NULL) {
+        uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
+        if (!reducedConfiguration) {
+            baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
+        }
 
-    uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
-    if (!reducedConfiguration) {
-        baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
-    }
+        mavlink_msg_heartbeat_pack(
+            1,
+            MAV_COMP_ID_AUTOPILOT1,
+            heartbeatMsg,
+            MAV_TYPE_ROCKET,
+            MAV_AUTOPILOT_GENERIC,
+            baseMode,
+            packCustomMode(),
+            reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
+        );
 
-    mavlink_msg_heartbeat_pack(
-        1,
-        MAV_COMP_ID_AUTOPILOT1,
-        heartbeatMsg,
-        MAV_TYPE_ROCKET,
-        MAV_AUTOPILOT_GENERIC,
-        baseMode,
-        packCustomMode(),
-        reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
-    );
-
-    if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
-    {
-        vPortFree(heartbeatMsg);
+        if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
+        {
+            vPortFree(heartbeatMsg);
+        }
     }
 }
 
 static void sendSystemTime()
 {
     mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (systemTimeMsg != NULL) {
+        uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        mavlink_msg_system_time_pack(
+            1,
+            MAV_COMP_ID_AUTOPILOT1,
+            systemTimeMsg,
+            systemTime.getUnixTimeUsec(),
+            boot_ms
+        );
 
-    mavlink_msg_system_time_pack(
-        1, 
-        MAV_COMP_ID_AUTOPILOT1, 
-        systemTimeMsg, 
-        systemTime.getUnixTimeUsec(),
-        boot_ms
-    );
-
-    if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
-    {
-        vPortFree(systemTimeMsg);
+        if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
+        {
+            vPortFree(systemTimeMsg);
+        }
     }
 }
 
@@ -215,36 +217,37 @@ extern Battery battery;
 static void sendBatteryStatus()
 {
     mavlink_message_t* batteryMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (batteryMsg != NULL) {
+        uint16_t voltages[10];
+        voltages[0] = battery.millivolts();
+        for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
 
-    uint16_t voltages[10];
-    voltages[0] = battery.millivolts();
-    for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
+        uint16_t voltages_ext[4] = {0, 0, 0, 0};
 
-    uint16_t voltages_ext[4] = {0, 0, 0, 0};
+        mavlink_msg_battery_status_pack(
+            1,
+            MAV_COMP_ID_AUTOPILOT1,
+            batteryMsg,
+            0,
+            MAV_BATTERY_FUNCTION_ALL,
+            MAV_BATTERY_TYPE_LIPO,
+            INT16_MAX,
+            voltages,
+            -1,
+            -1,
+            -1,
+            battery.remaining(),
+            0,
+            MAV_BATTERY_CHARGE_STATE_UNDEFINED,
+            voltages_ext,
+            MAV_BATTERY_MODE_UNKNOWN,
+            0
+        );
 
-    mavlink_msg_battery_status_pack(
-        1, 
-        MAV_COMP_ID_AUTOPILOT1, 
-        batteryMsg, 
-        0,
-        MAV_BATTERY_FUNCTION_ALL,
-        MAV_BATTERY_TYPE_LIPO,
-        INT16_MAX,
-        voltages,
-        -1,
-        -1,
-        -1,
-        battery.remaining(),
-        0,
-        MAV_BATTERY_CHARGE_STATE_UNDEFINED,
-        voltages_ext, 
-        MAV_BATTERY_MODE_UNKNOWN,
-        0
-    );
-
-    if (xQueueSend(serialWriteQueue, &batteryMsg, 0) != pdPASS)
-    {
-        vPortFree(batteryMsg);
+        if (xQueueSend(serialWriteQueue, &batteryMsg, 0) != pdPASS)
+        {
+            vPortFree(batteryMsg);
+        }
     }
 }
 
@@ -334,19 +337,20 @@ extern RTC_DS1307 rtc;
 
                     if (timesync.tc1 == 0) {
                         mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+                        if (timeSyncMsg != NULL) {
+                            mavlink_msg_timesync_pack(
+                                1,
+                                MAV_COMP_ID_AUTOPILOT1,
+                                timeSyncMsg,
+                                systemTime.getUnixTimeNsec(),
+                                timesync.ts1,
+                                timesync.target_system,
+                                timesync.target_component
+                            );
 
-                        mavlink_msg_timesync_pack(
-                            1, 
-                            MAV_COMP_ID_AUTOPILOT1,
-                            timeSyncMsg,
-                            systemTime.getUnixTimeNsec(),
-                            timesync.ts1,
-                            timesync.target_system,
-                            timesync.target_component
-                        );
-
-                        if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
-                            vPortFree(timeSyncMsg);
+                            if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
+                                vPortFree(timeSyncMsg);
+                            }
                         }
                     }
 

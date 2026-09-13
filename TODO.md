@@ -277,16 +277,36 @@ Points to resolve before implementing:
 ### Debug and release builds, with MAVLink tracing on the console
 
 **Status:** proposed
-**Scope:** `platformio.ini`, `src/mavlink.cpp`, `src/serial.cpp`, `CLAUDE.md`,
-`README.md`
+**Scope:** `platformio.ini`, `src/mavlink.cpp`, `src/serial.cpp`, `src/cli.cpp`,
+`CLAUDE.md`, `README.md`
 
 Debugging the protocol today is done blind: there is no way to see which MAVLink
 messages come in and go out without a GCS on the other end interpreting them. The
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on the `move-mavlink-link-to-serial1` change: while the binary frames keep
-going over USB there is no console port to write the trace to.
+Depends on `openspec/changes/add-console-cli`, not only on the `move-mavlink-link-
+to-serial1` change (archived) that freed the console port. That change gives the
+console an owner, `src/cli.cpp`, and makes it the port's only writer while tasks
+run: a trace can no longer `print()` into `CLI_SERIAL` directly without becoming a
+second writer, which `specs/console-cli/spec.md` forbids. The trace has to reach
+the port through the CLI somehow — a new command that dumps a ring buffer the
+`TaskMavlink` switch and the `TaskSerialWrite` drain fill, most likely — rather
+than writing on its own.
+
+That change's design also answers three of this entry's open questions directly,
+since it had to answer them for `ps` and `free`:
+
+- **Writing to the console cannot block the flight.** Answered: the console's own
+  task runs at `PRIORITY_LOWEST`, and nothing else may write to the port while
+  tasks run. A trace reusing that ownership inherits the same guarantee.
+- **Several tasks writing at once interleave the output.** No longer applies as
+  stated: with one owner and one writer, nothing else touches the port to
+  interleave with. A trace has to get its data *to* the CLI (a queue, most likely,
+  since `TaskMavlink` and `TaskSerialWrite` are not the CLI's task) rather than
+  write the port itself.
+- **Formatting cost.** Answered: `print()` and padding loops, not `snprintf` or
+  `vfprintf` — measured at zero flash growth for the CLI's own four commands.
 
 What it should trace, per message: direction (inbound/outbound), `msgid` — by name
 if possible, not just the number —, source `sysid`/`compid` and length. The two
@@ -294,7 +314,7 @@ mandatory choke points already exist and are the natural places to hook it: the
 `TaskMavlink` switch for what comes in and the `TaskSerialWrite` drain for what goes
 out.
 
-Points to resolve before implementing:
+Points still to resolve before implementing:
 
 - **How the profiles are separated.** A second `[env:...]` in `platformio.ini`
   inheriting from the current one and adding its `build_flags` is the idiomatic
@@ -305,10 +325,10 @@ Points to resolve before implementing:
   not left behind a runtime `if`: the text strings and the formatting take flash and
   RAM, and neither is spare here. The release profile must produce exactly today's
   binary.
-- **Writing to the console cannot block the flight.** If USB is not connected or its
-  buffer fills up, a `print` can block and drag down a `PRIORITY_HIGHEST` task. And
-  several tasks writing at once interleave the output. Decide whether it is written
-  directly, with a mutex, or through a queue like the rest of the firmware.
+- **How the trace data reaches the CLI's task.** A bounded ring buffer the CLI
+  reads on demand (a new command) rather than a stream the port pushes
+  unsolicited, since `specs/console-cli/spec.md` requires the console emit
+  nothing unless spoken to.
 - **Stacks.** Formatting text consumes stack, and they are tight, between 96 and 256
   words. When enabling the debug profile the log high-water marks have to be checked
   again: this is exactly the case that triggers the slow blink of `src/hooks.cpp`.
@@ -369,9 +389,11 @@ It fits with two things the firmware already has half done:
   SD card has nowhere left to go in that field — `SYS_STATUS`'s sensor bitmap is
   exactly the candidate it points at without adopting it. Both entries share the
   same source: a centralised health state, which does not exist today.
-- `errors_count1..4` is where to keep the count of the failed `pvPortMalloc` calls
-  of *[Check the result of `pvPortMalloc`...]* and of the sends dropped by a full
-  queue, which are silently lost today.
+- `errors_count1..4` is where to keep the count of failed `pvPortMalloc` calls —
+  checked as of `openspec/changes/add-console-cli`, which absorbed the entry this
+  used to point at, but the failures themselves are still silently skipped rather
+  than counted — and of the sends dropped by a full queue, which are silently
+  lost today.
 
 To decide: which subsystems are declared in `present`/`enabled` (the
 `MAV_SYS_STATUS_SENSOR` enumeration has no entries for "SD card" or "RTC", so the
@@ -434,37 +456,6 @@ and does not cover the per-task stacks.
 
 
 ## To change
-
-### Check the result of `pvPortMalloc` in the four places that don't
-
-**Status:** defined
-**Scope:** `src/mavlink.cpp`
-
-The project's queue protocol is only half honoured in `src/mavlink.cpp`: every
-`xQueueSend` frees with `vPortFree` when it does not return `pdPASS`, but four
-allocations do not check that `pvPortMalloc` returned anything before using the
-pointer. They hand it straight to `mavlink_msg_*_pack`, which writes to it:
-
-- `src/mavlink.cpp:20` — `sendHeartbeat()`
-- `src/mavlink.cpp:41` — `SYSTEM_TIME`
-- `src/mavlink.cpp:104` — `sendBatteryStatus()`
-- `src/mavlink.cpp:201` — `TIMESYNC` reply
-
-With the heap exhausted, `pvPortMalloc` returns `NULL` and the `pack` writes to
-address 0. The correct pattern is already in the same file at `src/mavlink.cpp:61`
-(`STATUSTEXT`), and in `src/logger.cpp:42` and `src/serial.cpp:50`: wrap everything
-from the allocation to the `xQueueSend` in `if (msg != NULL) { ... }`.
-
-It matters more than it looks because the first three are **periodic** senders: a
-momentarily full heap does not give a one-off failure, it repeats it every cycle.
-
-Made less likely, but not impossible, by the `use-static-allocation` change: the heap
-now backs every declared queue depth with the in-flight items counted, so a producer
-meets a full queue before the allocator runs out. The checks are still wanted, and
-`configUSE_MALLOC_FAILED_HOOK` now makes a failure visible rather than silent.
-
-To decide: whether failing to allocate should leave a trace (a counter in `Data`
-towards the SD log) or whether silently skipping the send is enough.
 
 ### Queue the message intent by value instead of a packed `mavlink_message_t`
 
@@ -770,7 +761,37 @@ corruption of anything else — but it should be a deliberate decision, not an
 accident.
 
 When touching it, check `TaskLogger`'s high-water mark: it is 96 words, among the
-tightest in the project.
+tightest in the project. See *[`TaskLogger`'s stack margin is razor-thin]* for how
+tight it actually measures.
+
+
+### `TaskLogger`'s stack margin is razor-thin
+
+**Status:** defined
+**Scope:** `src/logger.cpp`, `src/main.cpp`
+
+`openspec/changes/add-console-cli` gave the firmware a `ps` command, and the first
+live reading it produced showed `TaskLogger`'s unused stack at **5 of 96 words** —
+20 bytes of headroom, tighter than every other task by a wide margin. The
+next-tightest is `TaskHeartbeat` (128 words) at 28 free; everything else has more
+room than that.
+
+Nothing here is new to `add-console-cli`: `src/logger.cpp`'s task body is untouched
+by it, and the 96-word size predates it too — *[The SD log never stores the battery
+data]*, above, already flags the size as "among the tightest" without a live figure.
+`ps` is simply the first tool able to show the number without pulling the SD card
+and reading a housekeeping record's `System` block by hand.
+
+`configCHECK_FOR_STACK_OVERFLOW=2` is the only thing standing between this and a
+silent corruption if the margin is ever crossed — see `src/hooks.cpp`'s overflow
+hook and *[The stack overflow hook hangs before it warns]*, below, for what happens
+if it is.
+
+To decide: whether 96 words is still enough, or whether the size should grow — and
+if it does, that it is verified back down with the SD log's own recorded figure or
+`ps`'s live one, not assumed. Re-check after any change to `src/logger.cpp`'s body,
+`include/Data.h`'s size, or `lib/SdData`'s JSON conversion, since any of the three
+changes how much stack one `TaskLogger` cycle needs.
 
 
 ### The stack overflow hook hangs before it warns

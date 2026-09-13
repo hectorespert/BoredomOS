@@ -42,6 +42,7 @@ flowchart LR
         BS["TaskMavlinkBatteryStatus<br/>HIGH · 128 w"]
         LG["TaskLogger<br/>LOW · 96 w"]
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
+        CLI["TaskCli<br/>LOWEST · 128 w"]
 
         RQ[["serialReadQueue<br/>16 × mavlink_message_t*"]]
         WQ[["serialWriteQueue<br/>16 × mavlink_message_t*"]]
@@ -56,10 +57,13 @@ flowchart LR
     CARD[("microSD<br/>SPI, CS 9")]
     ADC(["Solar charger<br/>A0"])
     RTC(["DS1307<br/>I2C"])
+    CONSOLE(["USB CDC · CLI_SERIAL<br/>115200"])
 
     GCS <--> LINK
     LINK --> SR
     SW --> LINK
+
+    CONSOLE <--> CLI
 
     SR --> RQ --> MV
     MV --> WQ
@@ -85,7 +89,7 @@ clock that both of them stamp their data with.
 
 **One composition root.** `src/main.cpp` is the only file that creates anything.
 It defines the shared objects (`battery`, `systemTime`), the three queue handles
-and the seven task handles, then creates every task in `setup()` and calls
+and the eight task handles, then creates every task in `setup()` and calls
 `vTaskStartScheduler()`. `loop()` is empty and never runs.
 
 **One task per translation unit.** Every other `src/*.cpp` is a task body — or a
@@ -125,9 +129,9 @@ Nothing is lost by transmitting late — the frame waits in `serialWriteQueue` �
 the writer sits at `HIGH`, level with its own producers, which yield every cycle on
 `vTaskDelayUntil`.
 
-**The seven tasks, and which configuration starts them.** Every task's storage is
+**The eight tasks, and which configuration starts them.** Every task's storage is
 declared unconditionally in `src/main.cpp` — the linker counts it whether or not
-the task is started — but `setup()` only calls `xTaskCreateStatic` for four of
+the task is started — but `setup()` only calls `xTaskCreateStatic` for five of
 them in the reduced configuration described below.
 
 | Task | File | Stack | Priority | Cadence | Reduced? |
@@ -139,6 +143,7 @@ them in the reduced configuration described below.
 | `TaskMavlink` | `src/mavlink.cpp` | 256 w | LOW | blocks on `serialReadQueue` | yes |
 | `TaskLogger` | `src/logger.cpp` | 96 w | LOW | every 1 s | no, and not with no SD card either |
 | `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
+| `TaskCli` | `src/cli.cpp` | 128 w | LOWEST | polls every 10 ms | yes |
 
 Periodic tasks use `vTaskDelayUntil` against a `xLastWakeTime` seeded once, so the
 cadence does not drift with the work done in the body. Consumer tasks block on
@@ -151,9 +156,9 @@ watchdog, software, external/unknown), and updates two counters kept in
 reset: a count of consecutive boots that never ran stably, and a cumulative
 count only a ground command clears. After three consecutive unstable boots or
 ten cumulative resets, `setup()` starts only `TaskSerialRead`, `TaskSerialWrite`,
-`TaskHeartbeat` and `TaskMavlink` — the *reduced configuration*, which keeps the
-board reachable and commandable without the SD card, the real-time clock or the
-battery sense. `TaskHeartbeat` also carries the two mechanisms that get the board
+`TaskHeartbeat`, `TaskMavlink` and `TaskCli` — the *reduced configuration*, which
+keeps the board reachable and commandable without the SD card, the real-time
+clock or the battery sense. `TaskHeartbeat` also carries the two mechanisms that get the board
 back out: it clears the consecutive counter once the firmware has run for the
 5-minute stability window, and, while reduced, retries the normal configuration
 every 30 minutes. Both figures are derived in `openspec/changes/add-degraded-mode/design.md`
@@ -317,7 +322,7 @@ Wiring is hardcoded, not configurable. Changing a pin means changing the code.
 | Resource | Where | Owned by |
 |---|---|---|
 | MAVLink link, `LINK_BAUD` | `LINK_SERIAL` — `Serial1` on **D0** (`RX`) / **D1** (`TX`) | `src/serial.cpp` |
-| USB CDC console, 115200 | `Serial` | **no owner** — only `src/hooks.cpp` writes, from the stack-overflow hook |
+| USB CDC console, 115200 | `CLI_SERIAL` (`Serial` by default) | `src/cli.cpp` — the one pre-existing exception is `src/hooks.cpp`, which writes from the stack-overflow hook after the scheduler has stopped |
 | microSD card | SPI, CS on pin **9** | `src/sdwrite.cpp` via `lib/SdData` |
 | Battery / solar charger sense | **A0** | `lib/Battery` |
 | DS1307 real-time clock | I2C, address `0x68` | `lib/SystemTime` |
@@ -389,7 +394,7 @@ hardware fault, and stopping on it is still correct. See
 ```bash
 pio run                  # build — this is all CI runs
 pio run -t upload        # flash the board
-pio device monitor       # USB console at 115200 — silent today, see below
+pio device monitor       # USB console at 115200 — the CLI, see below
 mavproxy.py --master=<link port>,57600 --load-module system_time
 ```
 
@@ -398,11 +403,20 @@ adapter on the bench. `/dev/ttyACM0` no longer carries MAVLink. To reach the lin
 over USB again, build with `-D LINK_SERIAL=Serial` and point MAVProxy at
 `/dev/ttyACM0,115200` as before.
 
-`pio device monitor` now opens the USB console, which is silent in normal operation.
-The only code that writes to it is the stack-overflow hook in `src/hooks.cpp`, which
-runs after the scheduler has stopped. `Serial` is otherwise reserved for diagnostics
-and a CLI and has **no owner**; the first code that writes to it while tasks are
-running must claim one.
+`pio device monitor` now opens the USB console, which `src/cli.cpp` answers: a text
+command per line, a reply, then a prompt, and nothing unsolicited otherwise. Four
+commands:
+
+| Command | Reports |
+|---|---|
+| `ps` | one row per task the scheduler knows about — id, name, priority, state, unused stack in words — then free heap |
+| `ps <name>` | the same row for one task |
+| `free` | heap total, free now, and the minimum ever free since boot |
+| `help`, `?` | the command list |
+
+The CLI is read-only: no command changes firmware state. It is the port's only
+writer while tasks run; the one exception is the stack-overflow hook in
+`src/hooks.cpp`, which writes there directly after the scheduler has stopped.
 
 **There is no host test environment.** `test/` holds two suites, and they test
 different things:
@@ -442,9 +456,10 @@ below the floor in `platformio.ini`.
 
 `test_hil/` is what exercises the assembled firmware. `run.py` discovers the cases,
 prints Unity's line format so `pio test` counts them natively, and reports anything it
-cannot check — no board, no adapter — as skipped rather than failed. Nine of the twelve
-cases follow the scenarios in `openspec/specs/mavlink-link/spec.md`; the other three, in
-`check_recovery.py`, follow `fault-recovery`.
+cannot check — no board, no adapter — as skipped rather than failed. Nine of the
+fourteen cases follow the scenarios in `openspec/specs/mavlink-link/spec.md`; three, in
+`check_recovery.py`, follow `fault-recovery`; and two, in `check_cli.py`, follow
+`console-cli`.
 
 Its `build_stub.cpp` is not a test. PlatformIO counts the sources it compiled from the
 suite directory and refuses to build before it ever reaches `src/`, so a suite that is

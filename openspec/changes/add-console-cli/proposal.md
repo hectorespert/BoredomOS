@@ -128,16 +128,19 @@ Modified: `src/main.cpp` (the `extern` declaration and the `xTaskCreate`),
 `platformio.ini` (two build flags, and `CLI_SERIAL` in `bench`), `ARCHITECTURE.md`,
 `CLAUDE.md`.
 
-**Backlog.** No `TODO.md` entry is deleted: this work was scoped directly and never
-had one. But `TODO.md`'s *"Debug and release builds, with MAVLink tracing on the
-console"* competes for this exact port and leaves open the same four questions this
-change has to answer anyway — whether a console write can block a task, how
-concurrent writers interleave, what formatting costs in stack, and what it costs in
-flash. That entry must be re-pointed at this change rather than left to drift, since
-after this the console has an owner and a trace cannot simply `print` into it.
+**Backlog.** The CLI feature itself never had a `TODO.md` entry to delete — it was
+scoped directly. (The four unchecked `pvPortMalloc` results this change absorbs, per
+What Changes and Impact above, are a separate entry, and that one *is* deleted, in
+the same commit that implements the fix — noted here so this section does not read
+as contradicting that one.) `TODO.md`'s *"Debug and release builds, with MAVLink
+tracing on the console"* competes for this exact port and leaves open the same four
+questions this change has to answer anyway — whether a console write can block a
+task, how concurrent writers interleave, what formatting costs in stack, and what it
+costs in flash. That entry must be re-pointed at this change rather than left to
+drift, since after this the console has an owner and a trace cannot simply `print`
+into it.
 
-**Related defects, not fixed here.** `src/mavlink.cpp`'s `sendStatusText` builds its
-message with pointer arithmetic on a string literal, and several outbound packers do
-not check `pvPortMalloc` against `NULL`. The first already has a `TODO.md` entry that
-notes number formatting "should be solved once and not in two places" — the CLI is
-now a third place, so the two should be read together.
+**Related defect, not fixed here.** `src/mavlink.cpp`'s `sendStatusText` builds its
+message with pointer arithmetic on a string literal. It already has a `TODO.md` entry
+that notes number formatting "should be solved once and not in two places" — the CLI
+is now a third place, so the two should be read together.
