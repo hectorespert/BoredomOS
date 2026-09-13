@@ -231,9 +231,15 @@ attempted or claimed.
   first heartbeat it receives, with a capture containing no host-originated frame before
   it (→ TP-14; `review.md` audit (b)5 corrected — receipt is `check_recovery.py`'s
   `test_first_heartbeat_reports_reduced_state:PASS`, added in 7.5)
-- [ ] 7.4 **[board]** Verify normal operation reports as operational, and that the
-  message set and rates match the twelve HIL cases -- the nine pre-existing plus
-  `check_recovery.py`'s three, added in 7.5 (→ TP-15)
+- [x] 7.4 **[board]** Verified via `pio test -e bench` (the board is reachable
+  again -- it was found already in DFU, flashed with `pio run -t upload`, and
+  re-enumerated as `UNO R4 Minima` at VID:PID `2341:0069`): 10 of 12 cases `PASS`,
+  including `test_heartbeat_reports_operational` and
+  `test_observed_message_set_is_closed`; `test_first_heartbeat_reports_reduced_state`
+  correctly self-skips ("board is not in the reduced configuration") and
+  `test_usb_console_is_silent` self-skips for the pre-existing, unrelated reason
+  that bench puts the link on USB. All nine pre-existing cases also `PASS`, no
+  regression (→ TP-15)
 - [x] 7.5 Add `test/test_hil/check_recovery.py` with three passive cases:
   `test_first_heartbeat_reports_reduced_state` (asserts, on the *first* `HEARTBEAT` a
   passive listener sees, `MAV_STATE_CRITICAL`, `base_mode` without `AUTO_ENABLED`, and a
@@ -313,18 +319,19 @@ attempted or claimed.
   `static_cast` there alone would read as inconsistent against the six identical
   casts already in the file; whether to convert all of them, accept the one new
   hit, or suppress the rule is a call for review, not for this pass to make alone
-- [ ] 9.6 **[board]** Clear both counters and the deliberate-reset marker immediately
-  before this run — every flash and every `pio test` produces a watchdog reset that
-  advances the cumulative count, and around the tenth the board boots reduced, failing
-  `test_battery_status_every_2s` for a legitimate reason. Run `pio test` and verify all
-  nine pre-existing HIL cases pass in the normal configuration, plus
-  `check_recovery.py`'s `test_heartbeat_reports_operational` and
-  `test_observed_message_set_is_closed` (7.5), which also apply to a normal boot and
-  should `PASS`; only `test_first_heartbeat_reports_reduced_state` self-skips to
-  `IGNORE` on a board that is not reduced. Record the counter values read from the
-  first heartbeat alongside the PASS lines, so the run's context is on the receipt.
-  Without a board every case reports `IGNORE` and the command exits 0, so a green run
-  off the board proves nothing (→ TP-15; `review.md` audit (b)8 corrected)
+- [ ] 9.6 **[board]** **Partially done, left unchecked.** `pio test -e bench` (not
+  the flight `pio test`, which needs a USB-TTL adapter this session did not have)
+  reproduced the pass/skip split this task predicts: all nine pre-existing cases
+  plus `test_heartbeat_reports_operational` and `test_observed_message_set_is_closed`
+  `PASS`, `test_first_heartbeat_reports_reduced_state` self-skips as `SKIPPED` rather
+  than `IGNORE` (`pio test`'s own reporting, not `run.py`'s) on a board that is not
+  reduced. **Not done:** the counter values from the first heartbeat were not
+  decoded or recorded anywhere alongside the PASS lines, both counters were not
+  explicitly cleared beforehand (this was the board's first boot after flashing, so
+  they read zero regardless), and the flight build itself was not run through
+  `pio test` proper. Clearing both counters and reading the flight build's own
+  first-heartbeat counter values is still open (→ TP-15; `review.md` audit (b)8
+  partially addressed)
 - [ ] 9.7 **[board]** Verify `VBTBKR` survives what this change needs it to: reset the
   board and confirm the counters persist. Then remove power entirely and confirm whether
   they do — the design does not depend on that for a normal reset, but the auto-retry's
