@@ -260,56 +260,6 @@ Points to resolve before implementing:
   stays MAVLink-only.
 - Document in `README.md` and `CLAUDE.md` how to build and upload each profile.
 
-### Add a watchdog
-
-**Status:** proposed
-**Scope:** `src/main.cpp`, tasks in `src/*.cpp`, `platformio.ini`
-
-There is no watchdog. Any task that hangs — an `xQueueReceive` that never arrives,
-an I2C transfer waiting for the DS1307, the loop in `src/hooks.cpp` — leaves the
-satellite inert until a power cycle that nobody can perform in flight. For firmware
-meant to fly it is the most serious omission in the project.
-
-The RA4M1 has an independent WDT. To decide:
-
-- **Which tasks feed it.** A single `refresh()` from the lowest priority task
-  detects starvation but not that one specific task has stopped. A scheme where each
-  task marks its pass and a single one refreshes when all have passed detects much
-  more, at the cost of shared state.
-- **Timeout**, against the slowest cycle (`TaskSdWrite`, which can block on SPI
-  while writing to the card).
-- **What happens after a watchdog reset.** Leave a trace in the SD log or in a
-  `STATUSTEXT` at boot; otherwise the resets are invisible from the ground.
-- Interaction with `configASSERT`: today a hardware failure in `setup()` hangs the
-  board. With a watchdog that becomes an infinite reset loop, which may be better
-  (it retries) or worse (it never gets to emit anything). It has to be decided at
-  the same time.
-
-
-### Report the satellite's real state in the heartbeat
-
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `include/Data.h`
-
-`sendHeartbeat()` sends constants: `MAV_STATE_ACTIVE` and
-`MAV_MODE_FLAG_AUTO_ENABLED | MAV_MODE_FLAG_SAFETY_ARMED`, no matter what. With the
-battery at 5 %, the SD card unmounted or the RTC lost, the satellite keeps
-announcing over the link that everything is fine — exactly when the ground needs to
-find out.
-
-To decide:
-
-- Which conditions raise the state to `MAV_STATE_CRITICAL` or
-  `MAV_STATE_EMERGENCY`: battery threshold, SD write failure, invalid time.
-- Where that information comes from. Nobody centralises system health today; shared
-  state is needed, and a way to reach it without breaking the task and queue model.
-- Whether `MAV_STATE_BOOT` during `setup()` and `MAV_STATE_STANDBY` without a link
-  add anything, or whether active/critical is enough.
-
-Related to *[Detect when the battery is charging]*: the charge state is one of the
-natural inputs to this decision.
-
-
 ### Answer the GCS messages that are ignored today
 
 **Status:** proposed
@@ -318,7 +268,10 @@ natural inputs to this decision.
 The `TaskMavlink` switch has several `case` branches that only `break`:
 `COMMAND_LONG` (including `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` and
 `REQUEST_DATA_STREAM`. The GCS gives them up for lost and retries: MAVProxy sits
-waiting for a `COMMAND_ACK` that never arrives.
+waiting for a `COMMAND_ACK` that never arrives. `openspec/changes/add-degraded-mode`
+answers one specific command, `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, with a
+`COMMAND_ACK`, since it needed that command to actually do something; every other
+branch here is unaffected.
 
 The bare minimum is to always answer something. A `COMMAND_ACK` with
 `MAV_RESULT_UNSUPPORTED` is an honest answer and stops the retry; silence is not.
@@ -352,10 +305,13 @@ GCS shows it front and centre; today the satellite sends none of it.
 It fits with two things the firmware already has half done:
 
 - The health bitmasks are the place to express "the SD card failed", "the RTC was
-  lost", "the IMU does not answer". That is exactly what *[Report the satellite's
-  real state in the heartbeat]* wants to communicate and the `HEARTBEAT` has no
-  fields for. Both entries share the same source: a centralised health state, which
-  does not exist today.
+  lost", "the IMU does not answer". `openspec/changes/add-degraded-mode` (which
+  consumed *Report the satellite's real state in the heartbeat*) already spends
+  `custom_mode`'s four bytes on the reset reason, the boot phase and two fault
+  counters, and its own design notes that a *continuing* indicator for a missing
+  SD card has nowhere left to go in that field — `SYS_STATUS`'s sensor bitmap is
+  exactly the candidate it points at without adopting it. Both entries share the
+  same source: a centralised health state, which does not exist today.
 - `errors_count1..4` is where to keep the count of the failed `pvPortMalloc` calls
   of *[Check the result of `pvPortMalloc`...]* and of the sends dropped by a full
   queue, which are silently lost today.
@@ -654,32 +610,6 @@ Found by Copilot reviewing the pull request that split `test/` into `test_libs` 
 moved.
 
 
-### `setup()` asserts on the RTC before the console exists
-
-**Status:** defined
-**Scope:** `src/main.cpp`
-
-`src/main.cpp:52` runs `configASSERT(systemTime.begin())` and only then
-`src/main.cpp:54` runs `Serial.begin(115200)`. If the DS1307 does not answer, the
-board hangs before the port through which it could report it has even been opened.
-The same reasoning applies to `configASSERT(SD.begin(9))` right after: it fails
-before any task exists that could emit a `STATUSTEXT`.
-
-The result is a board that is dead and mute, and from the outside a missing RTC, a
-missing card and a stack overflow all look identical: nothing on the link and no
-LED.
-
-Overlaps with *[The stack overflow hook hangs before it warns]* — the same problem
-of a diagnostic that needs hardware which may be exactly what failed — and with
-*[Add a watchdog]*, which changes what hanging in `setup()` means.
-
-To decide: whether `Serial.begin()` simply moves to the first line of `setup()`
-(cheap, and enough for a bench diagnosis), whether the failure is signalled on
-`LED_BUILTIN` with a distinguishable pattern per cause, and whether the RTC or the
-SD card really deserve halting the board rather than booting in a degraded state and
-saying so over the link. This last one is a design decision, since `configASSERT`
-halting rather than degrading is deliberate and documented in `ARCHITECTURE.md`.
-
 ### Improve clock synchronisation
 
 **Status:** proposed
@@ -808,9 +738,12 @@ pin register manipulation and a busy-wait delay, depending on nothing that needs
 interrupts. `ARCHITECTURE.md` describes this hook as trapping an overflow into a slow
 blink; once the behaviour is fixed, state the real period there.
 
-Overlaps with *[Add a watchdog]*: with a watchdog, sitting here blinking forever
-stops being the obvious answer to an overflow. Also with *[`setup()` asserts on the
-RTC before the console exists]*, which is the same class of problem.
+Overlaps with `openspec/changes/add-degraded-mode` (formerly *Add a watchdog* and
+*`setup()` asserts on the RTC before the console exists*, both consumed by that
+change): with a watchdog, sitting here blinking forever stops being the obvious
+answer to an overflow, and that change's own review (`review.md` finding 9)
+already names the fix this entry describes — writing the phase marker first and
+resetting immediately, no blink — as not yet folded in.
 
 
 ### `uptime` overflows after ~49.7 days
@@ -828,7 +761,8 @@ does not.
 
 To decide: keep a wrap count and store the uptime in 64 bits, or record a boot
 counter plus the time since the last boot instead, which would also serve to detect
-the resets of *[Add a watchdog]*.
+the resets that `openspec/changes/add-degraded-mode` (formerly *Add a watchdog*)
+now counts in `R_SYSTEM->VBTBKR`, not in the SD log.
 
 
 ### SD logging failure is silent
@@ -842,13 +776,15 @@ If `SD.open` fails in `SdData::begin()`, the object is left with no file and
 away".
 
 Result: the entire mission log can be lost without a single warning over the link.
-`setup()` does use `configASSERT(SD.begin(9))`, but that only covers boot; a card
-that fails or is unmounted later goes unnoticed.
+`setup()` reports a missing card at boot (`openspec/changes/add-degraded-mode`
+turned the old `configASSERT(SD.begin(9))` into a degradation), but that only
+covers boot; a card that fails or is unmounted later still goes unnoticed.
 
 To decide: having `begin()`/`write()` return a result and `TaskSdWrite` propagate
-it; and how the ground finds out — a `STATUSTEXT`, a field in the heartbeat of
-*[Report the satellite's real state in the heartbeat]*, or both. Be careful not to
-flood the link by repeating the warning at 1 Hz.
+it; and how the ground finds out — a `STATUSTEXT`, a field in the heartbeat (whose
+`custom_mode` bytes `add-degraded-mode` already spent on the boot-time state — see
+*Emit `SYS_STATUS`* above), or both. Be careful not to flood the link by repeating
+the warning at 1 Hz.
 
 
 ### `TaskSerialRead` polls the port instead of waiting
@@ -906,18 +842,21 @@ misleading fields. No new hardware is needed to fix a good part of it:
   covered**. A talkative GCS continuously sends things the switch does not cover
   (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the
   satellite spends its time flooding a narrow link with complaints. Take it out of
-  there and reserve `STATUSTEXT` for what deserves a warning: the result of
-  initialisation at boot, an SD failure, the cause of the last reset.
+  there and reserve `STATUSTEXT` for what deserves a warning: an SD failure, and —
+  since `openspec/changes/add-degraded-mode` — the cause of the last reset, already
+  emitted once per boot.
 - **`BATTERY_STATUS` goes out nearly empty:** `current_battery`, `current_consumed`
   and `energy_consumed` at `-1`, `time_remaining` at `0`, `temperature` at
   `INT16_MAX` and `charge_state` at `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Two of
   them can be filled with no additional hardware as soon as *[Add the GY-87 IMU]*
   (temperature) and *[Detect when the battery is charging]* (charge state) land.
   `time_remaining` requires measuring current.
-- **`HEARTBEAT` declares things that are not so:** `MAV_MODE_FLAG_SAFETY_ARMED |
-  MAV_MODE_FLAG_AUTO_ENABLED` fixed and `custom_mode` at 0, no matter what. The
-  state is covered by *[Report the satellite's real state in the heartbeat]*; the
-  mode flags are a separate decision.
+- **`HEARTBEAT` used to declare things that were not so.**
+  `openspec/changes/add-degraded-mode` (which consumed *Report the satellite's real
+  state in the heartbeat*) makes `custom_mode` carry the reset reason, the boot
+  phase and both fault counters, and drops `MAV_MODE_FLAG_AUTO_ENABLED` in the
+  reduced configuration. `MAV_MODE_FLAG_SAFETY_ARMED` stays fixed regardless — that
+  remains a separate decision.
 - **`MAV_TYPE_ROCKET` is debatable.** There is no `MAV_TYPE_SATELLITE`, but
   `MAV_TYPE_GENERIC` describes a CubeSat better than a rocket does, and it changes
   how the GCS draws it. Worth deciding soon: `ARCHITECTURE.md` fixes it as the bus
@@ -1017,11 +956,13 @@ nothing.
 
 To decide:
 
-- Whether anything should be added so this cannot recur silently. `VBTBKR[1..511]`,
-  the RA4M1's battery-backed registers, survive any reset and are untouched by this
-  firmware and by the bootloader, which uses only `VBTBKR[0]`. A boot counter there
-  could park the board in DFU after N failed starts, or select a reduced task set.
-  That is a change of its own, not part of recovering the board.
+- Whether anything should be added so this cannot recur silently. `VBTBKR[4..511]`,
+  the RA4M1's battery-backed registers, survive any reset and are free once the
+  bootloader's own 32-bit double-tap magic at `VBTBKR[0..3]` is left alone. That
+  boot counter is now `openspec/changes/add-degraded-mode`, which selects a reduced
+  task set on repeated failure but deliberately does not park the board in DFU —
+  see that change's design for why. It is not part of recovering *this* board:
+  the change still needs the board reachable before it can be flashed.
 - Whether the SWD pads are worth wiring for a probe, which would make this
   recoverable without the enclosure open.
 

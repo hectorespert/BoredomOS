@@ -22,8 +22,8 @@ possible, and none of them is used today:
   software, or the RESET pin. Nothing in the BSP or the core clears them, so they
   arrive intact in `setup()`. The reason does not have to be inferred.
 - **`R_SYSTEM->VBTBKR`** is 512 bytes of battery-backed register that survive any
-  reset. The bootloader uses exactly one of them, `VBTBKR[0]`, for the double-tap
-  magic. The other 511 are untouched by this firmware and by the bootloader.
+  reset. The bootloader uses the first four of them, `VBTBKR[0..3]`, for the 32-bit
+  double-tap magic. The other 508 are untouched by this firmware and by the bootloader.
 - **`configUSE_IDLE_HOOK` is already 1**, and the idle task runs only when every
   other task is blocked. Refreshing a watchdog from there detects a task that stops
   yielding, with no shared state and no per-task bookkeeping.
@@ -85,9 +85,21 @@ not a new message id — `COMMAND_LONG` is already received and decoded.
 
 ### Modified Capabilities
 
-None. `mavlink-link` fixes the port, speed and rates, and none of those move;
-`memory-budget` governs where memory is reserved, and a task that is not started still
-has its storage counted by the linker.
+- `mavlink-link`: the *Board powered with nothing attached* scenario promises "all tasks
+  reach their steady-state cadence" and "housekeeping records continue... at 1 Hz",
+  neither of which holds in the reduced configuration or with no SD card. The MAVLink
+  identity triple, port, speed and rates in the *normal* configuration do not move; the
+  delta qualifies the existing scenario to that configuration and cross-references
+  `fault-recovery`.
+- `memory-budget`: the *A ground station sees no difference* scenario requires the full
+  message set at the rates `mavlink-link` defines; the reduced configuration drops
+  `BATTERY_STATUS`. The delta qualifies the scenario the same way. Where memory is
+  reserved is otherwise unchanged — a task that is not started still has its storage
+  counted by the linker.
+
+(`review.md` finding 8. The delta spec files themselves are added under this change's
+`specs/` directory via `/opsx:continue`, since `/opsx:update` does not create new files
+under a glob artifact.)
 
 ## Impact
 

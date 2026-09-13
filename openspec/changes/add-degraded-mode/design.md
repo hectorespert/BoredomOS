@@ -10,13 +10,21 @@ cold/warm start flag. Nothing in `variants/MINIMA` or in the Arduino core reads 
 them, so `setup()` is the first code to see them. They accumulate until cleared, which is
 why clearing them is part of reading them.
 
-**`VBTBKR` has 512 bytes and one is taken.** `cores/arduino/boot.h` defines
-`BOOT_DOUBLE_TAP_DATA` as `R_SYSTEM->VBTBKR[0]`, guarded by `#ifdef NO_BACKUP_REGISTERS`
-which is defined nowhere in the tree — so the real backup registers are in use, not the
-RAM fallback at `0x20007FF0`. Writing them needs the `PRCR` unlock the bootloader path
-already demonstrates. They are peripheral registers: they cost no RAM and they survive a
-reset by construction. What they do *not* obviously survive is losing VCC, which needs
-the VBATT domain powered — see Risks.
+**`VBTBKR` has 512 bytes and four are taken.** `cores/arduino/boot.h` defines
+`BOOT_DOUBLE_TAP_DATA` as a 32-bit access at `&R_SYSTEM->VBTBKR[0]` — `VBTBKR` is
+`__IOM uint8_t VBTBKR[512]`, so the double-tap magic occupies bytes `[0..3]`, not byte 0
+alone. This change's own layout starts at `[4]`; 508 bytes remain free, not 511 — an
+error that reached the proposal, this file, two tasks and a `TODO.md` entry before two
+reviewers caught it independently (`review.md` finding 2). `#ifdef NO_BACKUP_REGISTERS`
+is defined nowhere in the tree, so the real backup registers are in use, not the RAM
+fallback at `0x20007FF0`. Writing them needs the `PRCR` unlock the bootloader path
+already demonstrates, and that unlock races the same unlock/write/lock sequence
+performed **from the USB interrupt** (`SerialUSB.cpp:164-166`) — an ISR landing between
+this firmware's unlock and its store makes the store a silent no-op. The write helpers
+(task 1.2) make the critical section their own property, so no call site has to
+remember it (`review.md` finding 7). They are peripheral registers: they cost no RAM and
+they survive a reset by construction. What they do *not* obviously survive is losing
+VCC, which needs the VBATT domain powered — see Risks.
 
 **The idle hook is weak and already enabled.** `configUSE_IDLE_HOOK` is 1 and
 `portable/FSP/port.c` provides `__attribute__((weak)) vApplicationIdleHook()`. Overriding
@@ -24,8 +32,43 @@ it in `src/` is the intended extension point.
 
 **The watchdog is not ours alone.** `cores/arduino/usb/SerialUSB.cpp`'s
 `tud_dfu_runtime_reboot_to_dfu_cb()` opens the WDT itself as part of the 1200-baud upload
-path, and handles `FSP_ERR_ALREADY_OPEN` by spinning deliberately — the comment says it
-expects the application to be kicking it. That shapes the timeout decision below.
+path, sets `is_watchdog_reset_in_progress_for_upload`, and handles
+`FSP_ERR_ALREADY_OPEN` by spinning deliberately — the comment says it expects the
+application to be kicking it. `BSP_CFG_PARAM_CHECKING_ENABLE` is `0`
+(`bsp_cfg.h:28`), so the `FSP_ERROR_RETURN` that would produce that code is compiled
+out in practice, and the callback returns instead of spinning (`review.md` finding 1).
+That shapes the DFU-trigger decision below.
+
+**The backup-register layout is established once, not field by field.** Findings 2, 3,
+3b, 3c, 3d and 4 in `review.md` are six symptoms of one gap: reading and writing shared
+MCU state (`VBTBKR`, `RSTSR0/1/2`) without first fixing, in one place, who owns which
+byte and which flag. This table is that audit, and `include/Recovery.h` states it as one
+block:
+
+| Bytes | Owner | Content |
+|---|---|---|
+| `[0..3]` | the bootloader | the double-tap magic. Never read or written by this firmware. |
+| `[4..5]` | this firmware | a validity magic byte and a checksum byte over `[6..11]`. On mismatch, `[6..11]` is treated as all-zero and the reset reason additionally records "backup state invalid" rather than trusting an undefined block (`review.md` finding 3d). |
+| `[6]` | this firmware | the consecutive-unstable-boot counter |
+| `[7]` | this firmware | the cumulative-reset counter |
+| `[8]` | this firmware | the cumulative-count snapshot, taken on entering the reduced configuration (`review.md` finding 3) |
+| `[9]` | this firmware | the phase marker |
+| `[10]` | this firmware | the reset reason: power-on, watchdog, software, external/unknown (inferred), low-voltage, or backup-state-invalid |
+| `[11]` | this firmware | the deliberate-reset marker: none, commanded, or retry, consumed by the next boot (`review.md` finding 4) |
+
+Every write to `[4..11]` goes through the `PRCR`-unlocked helpers of task 1.2, which own
+the critical section described above so no call site has to remember it. Both counters
+read as 0 when the checksum does not match (finding 3d's validity check), but are
+**not** clamped to their thresholds otherwise: implementing the snapshot comparison
+below surfaced that clamping the stored value, as first proposed, would make "the
+retry's own reset" and "a new fault while already at the cap" read identically once
+the raw count reaches the threshold, defeating the mechanism it is there to support.
+A threshold check compares with `>=` regardless of how far past it the count is; the
+heartbeat clamps to the threshold only when packing the display value (`src/mavlink.cpp`).
+`RSTSR0.PORF`'s possible interaction with the bootloader's own DFU-arming window
+(`review.md` finding 3b, see below) is a read-only question about a register this
+firmware does not write, independent of this layout — it gates how task 2.1 handles
+`RSTSR0`, not what lives in `VBTBKR`.
 
 ## Goals / Non-Goals
 
@@ -94,30 +137,97 @@ and `xTaskResumeAll()`. The override must reproduce that, not replace it: droppi
 sleep costs low-power idle permanently, which on a solar-powered satellite is a real
 loss. The refresh goes inside, before the sleep.
 
-### The timeout is a build flag, because it is also the upload latency
+### The DFU trigger jumps to the bootloader directly; it is not a watchdog side effect
 
-`TaskSdWrite` blocks on SPI and a card can take a surprisingly long time on a block
-erase, so the timeout has to be generous — and the core's DFU path turns the
-application's timeout into how long `pio run -t upload` waits before the board resets
-into the bootloader. Those two pull in opposite directions, so the value is
-`-D WDT_TIMEOUT_MS` in `platformio.ini` rather than a constant, and the flight and bench
-environments can differ.
+The design originally relied on the watchdog underflowing during the core's DFU
+callback: no task and no idle hook runs during that callback, so the refresh stops, the
+WDT fires, and the reset lands in the bootloader because the magic was already written.
+**This does not work, and cannot be made to work by tuning the timeout.**
+`USB.cpp:145`'s `TUD_DFU_RT_DESCRIPTOR` sets `wDetachTimeOut` to 1000 ms; the shortest
+timeout the RA4M1 WDT can express is 174.8 ms, but the timeout must also clear
+`TaskSdWrite`'s worst case (up to 5.592 s, see below), and no single value serves both.
+`dfu-util` gives up long before an underflow tuned for the SD card would ever fire
+(`review.md` finding 1, the most serious defect this project has produced).
 
-This also means the upload path keeps working with the watchdog enabled, for a reason
-worth writing down: the DFU callback runs in the USB interrupt, no task and no idle hook
-runs during it, so the refresh stops, the WDT fires, and the reset lands in the
-bootloader because the magic was written first. It works *because* the refresh is not in
-an interrupt.
+The core already exposes what the fix needs. `is_watchdog_reset_in_progress_for_upload`
+(`SerialUSB.cpp:160`) is set by the DFU callback for exactly this, and the port's own
+weak idle hook already tests it (`port.c:1482-1484`) — this change's override must not
+drop that test. The overridden `vApplicationIdleHook()` checks the flag **before**
+refreshing and, when set, calls `goBootloader()` (`cores/arduino/boot.h`) directly
+instead of refreshing:
+
+```c
+extern bool is_watchdog_reset_in_progress_for_upload;
+if (is_watchdog_reset_in_progress_for_upload) goBootloader();
+R_WDT_Refresh(&wdtCtrl);
+```
+
+`goBootloader()` rewrites the double-tap magic and calls `NVIC_SystemReset()` directly,
+so the jump takes microseconds and has no dependency on any watchdog period. This also
+means enabling the watchdog no longer makes `pio run -t upload` slower — it should
+become *faster* than the core's unmodified ~175 ms path, since the reset fires as soon
+as the idle hook next runs rather than waiting on an underflow. This retires the upload
+measurement as originally scoped in task 4.5: what is left to measure is that upload
+still works, not how much slower it got.
+
+### The timeout is a build flag, sized for `TaskSdWrite` alone
+
+With the upload path no longer coupled to it, `WDT_TIMEOUT_MS` answers one question:
+how long `TaskSdWrite`'s worst case — the ring rollover at
+`lib/SdData/SdData.cpp:56-68`, which can delete a file of up to 1 GiB inside one
+SPI-blocking call — is allowed to take. `TaskSdWrite` runs at `PRIORITY_LOWEST` with
+`configUSE_TIME_SLICING` off, so while it spins the idle task does not run and the
+watchdog is not refreshed: every ordinary `sdData.write()` must complete inside the
+timeout. The RA4M1 WDT's register-start counter maxes out at 134 217 728 PCLKB cycles;
+with `BSP_CFG_ICLK_DIV` at `/1` and `BSP_CFG_PCLKB_DIV` at `/2`, PCLKB is 24 MHz, so the
+ceiling is **5.592 s** (`review.md` finding 5). The value is also discrete — seven
+timeouts by ten dividers — so a millisecond figure must round to one the hardware can
+express. It stays `-D WDT_TIMEOUT_MS` in `platformio.ini` so flight and bench can
+differ, but both are bound by the same 5.592 s ceiling. If task 4.6's measurement shows
+the rollover does not fit under it, the fix is a smaller ring file, not a larger flag.
 
 ### The reset reason comes from the hardware; the counters supply the memory
 
-Reading `RSTSR` answers "why did I restart". It does not answer "is this happening
-repeatedly", which is the question that selects a configuration. Hence two counters in
-`VBTBKR`, and they are not redundant:
+Reading `RSTSR0/1/2` answers "why did I restart", with one gap and one addition the
+review surfaced:
+
+- **A RES-pin reset sets none of the three registers.** `RSTSR0` carries only `PORF` and
+  the LVD/deep-standby flags, `RSTSR1` the independent-watchdog, watchdog, software-reset
+  and bus/parity/stack-monitor flags, `RSTSR2` only the cold/warm-start flag
+  (`RSTSR2.CWSF`, which is *set by software*, not cleared — task 2.1 must not clear it
+  the way it clears the other two registers). An external reset is therefore inferred by
+  elimination, and only once every other flag is known-cleared. The reason is five
+  values, not four: power-on, watchdog, software, external/unknown (inferred), and
+  low-voltage (`review.md` findings 3c and 14).
+- **A low-voltage reset is its own reason, not folded into power-on.** `RSTSR0` carries
+  the LVD flags alongside `PORF`, as this file already noted in Context. On a satellite
+  running from one LiPo cell with a naive charge estimate, a sagging battery is the cause
+  most worth telling apart from an ordinary power-on, and a `uint8_t` reason field has
+  252 unused values to spend on it (`review.md` finding 14).
+- **`RSTSR0.PORF`'s clear behaviour is now settled against the RA4M1's own register
+  definition, resolving finding 3b.** `review.md` finding 3b flagged, from an
+  unreproduced disassembly of the bootloader, a risk that clearing `PORF` might
+  interact with the bootloader's own DFU-arming window. The RA4M1's CMSIS register
+  header (`R7FA4M1AB.h`, generated from the same data as the hardware manual)
+  documents `PORF` as: "Power-On Reset Detect Flag. NOTE: Writable only to clear the
+  flag. Confirm the value is 1 and then write 0" — the identical idiom already used
+  for `LVD0RF`/`LVD1RF`/`LVD2RF`/`DPSRSTF` in the same register and for every flag in
+  `RSTSR1`. No other automatic clear condition is documented. Because `PORF` is set
+  to 1 only by the power-on-reset circuit itself, a genuine power-on always re-arms it
+  to 1 regardless of what any earlier boot's software did; clearing it after reading,
+  the same as every other flag, cannot cause a real power-on to be missed by whatever
+  reads it next (this firmware or the bootloader), and only prevents the bit from
+  staying latched at 1 forever after the first power-on the board ever experiences.
+  Task 2.1 clears `RSTSR0` and `RSTSR1` uniformly, bit by bit, using this confirm-1-
+  then-write-0 idiom.
+
+Reading the reason does not answer "is this happening repeatedly", which is the question
+that selects a configuration. Hence two counters in `VBTBKR`, and they are not
+redundant:
 
 | | Cleared by | Catches |
 |---|---|---|
-| Consecutive unstable boots | reaching stability | a fault at or near boot |
+| Consecutive unstable boots | reaching stability, or a deliberate reset | a fault at or near boot |
 | Cumulative resets | a ground command only | a fault that appears after stability |
 
 The second exists because of this firmware specifically. `CLAUDE.md` describes a heap
@@ -131,10 +241,38 @@ failure — a board crashing just inside it never counts as unstable — and tha
 what the cumulative counter covers. The two together tolerate a badly chosen window;
 either alone does not.
 
-**Decision on who advances the consecutive counter:** watchdog and software resets do;
-power-on and external resets do not. Someone is present for the latter two, and erasing
-their evidence would be worse than not counting them — so they are recorded in the
-cumulative count and in the heartbeat, without moving the trigger.
+**Decision on who advances the consecutive counter, and the deliberate-reset carve-out
+it needs:** watchdog and software resets advance it; power-on, external and low-voltage
+resets do not — someone is present for those three, and erasing their evidence would be
+worse than not counting them, so they are recorded in the cumulative count and in the
+heartbeat without moving the trigger. But not every software reset is evidence of a
+fault: both exits from the reduced configuration — the ground command (task 8.1) and the
+automatic retry (task 8.2) — are software resets, and without a marker, three commanded
+reboots would put the board into the reduced configuration by themselves, and the
+auto-retry's own reset would count as evidence of the fault it exists to test for
+(`review.md` finding 4). The **deliberate-reset marker** (layout byte `[11]`) is written
+immediately before every `NVIC_SystemReset()` this firmware itself performs — today
+that means tasks 8.1 and 8.2 only, but any future call site this project adds must set
+it the same way or be recorded as a fault by default, which is the safe default for an
+unmarked reset. The next boot consumes the marker: neither *commanded* nor *retry*
+advances the consecutive counter.
+
+**Decision on the cumulative-count trap, and why it needs a snapshot, not a rule
+change:** the requirement that the firmware "leave the reduced configuration on its own
+after a long interval" is unsatisfiable against a raw cumulative threshold, for exactly
+the case it exists for. Walk it: no command can arrive by premise, so the auto-retry
+resets the board; that reset is itself recorded in the cumulative count; the next boot
+re-evaluates the raw threshold, finds it still exceeded, and returns to reduced before
+emitting a heartbeat — deepening the trap on every attempt (`review.md` finding 3). The
+fix is state: on **entering or remaining in** the reduced configuration, the cumulative
+count is snapshotted into layout byte `[8]`. The retry's own reset is itself a software
+reset and advances the cumulative count by one, same as any other — that increment is
+expected, not a fault, so the boot decision that follows an automatic retry compares
+the *current* cumulative count against *snapshot + 1*, not against the raw threshold:
+the retry succeeds unless the cumulative count grew by more than its own contribution,
+i.e. unless a further fault occurred during the wait or the retry attempt itself. The
+snapshot is cleared, along with both counters, on the ground command and on any boot
+that reaches stability normally.
 
 ### The phase marker is the cheapest thing here and the most useful
 
@@ -173,7 +311,15 @@ bytes on the wire, once per second, with no request from the ground. `system_sta
 becomes `MAV_STATE_CRITICAL` when reduced and `base_mode` drops
 `MAV_MODE_FLAG_AUTO_ENABLED`, both of which MAVProxy surfaces without configuration.
 
-The identity triple does not move, so `mavlink-link` is untouched.
+The identity triple does not move, but that is not the same as `mavlink-link` being
+untouched. Two archived scenarios are falsified by this change: `mavlink-link`'s *Board
+powered with nothing attached* promises "all tasks reach their steady-state cadence" and
+"housekeeping records continue... at 1 Hz", both false in the reduced configuration and
+false with no card; `memory-budget`'s *A ground station sees no difference* requires the
+full message set at the rates `mavlink-link` defines, which the reduced configuration
+drops `BATTERY_STATUS` from. Both need a MODIFIED delta qualifying the scenario to the
+normal configuration, cross-referenced to `fault-recovery` (`review.md` finding 8) — see
+`proposal.md`'s Capabilities section.
 
 **Alternative rejected:** `STATUSTEXT` alone. It is a one-shot at boot, so a ground
 station that connects afterwards sees a normal-looking vehicle. The `STATUSTEXT` stays,
@@ -214,6 +360,16 @@ but as the human-readable addition rather than the mechanism.
   by getting the window right. Called out because the first flight will show whether the
   window or the threshold is wrong, and the SD log plus the heartbeat counters are what
   will show it.
+- **`RSTSR0.PORF`'s clear behaviour was resolved from the RA4M1's own register
+  definition, not from the board** → See the reset-reason decision above. The
+  resolution rests on the CMSIS header's documented bit semantics, not on a
+  board measurement; task 9.7's board work should still confirm no surprising
+  DFU-arming behaviour is observed once the board is reachable again.
+  (`review.md` finding 3b.)
+- **Backup-register content has no validity marker until task 1.1 adds one** → An
+  uninitialised block read as counters, or one corrupted by an SEU or a brownout mid-write,
+  is indistinguishable from genuine fault history without the magic-plus-checksum check
+  in the layout table above. (`review.md` finding 3d.)
 - **A watchdog can mask a fault instead of exposing it** → A board that reboots quietly
   every few minutes and keeps transmitting looks healthier than one that hangs. The
   cumulative counter in the heartbeat is the defence: the resets are visible from the
