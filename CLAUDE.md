@@ -60,11 +60,18 @@ what in `tasks.md` goes dark.
 ```bash
 pio run                  # build the flight environment (CI builds all three)
 pio run -t upload        # flash the board
-pio device monitor       # serial console at 115200 (raw MAVLink bytes, not text)
+pio device monitor       # USB console at 115200 — the text CLI, see below
 pio test                 # HIL: flashes this firmware, then checks it from the host
 pio test -e bench        # same, with the link on USB so no adapter is needed
 pio test -e libs         # Unity library tests — DESTRUCTIVE, see below
 ```
+
+The USB console answers four read-only commands, one line in, one reply out: `ps`
+(every task the scheduler knows about — id, name, priority, state, unused stack
+in words — then free heap), `ps <name>` (the same row for one task), `free`
+(heap total, free now, minimum ever free), and `help` / `?`. No command changes
+firmware state. `src/cli.cpp` is the port's only writer while tasks run; see
+`ARCHITECTURE.md` section 6 for the one exception.
 
 There is no host/native test environment. `test/` holds two suites, and **`pio test`
 means the HIL one**: it flashes this firmware and then interrogates it from the host,

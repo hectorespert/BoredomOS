@@ -3,8 +3,8 @@
 ## Purpose
 Defines which physical port carries the MAVLink link to the ground station, at what
 speed, how that choice is made at build time, and what the firmware may assume about
-the port being ready. The USB port's role as a text console is reserved here but not
-yet used.
+the port being ready. The USB port's role as a text console is defined by the
+`console-cli` capability.
 
 ## Requirements
 

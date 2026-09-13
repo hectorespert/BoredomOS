@@ -48,6 +48,8 @@ TaskHandle_t taskSdWriteHandler = NULL;
 
 TaskHandle_t taskMavlinkHandler = NULL;
 
+TaskHandle_t taskCliHandler = NULL;
+
 QueueHandle_t serialReadQueue = NULL;
 
 QueueHandle_t serialWriteQueue = NULL;
@@ -79,6 +81,15 @@ StaticTask_t statusTcb;
 StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
 
+// Measured on the board (task 4.1): ps's own row for this task never dropped
+// below 113 words free of the provisional 192 while exercising every command,
+// including the overlong-line and array-too-small error paths -- 79 words used
+// at the deepest point observed. 128 keeps a comparable margin to the other
+// light tasks (SerialRead's own watermark runs 35-46 of 96) at less than the
+// provisional cost.
+StackType_t cliStack[128];
+StaticTask_t cliTcb;
+
 // Queue structures and item storage. Each queue carries pointers, so the storage is
 // depth x sizeof(pointer); what backs the items themselves is the FreeRTOS heap,
 // sized in platformio.ini against the worst case computed in the change design.
@@ -108,6 +119,8 @@ QueueHandle_t sdWriteQueue = NULL;
 [[noreturn]] extern void TaskMavlinkBatteryStatus(void *pvParameters);
 
 [[noreturn]] extern void TaskMavlink(void *pvParameters);
+
+[[noreturn]] extern void TaskCli(void *pvParameters);
 
 namespace {
 
@@ -329,6 +342,12 @@ void setup()
 
   taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, mavlinkStack, &mavlinkTcb);
   configASSERT(taskMavlinkHandler != NULL);
+
+  // Starts in every configuration, reduced included: it touches nothing the
+  // reduced configuration withholds (no SD card, no RTC, no battery sense),
+  // and it is most useful exactly when something else has already gone wrong.
+  taskCliHandler = xTaskCreateStatic(TaskCli, "Cli", 128, NULL, PRIORITY_LOWEST, cliStack, &cliTcb);
+  configASSERT(taskCliHandler != NULL);
 
   if (!reducedConfiguration) {
     taskStatusHandler = xTaskCreateStatic(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, statusStack, &statusTcb);

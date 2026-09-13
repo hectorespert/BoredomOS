@@ -1,9 +1,14 @@
-"""The USB CDC port carries nothing.
+"""The USB CDC port carries nothing unsolicited.
 
 Covers the mavlink-link scenario "Host attached to USB ... receives no MAVLink
-frames ... and no text". This is the check that shows the link really left USB:
-the telemetry checks prove frames arrive somewhere, this one proves they do not
-arrive here.
+frames ... and no unsolicited text". This is the check that shows the link
+really left USB: the telemetry checks prove frames arrive somewhere, this one
+proves they do not arrive here.
+
+Since add-console-cli the port is no longer silent outright -- it is silent
+*until spoken to*: the CLI answers text commands there (see check_cli.py) but
+emits nothing on its own. This check still holds because it never sends
+anything and only asserts on what arrives unprompted.
 
 Skipped when the link itself is on USB, which is what
 -D LINK_SERIAL=Serial produces: the port is then supposed to carry frames.
@@ -43,6 +48,6 @@ def test_usb_console_is_silent(link):
             data += console.read(256)
 
     assert not data, (
-        f"{len(data)} bytes on the USB console, which nothing should write to: "
-        f"{data[:64]!r}"
+        f"{len(data)} bytes on the USB console, which nothing should write to "
+        f"unprompted: {data[:64]!r}"
     )
