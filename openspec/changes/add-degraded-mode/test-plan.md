@@ -89,6 +89,13 @@ a board already reduced. TP-4 needs TP-1's build still on the board. TP-16 clear
 counters, so it ends any reduced-state session. TP-8 costs ten stability windows and TP-17
 at least two retry intervals: budget hours, with an uninterrupted capture for both.
 
+**TP-17 does not need to worry about a power cycle mid-interval.** Task 9.7 found, on the
+board, that `VBTBKR` does not survive losing VCC on this hardware (no separate `VBATT`),
+while a plain reset (button or software) preserves it exactly. A power loss during TP-17's
+capture would show up as the counters and the snapshot resetting to zero rather than as a
+corrupted comparison -- a clean restart, not a hazard to the receipt. See `design.md`'s
+Risks for the measurement.
+
 **Wiring.** With the flight build the link is on D0/D1, so all of this needs a USB-TTL
 adapter or the radio. `pio test -e bench` moves it to USB but is not the flight
 configuration, and `pio run -t upload` must follow. Never use a 1200-baud touch to reset

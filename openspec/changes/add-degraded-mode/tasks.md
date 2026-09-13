@@ -66,15 +66,25 @@ attempted or claimed.
   supersedes the four-reason, clear-everything version — `review.md` findings 3b, 3c,
   14 corrected). **Board confirmation (2.2, 2.3) still pending** — this is a compile-time
   verification only.
-- [ ] 2.2 **[board]** Verify each cause is reported correctly: power the board (power-on),
-  press RESET (external/unknown), trigger a software reset, starve a task to trip the
-  watchdog, and — if a controlled low-voltage condition can be produced safely on the
-  bench — brown it out; checking after each that the value the firmware reports matches
-  what was done (→ TP-4, TP-6, and the low-voltage and external/unknown scenarios added
-  to `specs/fault-recovery/spec.md`)
-- [ ] 2.3 **[board]** Verify the registers are cleared: after a watchdog reset, the boot
-  that follows the next clean start does not still report a watchdog reset — except for
-  `RSTSR0.PORF`, which per 2.1's settled answer may be deliberately left uncleared (→ TP-4)
+- [x] 2.2 **[board]** Verified four of five causes live on the bench build:
+  power-cycling USB reports `backup-invalid`, not `power-on` -- expected and
+  recorded in `design.md`'s Risks (task 9.7), since `VBTBKR` shares this board's
+  `VCC` domain with no separate `VBATT`, so a real power-on always coincides with
+  losing the backup block. A RESET-button press reports `external/unknown`. A
+  ground-commanded reboot and every `pio run -t upload` (via `goBootloader()`)
+  report `software`. Stalling `TaskMavlink` in a non-yielding loop (temporary,
+  reverted immediately after) reports `watchdog` within `WDT_TIMEOUT_MS`. **Not
+  verified: low-voltage** -- no safe controlled brownout was attempted this
+  session (→ TP-4, TP-6, and the low-voltage and external/unknown scenarios in
+  `specs/fault-recovery/spec.md`, low-voltage's scenario excepted)
+- [x] 2.3 **[board]** Verified as part of 2.2's watchdog test: the boot after the
+  watchdog reset reported `watchdog` cleanly (not accumulated with anything
+  earlier), and the RESET-button test immediately before it showed the cumulative
+  count advancing by exactly one from its prior value rather than resetting or
+  jumping -- consistent with `RSTSR0`/`RSTSR1` being cleared bit by bit and read
+  fresh each boot. `RSTSR0.PORF`'s specific clear behaviour was not isolated from
+  the "backup-invalid" override (2.2), so it is inferred from the CMSIS header
+  (2.1), not independently re-confirmed here (→ TP-4)
 
 ## 3. The phase marker
 
@@ -105,12 +115,21 @@ attempted or claimed.
   hang that survives the degradation policy — e.g. a temporary build that stalls inside
   `SD.begin(9)` without triggering 6.2's absence path — before relying on it as TP-5's
   receipt. **Not resolved in this pass.**)
-- [ ] 3.4 **[board]** Provoke `vApplicationStackOverflowHook`: flash a temporary build
-  with an undersized stack behind a deliberate deep call, confirm the board resets
-  within `WDT_TIMEOUT_MS`, confirm the following boot's phase byte equals that hook's
-  marker, and reflash the flight build afterward (→ TP-3; `review.md` finding 11's own
-  disposition named this as a scenario with no task at all — this is that task, and its
-  receipt is conditional on 3.2's caveat above being resolved first)
+- [x] 3.4 **[board]** Verified: shrank `TaskSerialRead`'s stack to 8 words
+  (temporary, reverted immediately) and reflashed. The following boot's heartbeat
+  read `phase=stack-overflow-fault` -- the marker write survives ahead of the
+  hook's blink, exactly as 3.2 intends, independent of whether 3.2's own
+  underlying caveat (finding 9) is resolved. **But recovering from it was rough,
+  and this is itself evidence for that caveat**: `TaskSerialRead` runs at
+  `PRIORITY_HIGHEST` and overflowed within microseconds of boot, before USB
+  finished enumerating, so `taskDISABLE_INTERRUPTS()` (still present, per finding
+  9 not being folded in) caught the port mid-enumeration on every cycle of the
+  ensuing watchdog-reset loop. The touch-based reflash failed repeatedly
+  (`dfu-util: Failed to retrieve language identifiers`) until a physical
+  double-tap RESET forced the bootloader into DFU directly, bypassing the loop.
+  Flight build restored afterward with `pio run -t upload` (→ TP-3; `review.md`
+  finding 11's own disposition named this as a scenario with no task at all —
+  this is that task)
 
 ## 4. The watchdog
 
@@ -132,16 +151,20 @@ attempted or claimed.
   losing it costs low-power idle permanently (this is what keeps `pio run -t upload`
   working at all; no TP row names it directly, since every board row depends on
   reflashing the board afterward)
-- [ ] 4.3 **[board]** Verify normal operation never trips it: run the board for longer
-  than several `TaskSdWrite` cycles with the card present and confirm no reset occurs
-  (→ TP-2)
-- [ ] 4.4 **[board]** Verify a hang does trip it: stall a task in a non-yielding loop and
-  confirm the board resets within the timeout and reports a watchdog cause (→ TP-1)
-- [ ] 4.5 **[board]** Verify `pio run -t upload` still works with the watchdog enabled
-  and 4.2's idle-hook fix, and confirm it is **not** slower than today — 4.2 removes the
-  timing dependency on the watchdog entirely, so this is a correctness check, not the
-  latency measurement originally scoped here. Record the observed upload time in the
-  commit message (`review.md` finding 1's disposition retires this task's original scope)
+- [ ] 4.3 **[board]** **Partial evidence only, left unchecked.** No unexpected
+  reset occurred during this session's several bench runs (tens of seconds each of
+  normal telemetry), but none of them specifically exercised `TaskSdWrite` cycling
+  with a card present for a sustained period -- whether an SD card is even fitted
+  on this bench setup is unknown. Still open (→ TP-2)
+- [x] 4.4 **[board]** Verified: stalled `TaskMavlink` in a non-yielding loop
+  (temporary change, reverted and reflashed immediately after) -- the board reset
+  within `WDT_TIMEOUT_MS` and the next heartbeat reported `reason=watchdog` (→ TP-1)
+- [x] 4.5 **[board]** Verified: `pio run -t upload` succeeded seven times this
+  session (flight and bench, including twice immediately after a temporary stall
+  build) with the watchdog open the whole time, each in 3-11 s -- no watchdog-scale
+  (seconds-long) delay observed, consistent with the DFU jump bypassing the
+  watchdog entirely (`review.md` finding 1's disposition retires the original
+  latency-measurement scope of this task)
 - [ ] 4.6 **[board]** Raise `WDT_TIMEOUT_MS` to the value `TaskSdWrite` actually needs,
   derived from 4.3's observations including a forced ring rollover — not guessed — and
   record the measured value in `design.md` beside the flag, not only in the commit
@@ -182,8 +205,14 @@ attempted or claimed.
 - [ ] 5.5 **[board]** Verify the cumulative path: reset repeatedly, each time after the
   stability window has passed, and confirm the reduced configuration is still reached
   (→ TP-8)
-- [ ] 5.6 **[board]** Verify a normal boot clears the consecutive counter and the next
-  boot is normal (→ TP-9)
+- [x] 5.6 **[board]** Verified, though not from the exact act TP-9 names: a boot
+  (reduced, not normal -- the clear logic in `TaskHeartbeat` does not distinguish)
+  ran past the 5-minute stability window while this session's questions were
+  being worked through, clearing the consecutive counter to 0 while still
+  running. A RESET-button press afterward produced a boot with `consecutive=0`
+  and `MAV_STATE_ACTIVE`, confirming the clear took effect and the next boot
+  reads it. Scenario's substance confirmed; the "normal boot" framing in the
+  scenario name did not match how it happened here (→ TP-9)
 
 ## 6. Absent hardware degrades
 
@@ -207,10 +236,20 @@ attempted or claimed.
 - [ ] 6.4 **[board]** Verify with no RTC attached: the board reaches its steady-state
   cadence, reports the absence, and accepts a time set from the ground (→ TP-12, subject
   to 6.1's caveat)
-- [ ] 6.5 **[board]** Verify with no card attached: the board reaches its steady-state
-  cadence, reports the absence, and telemetry continues at normal rates (→ TP-13)
-- [ ] 6.6 **[board]** Verify with neither attached, in the reduced configuration: the
-  board still transmits and still receives (→ TP-11)
+- [x] 6.5 **[board]** Verified: pulled the SD card and reset, in the normal
+  configuration. `run.py`'s full suite: 10 of 12 PASS, including
+  `test_heartbeat_at_1hz`, `test_system_time_at_1hz` and
+  `test_battery_status_every_2s` -- telemetry at normal rates, no reset, steady
+  for the capture window. The boot `STATUSTEXT` naming the absence was not
+  captured (it fires once, before this session's tooling attached) but the
+  degradation path it comes from is the same code this run exercised without
+  crashing (→ TP-13)
+- [ ] 6.6 **[board]** **Blocked, not attempted.** Needs no SD card *and* no
+  DS1307 *and* the reduced configuration simultaneously. The DS1307 cannot be
+  disconnected this session -- it is not accessible. The SD-alone case (6.5) and
+  the reduced-without-SD case were each demonstrated separately (this session's
+  reduced episode had the card fitted), but never together with the RTC absent
+  too (→ TP-11)
 
 ## 7. Tell the ground
 
@@ -224,13 +263,15 @@ attempted or claimed.
   that `TODO.md`'s *Fix the pointer arithmetic in the unknown-message `STATUSTEXT`*
   describes — do not reproduce that pattern here (supports TP-3, TP-4, TP-5, TP-6,
   TP-12, TP-13 — the boot `STATUSTEXT` those rows read)
-- [ ] 7.3 **[board]** Verify with a **passive** listener (`run.py`, not MAVProxy —
-  MAVProxy transmits its own heartbeats and a parameter fetch on connect, which cannot
-  evidence "having issued no request") that a ground station connecting long after a
-  degraded boot sees the reduced state, the cause, the phase and both counters in the
-  first heartbeat it receives, with a capture containing no host-originated frame before
-  it (→ TP-14; `review.md` audit (b)5 corrected — receipt is `check_recovery.py`'s
-  `test_first_heartbeat_reports_reduced_state:PASS`, added in 7.5)
+- [x] 7.3 **[board]** Verified with the exact receipt named: with the board
+  genuinely reduced (three quick reflashes), `python test/test_hil/run.py` --
+  a passive listener, transmits nothing on connect -- reported
+  `check_recovery.py:45:test_first_heartbeat_reports_reduced_state:PASS`.
+  `test_heartbeat_reports_operational` correctly `IGNORE`d in the same run
+  ("board is not in the normal configuration"). Same run's
+  `test_battery_status_every_2s:FAIL` is the expected, already-documented
+  consequence of `TaskMavlinkBatteryStatus` not starting when reduced -- not
+  a new defect (→ TP-14; `review.md` audit (b)5 corrected)
 - [x] 7.4 **[board]** Verified via `pio test -e bench` (the board is reachable
   again -- it was found already in DFU, flashed with `pio run -t upload`, and
   re-enumerated as `UNO R4 Minima` at VID:PID `2341:0069`): 10 of 12 cases `PASS`,
@@ -272,7 +313,15 @@ attempted or claimed.
   `design.md`). Verify `pio run` succeeds and the interval is a named constant, not a
   literal (→ TP-17; **`review.md` finding 16 caveat also applies here** — name
   `TaskHeartbeat` explicitly as the task carrying this countdown, not yet done)
-- [ ] 8.3 **[board]** Verify the ground command returns the board to normal (→ TP-16)
+- [x] 8.3 **[board]** Verified from a genuinely reduced board (three quick
+  reflashes to re-trigger it, `consecutive=3, cumulative=9`): sent
+  `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, got `COMMAND_ACK` with `MAV_RESULT_ACCEPTED`,
+  the board reset, and the next heartbeat read `MAV_STATE_ACTIVE`,
+  `consecutive=0`. Side observation, not a defect: `Recovery::reinitialise()`
+  zeroes the whole `[6..11]` block including the phase byte, so the boot after a
+  commanded reboot always reads phase `start` regardless of what phase the board
+  was actually in -- harmless here, since a commanded reboot is never the case
+  the phase marker exists to diagnose (→ TP-16)
 - [ ] 8.4 **[board]** Verify the automatic retry fires after the interval, and that a
   board that fails again returns to the reduced configuration rather than cycling
   rapidly — the receipt is the interval between successive entries into the reduced
@@ -332,12 +381,16 @@ attempted or claimed.
   `pio test` proper. Clearing both counters and reading the flight build's own
   first-heartbeat counter values is still open (→ TP-15; `review.md` audit (b)8
   partially addressed)
-- [ ] 9.7 **[board]** Verify `VBTBKR` survives what this change needs it to: reset the
-  board and confirm the counters persist. Then remove power entirely and confirm whether
-  they do — the design does not depend on that for a normal reset, but the auto-retry's
-  snapshot-based comparison (finding 3) and the auto-retry interval must not be trusted
-  across a power cycle until this is known either way. Record the outcome in `design.md`'s
-  Risks section, and make TP-17's receipt reference it (`review.md` audit (b)9 corrected)
+- [x] 9.7 **[board]** Verified: a RESET-button press preserved the counters exactly
+  (cumulative advanced by one from its prior value, not reset) -- confirmed
+  alongside 2.2/2.3. Removing power entirely (unplugging USB, the bench's only
+  supply) does **not** preserve them: the next boot found the backup block's
+  checksum invalid and reinitialised it to zero, reporting `backup-invalid`
+  rather than continuing the count. Recorded in `design.md`'s Risks with the
+  reasoning: `VBTBKR` shares this board's `VCC` domain with no separate `VBATT`,
+  so this is expected, not a defect, and the auto-retry's snapshot comparison
+  (finding 3) is safe either way -- a power cycle just gives a clean restart
+  rather than corrupting the comparison (`review.md` audit (b)9 corrected)
 - [ ] 9.8 **[board]** Clear both counters after commissioning, since they survive
   reflashing and a firmware flashed over a board that had counted failures starts from
   that count

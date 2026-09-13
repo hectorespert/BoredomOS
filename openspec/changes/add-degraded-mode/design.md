@@ -346,13 +346,25 @@ but as the human-readable addition rather than the mechanism.
 
 ## Risks / Trade-offs
 
-- **`VBTBKR` may not survive losing VCC** → It needs the VBATT domain powered, and how
-  the Minima wires that is not established. Surviving a *reset* is certain, because the
-  bootloader's double-tap depends on it, and that is all the counters require. A design
-  that needed them to survive a full power cycle would be resting on something
-  unverified; this one does not, and arguably should not want to — a cold start after the
-  battery recovers is a reasonable fresh chance. **Must be checked on the board before
-  the auto-retry interval is trusted.**
+- **Checked on the board (task 9.7): `VBTBKR` does not survive losing VCC, and this
+  is what the design already assumed rather than needed.** Unplugging USB power on
+  the bench (the board's only supply there) and reconnecting produced a boot that
+  read the backup block as invalid — checksum mismatch, correctly reinitialised to
+  all-zero and reported as `backup-invalid` rather than `power-on`. A RESET-button
+  press immediately afterward, with power never removed, preserved the block
+  exactly: the cumulative count advanced by one from where it stood, reported as
+  `external/unknown`. So `VBTBKR` survives every reset this design counts on —
+  watchdog, software, external, and (not yet directly tested, but on the same
+  power rail as external) low-voltage — and only a true power-off wipes it.
+  **Consequence for the reason byte:** `power-on` and `backup-invalid` are not two
+  causes that compete for the same boot on this hardware; they are the same
+  physical event described two ways, since `VBTBKR` shares `VCC`'s domain with no
+  separate `VBATT` supply. Reporting `backup-invalid` for that boot loses no
+  distinguishing information `power-on` would have carried and gains the more
+  actionable fact — the counters cannot be trusted this boot — so this is not
+  changed. The auto-retry interval survives every reset type it needs to
+  (everything except a full power cycle, which the design already treats as a
+  legitimate fresh start, not a case it needs to remember through).
 - **`src/main.cpp` becomes conditional, and it is the one file with no test** → The
   concentration is deliberate but it is still concentration. Every path has to be
   exercised on the board, and there are now four: normal, no RTC, no card, reduced.
@@ -416,3 +428,14 @@ the value `TaskSdWrite` needs.
   `add-usb-dual-protocol`.
 - Whether the reduced configuration should eventually be able to report *which* task
   stopped yielding, which needs the per-task liveness scheme rejected above.
+- **Why one `pio run -t upload` reported `reason=watchdog` instead of `software`.**
+  Observed once during board testing (task 2.2/4.4/3.4's guided session): every
+  other upload that session reported `software`, matching the expectation that
+  `goBootloader()`'s own `NVIC_SystemReset()` sets `RSTSR1.SWRF`, but one upload
+  — issued while the board was mid-cycle in an unrelated watchdog-reset loop from
+  a separate test — came back `watchdog` instead. Not reproduced deliberately,
+  and not understood: whether the touch-triggered `goBootloader()` call raced the
+  loop's own watchdog underflow, or the bootloader's own hand-off to the
+  application involves a watchdog-based jump under some condition, is unresolved.
+  Does not affect any conclusion drawn from that session, since a "watchdog"
+  report is still correctly decoded and still a non-deliberate reset either way.
