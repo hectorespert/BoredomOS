@@ -35,27 +35,25 @@ dangles.
 Do not open a change for an entry that is not being implemented, and do not restate the
 architecture in a spec.
 
-A change is more than the four artifacts `/opsx:propose` names. The schema is `boredomos`,
-forked so the chain neither starts at the task list nor ends at it. **`test-plan.md` comes
-before `tasks.md`**, written by the qa engineer: one row per scenario saying by what method
-it will be demonstrated and what the receipt is, decided before anyone writes the steps
-that claim to do it. Every row is then named by at least one task, which is the chain a
-coverage audit walks. **`review.md` is written before any code**, by the
-agents under `.claude/agents/`, and `apply` is blocked until it exists — self-review has
-shipped defects here more than once. **`verify.md` is written after apply** and audits what
-was demonstrated rather than what was ticked: the receipt behind every tick, coverage read
-off the delta rather than off the tick count, and the review's findings actually landing.
-It closes on a canonical `DECISION:` line, one of `PASS`, `PASS_WITH_WARNINGS`,
-`PASS_PENDING_BOARD` or `FAIL`. `openspec/config.yaml` carries the rules for each artifact
-and the guidance for apply and archive.
+A change is the four artifacts `/opsx:propose` names — proposal, specs, design, tasks —
+using the default `spec-driven` schema. `openspec/config.yaml` carries the rules for each
+artifact and the guidance for apply and archive.
 
-Those agents are a roster by domain — the program, the device, the requirements baseline,
-how an obligation gets demonstrated and whether it was, flying it from the ground, and
-whether the data is worth having. Each file says what it owns and where it stops, so read
-that rather than guessing from the name. All of them take part in `review`, on every
-change and not scaled down because a change looks small; `verify` uses a narrower set.
-They are equally there to be consulted while exploring or proposing, and none of them acts
-on its own.
+There used to be a heavier custom schema, `boredomos`, forked so the chain neither started
+at the task list nor ended at it: a qa-written `test-plan.md` ahead of `tasks.md`, one row
+per scenario naming its method and receipt; a `review.md` from six domain-specific reviewer
+agents under `.claude/agents/`, blocking `apply` until it existed; and a `verify.md` audit
+after apply, closing on a `DECISION:` line before archiving. **It is retired** — the schema
+and the six-agent roster both cost more than this project can sustain running on every
+change. Changes now use `spec-driven` and are reviewed, applied and archived directly,
+without that apparatus, which means without the independent-review guarantee it existed
+for — read anything written under this arrangement with that in mind.
+
+`openspec/changes/add-degraded-mode/` still carries a `test-plan.md` and a `review.md` from
+when it used the old schema, migrated to `spec-driven` after the fact. They are not
+tracked artifacts anymore, just historical record, but `tasks.md` in that change cites
+their row ids and finding numbers throughout — don't delete either file without checking
+what in `tasks.md` goes dark.
 
 ## Commands
 
