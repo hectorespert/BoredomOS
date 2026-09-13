@@ -151,11 +151,12 @@ attempted or claimed.
   losing it costs low-power idle permanently (this is what keeps `pio run -t upload`
   working at all; no TP row names it directly, since every board row depends on
   reflashing the board afterward)
-- [ ] 4.3 **[board]** **Partial evidence only, left unchecked.** No unexpected
-  reset occurred during this session's several bench runs (tens of seconds each of
-  normal telemetry), but none of them specifically exercised `TaskSdWrite` cycling
-  with a card present for a sustained period -- whether an SD card is even fitted
-  on this bench setup is unknown. Still open (→ TP-2)
+- [x] 4.3 **[board]** Verified with the SD card fitted and detected
+  (`sdCardAvailable`, normal configuration): 40 s of continuous, uninterrupted
+  operation, `time_boot_ms` climbing monotonically with no restart -- roughly 40
+  `TaskSdWrite` cycles at its 1 Hz production rate. `run.py`'s full suite passed
+  all 10 applicable cases in the same session, including
+  `test_battery_status_every_2s` and `test_heartbeat_at_1hz` (→ TP-2)
 - [x] 4.4 **[board]** Verified: stalled `TaskMavlink` in a non-yielding loop
   (temporary change, reverted and reflashed immediately after) -- the board reset
   within `WDT_TIMEOUT_MS` and the next heartbeat reported `reason=watchdog` (→ TP-1)
@@ -196,15 +197,20 @@ attempted or claimed.
   task is still declared and counted whether or not it is started, and that
   `scripts/ram_budget.py` reports unchanged headroom (supports TP-7, TP-8, TP-10, TP-11,
   TP-17 — the boot-decision mechanism those rows exercise)
-- [ ] 5.4 **[board]** Verify the trigger: force three consecutive resets before the
-  stability window using either three watchdog resets from a stall build, or three
-  software resets from a path whose deliberate-reset marker is left unset — not the
-  RESET button, which the requirement forbids from advancing the count, and not a power
-  cycle, which may clear `VBTBKR` entirely (see 9.7) — and confirm the fourth boot
-  starts reduced (→ TP-7; `review.md` audit (b)4 corrected)
-- [ ] 5.5 **[board]** Verify the cumulative path: reset repeatedly, each time after the
-  stability window has passed, and confirm the reduced configuration is still reached
-  (→ TP-8)
+- [x] 5.4 **[board]** Verified: this session's earliest guided round (2.2/4.4's
+  watchdog stall, followed by a plain reflash) produced three non-deliberate
+  resets in a row -- none of them the RESET button or a power cycle -- and the
+  next boot correctly started reduced (`MAV_STATE_CRITICAL`, `auto_enabled=False`,
+  `consecutive=3`). Confirmed conversationally at the time but the checkbox was
+  missed; corrected here (→ TP-7; `review.md` audit (b)4 corrected)
+- [x] 5.5 **[board]** Verified, isolating the cumulative path cleanly: this
+  session's accumulated resets (a mix of external, software and watchdog, not
+  all separated by a full stability window as TP-8's act literally describes)
+  brought the board to `consecutive=2, cumulative=9`. One more reflash pushed
+  `cumulative` to 10 while `consecutive` stayed at 2 -- below its own
+  threshold -- and the board still started reduced (`MAV_STATE_CRITICAL`),
+  confirming the cumulative count triggers the configuration independently of
+  the consecutive one (→ TP-8)
 - [x] 5.6 **[board]** Verified, though not from the exact act TP-9 names: a boot
   (reduced, not normal -- the clear logic in `TaskHeartbeat` does not distinguish)
   ran past the 5-minute stability window while this session's questions were
@@ -391,6 +397,9 @@ attempted or claimed.
   so this is expected, not a defect, and the auto-retry's snapshot comparison
   (finding 3) is safe either way -- a power cycle just gives a clean restart
   rather than corrupting the comparison (`review.md` audit (b)9 corrected)
-- [ ] 9.8 **[board]** Clear both counters after commissioning, since they survive
-  reflashing and a firmware flashed over a board that had counted failures starts from
-  that count
+- [x] 9.8 **[board]** Done as this session's own wrap-up: the board sat at
+  `cumulative=10` (reduced) from this session's testing, so before restoring the
+  flight build the ground command was sent to clear both counters
+  (`consecutive=0, cumulative=1` on the next boot), then `pio run -t upload`
+  restored the flight firmware -- leaving the board operational and not
+  carrying this session's fault history into whatever runs next
