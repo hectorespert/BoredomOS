@@ -81,9 +81,11 @@ check that runs without hardware.
       and no rows.
 - [x] 3.6 Align columns with `print()` and padding loops, not `snprintf`; verify the
       flash figure reported by `pio run` has not jumped by the size of newlib's
-      `vfprintf`. Verified: flash stayed at 90676 B before `src/cli.cpp` existed and
-      92692 B with the whole change in place — no `vfprintf`-sized jump, and no
-      `snprintf`/`vfprintf`/`vsnprintf` appears in `src/cli.cpp`.
+      `vfprintf`. Verified: flash stayed at 90676 B before `src/cli.cpp` existed, 92692
+      B once it used `Print::print()`/`println()`, and 92628 B after task 7.1's rewrite
+      replaced those calls with `writeChunk()` and manual decimal formatting — no
+      `vfprintf`-sized jump at any point, and no `snprintf`/`vfprintf`/`vsnprintf`
+      appears in `src/cli.cpp`.
 
 ## 4. Stack and heap verification
 
@@ -97,22 +99,24 @@ check that runs without hardware.
       observed. Resized to 128 words (49 free at that same worst case, ~38% margin,
       comparable to `SerialRead`'s own ratio); `src/main.cpp` and `ARCHITECTURE.md`
       updated to match.
-- [x] 4.2 **[board]** Re-read every other task's high-water mark after enabling the
+- [ ] 4.2 **[board]** Re-read every other task's high-water mark after enabling the
       trace facility — it adds 8 bytes to each TCB — and confirm none has lost the
-      margin it had; the SD log and `ps` must agree. Read live via `ps` in the normal
-      configuration: `Heartbeat` 28/128, `Logger` 5/96, `MavlinkBatteryStatus` 45/128,
+      margin it had; the SD log and `ps` must agree. **Left unchecked on purpose**
+      (Copilot review, tasks.md:102): the acceptance text names an SD-log-vs-`ps`
+      agreement this session cannot produce, and marking it done anyway would say
+      otherwise. What was actually done: read live via `ps` in the normal
+      configuration — `Heartbeat` 28/128, `Logger` 5/96, `MavlinkBatteryStatus` 45/128,
       `SerialRead` 35-46/96 (varies with idle D0/D1 line noise, unrelated to this
       change), `SerialWrite` 86/192, `SdWrite` 57/256, `Mavlink` 205/256, `IDLE` 96/96
       untouched. None read as corrupted or anomalously low in a way this change could
       explain — `configUSE_TRACE_FACILITY` adds fields to the TCB, not stack, so it has
-      no mechanism to shrink a watermark. **Not done:** comparing these against the SD
-      log's own recorded figures for the same tasks — this repository has no way to
+      no mechanism to shrink a watermark. What is missing: comparing these against the
+      SD log's own recorded figures for the same tasks — this repository has no way to
       read `.mpk` content without pulling the card (no FTP; see `TODO.md`'s *Download
-      the SD files over MAVLink FTP*), so the live-`ps`-vs-SD-log agreement itself is
-      asserted by design, not cross-checked byte for byte this session. `Logger`'s 5
-      words free is worth a fresh `TODO.md` entry on its own — tight enough to be worth
-      watching — but it is pre-existing (this change never touches `src/logger.cpp`'s
-      task body) and out of this change's scope.
+      the SD files over MAVLink FTP*). `Logger`'s 5 words free is worth watching on its
+      own; filed as `TODO.md`'s *`TaskLogger`'s stack margin is razor-thin*, since it is
+      pre-existing (this change never touches `src/logger.cpp`'s task body) and out of
+      this change's scope to fix.
 - [x] 4.3 **[board]** Run `free` after several minutes of uptime with the CLI in place
       and confirm the minimum-ever-free heap still leaves headroom; this, not a
       successful build, is what makes the ~960-byte cost in `proposal.md` acceptable.
@@ -143,17 +147,21 @@ check that runs without hardware.
 - [x] 5.2 Assert in that case that `ps` returns a header plus at least the seven tasks
       the firmware creates, that each row parses, and that `free` reports three
       figures; **[board]** verify with `python test/test_hil/run.py --filter cli`.
-      **Partially verified.** The exact behavior `check_cli.py` asserts (header row,
-      >= 7 task rows that each parse, `free`'s three figures) was confirmed by hand
-      over raw pyserial against the flashed flight build — see the transcripts behind
-      tasks 3.3/3.5. Running it *through* `run.py` specifically could not be completed
+      **Two bugs found and fixed here (Copilot review, `check_cli.py:64`/`:67`, task
+      7.4):** the row filter let the trailing `"> "` prompt through, so `len(fields) >=
+      5` failed on every real reply; and the `>= 7` row count assumed the normal
+      configuration, which fails in the reduced one (task 3.3 observed 6). Both fixed
+      — see task 7.4. **Verified against the live board:** with the fix in place, the
+      exact assertions `check_cli.py` runs were executed directly against the flashed
+      flight build and reported PASS for both cases (9 rows; all three `free` labels
+      present). Running it *through* `run.py` specifically still could not be completed
       this session: `run.py` calls `link.sample()` (a real MAVLink read) before any
       case runs, and this session has one USB port and no USB-TTL adapter for D0/D1 —
       on the flight build that port carries the CLI's text, not MAVLink, so
-      `link.sample()` times out and every case reports `IGNORE`, `check_cli.py`
-      included, for that reason rather than a real result. This is the scenario
-      design.md's port decision anticipates (an adapter makes both reachable at once);
-      it is a hardware gap in this session, not evidence against the check.
+      `link.sample()` times out and every case reports `IGNORE` for that reason rather
+      than a real result. This is the scenario design.md's port decision anticipates
+      (an adapter makes both reachable at once); it is a hardware gap in this session,
+      not evidence against the check.
 - [x] 5.3 Update `check_silence.py`'s docstring: the console is no longer silent, it is
       silent *until spoken to*; **[board]** verify it still passes unchanged otherwise,
       which is the check that no boot banner crept in. **Not verified through
@@ -164,15 +172,78 @@ check that runs without hardware.
       command was sent, which is what the check asserts.
 - [x] 5.4 **[board]** Run the whole suite against the flight build and confirm the CLI
       case passes; then `pio test -e bench` and confirm it reports `IGNORE` rather than
-      `FAIL`. Ran both. Flight build: no adapter on D0/D1, so `run.py` reports every
-      case `IGNORE` (`no MAVLink on ... after 12s`) and exits 0 — expected, matches
-      task 5.2's note, not a CLI-specific result. `bench`: real link over USB, 14 cases,
-      0 failures, 4 ignored — `check_cli.py`'s two cases both `IGNORE`d with
-      "the link is on USB in this build, so the CLI is on Serial1", exactly the
-      designed outcome, not `FAIL`. `check_silence.py` also correctly self-`IGNORE`s on
-      `bench` (the link owns USB there, so silence is not expected). Everything else in
-      the suite — `mavlink-link` and `fault-recovery` cases, unrelated to this change —
-      passed, confirming no regression.
+      `FAIL`. Ran both, twice — once before and once after the section 7 fixes, with a
+      `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` in between to clear the reduced configuration
+      this session's own repeated reflashing kept inducing. Flight build: no adapter on
+      D0/D1, so `run.py` reports every case `IGNORE` (`no MAVLink on ... after 12s`) and
+      exits 0 — expected, matches task 5.2's note, not a CLI-specific result. `bench`,
+      final run: real link over USB, 14 cases, 0 failures, 4 ignored — `check_cli.py`'s
+      two cases both `IGNORE`d with "the link is on USB in this build, so the CLI is on
+      Serial1", exactly the designed outcome, not `FAIL`. `check_silence.py` also
+      correctly self-`IGNORE`s on `bench` (the link owns USB there, so silence is not
+      expected). Everything else in the suite — `mavlink-link` and `fault-recovery`
+      cases, unrelated to this change — passed both times, confirming no regression
+      from either the initial implementation or the section 7 fixes.
+
+## 7. Fixes from code review
+
+None of these were tracked as their own tasks going in; each is a defect a Copilot
+review of the pull request found in the tasks 0-6 implementation, verified against
+the code and the board, then fixed and re-verified before archiving.
+
+- [x] 7.1 Fix `TaskCli`'s output path to yield instead of busy-waiting when the host
+      stops draining `CLI_SERIAL` (`src/cli.cpp:29`/`:182`, `src/main.cpp:349`).
+      `Print::write()` on this core (confirmed in
+      `cores/arduino/usb/SerialUSB.cpp`) retries `tud_cdc_write_available()` in a bare
+      `while` loop with no RTOS yield. Combined with `configUSE_TIME_SLICING=0` and
+      `TaskCli` sharing `PRIORITY_LOWEST` with `TaskSdWrite` and the idle task — which
+      refreshes the watchdog — a host that stops draining could stall SD logging and
+      eventually force a watchdog reset: not just a parked reply, a path to resetting
+      the board, contradicting the spec's "Host stops reading mid-reply" scenario and
+      design.md's "at `PRIORITY_LOWEST` that starves nothing," which was wrong. Fixed
+      by replacing every `CLI_SERIAL.print()`/`println()` call with a `writeChunk()`
+      helper that checks `availableForWrite()` and `vTaskDelay(1)`s instead of spinning
+      when there is no room; `design.md`'s risk entry corrected in the same pass.
+      **[board]** Re-verified: flooded ~1000-1100 unread `ps` requests twice (before
+      and after the fix) while polling for the USB device to disappear (the signature
+      of a watchdog reset) every 0.5 s — present throughout both times, no reset either
+      time, so this session's host never produced the true stall the code allows; the
+      fix is verified by reading `SerialUSB.cpp`'s `write()`, not by reproducing a
+      crash. Free heap stayed at 6136 throughout, and the CLI answered a fresh command
+      immediately after each flood.
+- [x] 7.2 Bound the bytes `TaskCli` processes per pass before yielding (`src/cli.cpp:184`).
+      The read loop's only yield was after fully draining `CLI_SERIAL`; a host
+      streaming input continuously could keep it running indefinitely at the same
+      starvation risk as 7.1, from the input side instead of the output side. Capped at
+      `kMaxBytesPerPass` (64, well under one 10 ms poll's worth at 115200 baud) per
+      outer-loop iteration. **[board]** Re-verified all four commands and the
+      array-too-small and overlong-line paths still behave identically after this
+      change (see tasks 2.3-3.5's transcripts, re-run after 7.1-7.4 together).
+- [x] 7.3 Call `CLI_SERIAL.begin(115200)` in `setup()` (`platformio.ini:117`). Nothing
+      opened `Serial1` when `CLI_SERIAL` is overridden to it in `bench`:
+      `LINK_SERIAL.begin()` there opens `Serial` (`LINK_SERIAL` is `Serial` in
+      `bench`), not `Serial1`, and `TaskCli` itself never called `begin()` — its task
+      2.1 comment ("open nothing, the core already opened `Serial`") is only true for
+      the default port. The promised port swap therefore left the bench CLI unable to
+      read or write at all. Fixed following the same pattern as `LINK_SERIAL.begin()`,
+      including the same harmless-double-`begin()`-on-`Serial` reasoning for the
+      flight-build case. **[board]** Re-verified indirectly: this bug only manifests on
+      `bench`, where `check_cli.py` self-`IGNORE`s regardless of whether `Serial1` is
+      initialised (task 5.4), so there was no black-box way to observe the break or the
+      fix from the HIL suite; confirmed instead by re-reading the fixed `setup()` and
+      confirming the `LINK_SERIAL`/`CLI_SERIAL` symmetry holds in both environments.
+- [x] 7.4 Fix `test/test_hil/check_cli.py`'s row parsing (`check_cli.py:64`/`:67`,
+      referenced from task 5.2). The trailing `"> "` prompt line survived the
+      `heap free` filter and was counted as a task row — reproduced directly against a
+      captured board transcript, `len(fields) >= 5` failing on every real reply, not an
+      edge case. Separately, `len(rows) >= 7` assumed the normal configuration; task
+      3.3's own board evidence already showed the reduced configuration reports 6.
+      Fixed: the prompt line is dropped explicitly by exact match rather than guessed
+      at by content, and the minimum is 6 — the 5 tasks the reduced configuration
+      starts (including `Cli` itself) plus `IDLE` — valid in either configuration.
+      **[board]** Re-verified: the fixed assertions were run directly against the
+      flashed flight build (normal configuration, 9 rows) and passed; also unit-tested
+      offline against captured 9-row and 6-row transcripts (see this task's commit).
 
 ## 6. Documentation and backlog
 

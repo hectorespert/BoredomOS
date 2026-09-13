@@ -3,6 +3,7 @@
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
 #include <Link.h>
+#include <Cli.h>
 #include <MAVLink.h>
 #include <Data.h>
 #include <Battery.h>
@@ -82,11 +83,14 @@ StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
 
 // Measured on the board (task 4.1): ps's own row for this task never dropped
-// below 113 words free of the provisional 192 while exercising every command,
-// including the overlong-line and array-too-small error paths -- 79 words used
-// at the deepest point observed. 128 keeps a comparable margin to the other
-// light tasks (SerialRead's own watermark runs 35-46 of 96) at less than the
-// provisional cost.
+// below 113 words free of the provisional 192 while exercising every command.
+// 128 keeps a comparable margin to the other light tasks (SerialRead's own
+// watermark runs 35-46 of 96) at less than the provisional cost. Re-measured
+// after src/cli.cpp's write path was rewritten to yield instead of spin on a
+// stalled host (design.md's "A blocking write stalls the task", Copilot
+// review): the rewrite costs its own stack, down to 38 of 128 free under the
+// same flood -- more than before, but still comfortably inside 128, so the
+// size was kept rather than grown again.
 StackType_t cliStack[128];
 StaticTask_t cliTcb;
 
@@ -305,6 +309,14 @@ void setup()
   // on every boot, reduced included.
   LINK_SERIAL.begin(LINK_BAUD);
   Recovery::setPhase(Recovery::BootPhase::LinkDone);
+
+  // Same reasoning as LINK_SERIAL above: begin()ing Serial a second time here
+  // is harmless (the flight build has CLI_SERIAL == Serial), but on bench,
+  // where CLI_SERIAL is overridden to Serial1, nothing else ever opens that
+  // UART -- TaskCli assumes its port already answers, which is only true for
+  // Serial (Copilot review, platformio.ini:117). 115200 matches the console's
+  // fixed rate; CLI_SERIAL has no separate baud override, unlike LINK_SERIAL.
+  CLI_SERIAL.begin(115200);
 
   systemTimeAvailable = systemTime.begin();
   Recovery::setPhase(Recovery::BootPhase::ClockDone);

@@ -61,10 +61,20 @@ def test_cli_ps_lists_every_task(link):
     assert lines, f"no reply to 'ps': {reply!r}"
     assert lines[0].startswith("ID"), f"unexpected ps header: {lines[0]!r}"
 
-    rows = [line for line in lines[1:] if not line.startswith("heap free")]
-    # At least the seven tasks the firmware creates in the normal
-    # configuration, plus this change's own CLI task -- see tasks.md task 5.2.
-    assert len(rows) >= 7, f"expected at least 7 task rows, got {len(rows)}: {rows}"
+    # Every reply ends with the "> " prompt (src/cli.cpp's printPrompt()), which
+    # is not a task row -- drop it explicitly rather than by content-guessing,
+    # since it does not start with "heap free" and would otherwise survive that
+    # filter and fail the row-parsing assertion below on every real reply.
+    body = lines[1:]
+    if body and body[-1].strip() == ">":
+        body = body[:-1]
+    rows = [line for line in body if not line.startswith("heap free")]
+
+    # The reduced configuration starts only 5 firmware tasks (including Cli
+    # itself) plus IDLE -- 6 rows is the floor in any configuration, not the 7
+    # (now 9, with Cli) the normal configuration happens to show. See tasks.md
+    # task 3.3, which observed both counts on this board.
+    assert len(rows) >= 6, f"expected at least 6 task rows, got {len(rows)}: {rows}"
 
     for row in rows:
         fields = row.split()
