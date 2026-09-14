@@ -126,17 +126,48 @@ The seam is placed **above the transport**, because that is the only thing the t
 paths genuinely disagree about — one allocates and queues, the other packs into a
 static buffer and writes.
 
-`include/Mavlink.h` declares, and `src/mavlink.cpp` defines:
+`include/MavlinkShared.h` declares, and `src/mavlink.cpp` defines — named `MavlinkShared`
+rather than the originally proposed `Mavlink`, found while implementing task 2.1: on
+this project's case-insensitive dev filesystem (macOS), `include/Mavlink.h` and the
+`okalachev/MAVLink` library's own `MAVLink.h` resolve to the same path, and the
+project's `include/` directory wins the lookup — silently replacing the entire
+protocol library header with this one's few declarations and breaking every file that
+expects the real one. A case-sensitive CI would not have caught this locally; it
+surfaced immediately on `pio run`.
 
 ```c
-void mavlinkBuildHeartbeat(mavlink_message_t *out);
-void mavlinkBuildSystemTime(mavlink_message_t *out);
-void mavlinkBuildBatteryStatus(mavlink_message_t *out);
-void mavlinkBuildStatusText(mavlink_message_t *out, uint8_t severity, const char *text);
+void mavlinkBuildHeartbeat(mavlink_message_t *out, uint8_t chan);
+void mavlinkBuildSystemTime(mavlink_message_t *out, uint8_t chan);
+void mavlinkBuildBatteryStatus(mavlink_message_t *out, uint8_t chan);
+void mavlinkBuildStatusText(mavlink_message_t *out, uint8_t chan, uint8_t severity, const char *text);
 
-// Acts on msg. Returns true when a reply must be sent, having filled *reply.
-bool mavlinkHandleInbound(const mavlink_message_t *msg, mavlink_message_t *reply);
+// Acts on msg. Returns true when a reply must be sent, having filled *reply
+// on replyChan. *rebootRequested is set, not acted on, when msg commands one.
+bool mavlinkHandleInbound(const mavlink_message_t *msg, uint8_t replyChan,
+                           mavlink_message_t *reply, bool *rebootRequested);
 ```
+
+Two parameters beyond the original sketch, both found while implementing section 4,
+not anticipated here:
+
+- **`chan` on every builder, and `replyChan` on `mavlinkHandleInbound`.** The plain
+  `mavlink_msg_*_pack()` functions this design originally called go through
+  `mavlink_finalize_message()`, which hardcodes `MAVLINK_COMM_0`
+  (`mavlink_helpers.h`) — every outbound message would have shared one sequence
+  counter regardless of which port sent it, directly contradicting task 4.4's "own
+  sequence numbering, independent of `Serial1`'s". The library's `*_pack_chan()`
+  variants take the channel explicitly and thread it into per-channel sequence
+  state; switching to those is what makes independent numbering real rather than
+  assumed. Serial1 passes `MAVLINK_COMM_0` (matching `src/serial.cpp`'s existing
+  inbound parser channel); the USB endpoint passes `MAVLINK_COMM_1`. Verified on the
+  board via `bench`: `HEARTBEAT` sequence numbers advance correctly on
+  `MAVLINK_COMM_0` post-change, and the whole HIL suite still passes.
+- **`bool *rebootRequested`.** `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` needs its ack sent
+  *before* `NVIC_SystemReset()`, and only the caller knows when that is safe for its
+  own transport — `mavlinkHandleInbound` cannot call the reset itself without either
+  transport-specific knowledge or losing the ack. It fills the reply and signals the
+  reboot without acting on it, matching the boolean-return shape the rest of the
+  function already uses.
 
 Each builder fills a `mavlink_message_t` the **caller** provides, which is what makes
 one function serve both transports without a copy:
@@ -189,7 +220,7 @@ working parser on the radio link, for a saving measured in one memcpy per frame.
 | `Serial1` UART | `src/serial.cpp` | untouched |
 | `serialWriteQueue` / `serialReadQueue` | `src/serial.cpp` drains, producers in `src/mavlink.cpp` | untouched; USB does not use them |
 | SD card, clocks, ADC | as before | untouched |
-| MAVLink message construction and inbound semantics | `src/mavlink.cpp`, via `include/Mavlink.h` | one definition, two callers |
+| MAVLink message construction and inbound semantics | `src/mavlink.cpp`, via `include/MavlinkShared.h` | one definition, two callers |
 
 The console task reads battery and time through the same library wrappers the existing
 producers use, which are the designated single owners of those resources.
@@ -210,11 +241,21 @@ strictly better evidence than it had before.
 
 - **The one-way switch collides with the HIL suite.** `run.py` opens the port and
   starts framing immediately, which would put USB in MAVLink mode and make the CLI case
-  from `add-console-cli` unreachable for the rest of the run. → The CLI case must run
-  before any MAVLink case on that port, or the runner must reset the board between the
-  two groups. The UNO R4 resets on a 1200-baud touch of the CDC port, which gives a
-  clean mechanism; the task list picks one and pins the ordering explicitly rather than
-  leaving it to file-discovery order.
+  from `add-console-cli` unreachable for the rest of the run. → **Resolved by ordering
+  alone, not by a reset between groups.** A per-group reset was the original plan here,
+  on the assumption that a 1200-baud touch of the CDC port gives a clean, cheap reset
+  back to a running, CLI-mode board. Task 1.3 found that assumption false: the touch
+  does trigger `NVIC_SystemReset()` (confirmed in this core's `boot.cpp`), but first it
+  writes the same `DOUBLE_TAP_MAGIC` the physical RESET button's double-tap writes, so
+  the RA4M1's ROM bootloader takes over and waits **indefinitely** for a firmware
+  upload — confirmed on the board: the USB device stayed gone for 50+ seconds and only
+  returned after an actual `pio run -t upload`. Using it as a per-group reset would
+  leave the board running no firmware at all between HIL groups, not a lightweight
+  reset. Since `pio test` already reflashes before every run — one fresh boot, CLI mode
+  from power-on — the actual requirement is simpler than "reset between groups": run
+  every case that needs CLI mode before the first case that frames a valid MAVLink
+  message on the same port, once, in that one boot. `run.py`'s case ordering is what
+  enforces this (task 6.3), and nothing needs CLI mode again afterward within that run.
 - **Losing `check_silence.py` loses a real check.** It is what proved the link had
   actually left USB. → Its replacement is the pair of cases asserting that USB stays in
   CLI mode until a valid frame arrives and switches after one; that is a stronger
@@ -225,19 +266,37 @@ strictly better evidence than it had before.
   it connected, disconnected, and with the host not draining. madflight ships a runtime
   warning for a transmit buffer under 255 bytes, which suggests the figure varies enough
   between cores to be worth measuring rather than assuming.
-- **Stack growth on a task that formats text and now also packs frames.** → The 384-word
-  figure is an estimate; `ps` reports the console task's own row, and
-  `configCHECK_FOR_STACK_OVERFLOW=2` is on.
+- **Stack growth on a task that formats text and now also packs frames.** → This was
+  underestimated, not just estimated: `configCHECK_FOR_STACK_OVERFLOW=2` caught a real
+  overflow (`Watchdog` reset, `StackOverflowFault` phase) at 128 words, reproduced three
+  times across two different provisional sizes before the actual fix. `ps` reporting the
+  console task's own row was the plan for measuring it, but `ps` is unreachable once
+  `mavlinkMode` is true (by spec), so a temporary `STATUSTEXT`-based diagnostic on the
+  real, unmodified code path did the measuring instead — a bypass of the mode lock was
+  tried first and produced a contaminated, overly dire reading by exercising a code path
+  that cannot happen in production. Final: 160 words, 17 free (10.6%), reached by finding
+  real savings (an 80-byte transmit buffer instead of 280, one shared `mavlink_message_t`
+  instead of two) rather than by growing past what the RAM budget could afford. Full
+  account in `tasks.md` task 4.6.
 - **Two endpoints with one identity confuses a bridged setup.** If someone connects both
   ports to the same GCS through a router, it sees one vehicle over two links with
   independent sequence numbers, which is what MAVLink expects — but a naive bridge that
   forwards between them would loop. → Out of scope, and stated in the spec as "not a
   router" so nobody adds forwarding later thinking it was an oversight.
-- **A ground station on USB during flight is a path that did not exist before.** The
-  same commands the radio link accepts are now reachable over USB. Today `TaskMavlink`
-  acts on `SYSTEM_TIME` and `TIMESYNC` only, so the surface is small — but it is no
-  longer true that USB cannot change firmware state, and the next command handler
-  inherits that. → Noted here so it is a decision rather than a discovery.
+- **A ground station on USB during flight is a path that did not exist before, and the
+  surface is bigger than it first looks.** `mavlinkHandleInbound` is the *whole*
+  inbound `switch`, moved verbatim (task 2.3) — not only `SYSTEM_TIME` and `TIMESYNC`,
+  which set the clock and answer a ping, but also `COMMAND_LONG`'s
+  `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, which acks, clears the fault counters and calls
+  `NVIC_SystemReset()`. **A ground station on USB can reboot the satellite**, something
+  only the radio link could do before this change. This is deliberate, not an oversight
+  folded in by the refactor: `proposal.md` frames the two ports as "two links to one
+  vehicle," identical in capability, and a USB link that could set the clock but not
+  reboot would be a silent exception to that framing rather than a stated one. → Accepted
+  as a decision, on the same terms the radio link's command surface already is — nothing
+  about reaching the satellite over its own bench port should be treated as more trusted
+  than reaching it over the radio, and the next command handler this firmware ever grows
+  inherits that from day one rather than discovering it later.
 
 ## Open Questions
 

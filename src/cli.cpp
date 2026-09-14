@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 #include <Cli.h>
+#include <MavlinkShared.h>
 #include <string.h>
 
 // The CLI owns CLI_SERIAL: it is the port's only writer while tasks run (the one
@@ -244,10 +245,146 @@ static void dispatch(char *line)
 // at 115200 baud (~115 B), so a normal command still completes in one pass.
 static constexpr uint8_t kMaxBytesPerPass = 64;
 
-// No unsolicited output: the console stays silent until the first byte arrives,
-// so check_silence.py's "nothing on the USB console" still holds for a build
-// that has not moved the CLI elsewhere (design.md, "A consequence for the
-// existing suite").
+// ---------------------------------------------------------------------------
+// Mode detection (design.md, "Switch on a checksum-valid frame, never on a
+// header byte" and "The switch is one-way"). Every inbound byte is offered to
+// this parser before the CLI-mode branch below ever sees it, mirroring
+// madflight's Cli::update_MODE_CLI: a stray 0xFD from a terminal or a paste
+// only starts a frame attempt, it does not switch the mode. Only a complete,
+// checksum-valid frame does, and once it has, mavlinkMode never clears again
+// short of a reset (task 3.3) -- see design.md's "one-way switch" decision
+// for why no escape sequence or timeout exists.
+//
+// MAVLINK_COMM_1, not _0: src/serial.cpp's radio link owns _0 already, and a
+// shared channel would mean a shared sequence counter -- see
+// MavlinkShared.h's note on mavlink_finalize_message() hardcoding _0.
+// ---------------------------------------------------------------------------
+
+// One shared buffer for both directions: mavlink_parse_char() writes a
+// completed inbound frame here, and mavlinkHandleInbound() then builds its
+// reply into the *same* object -- msg and reply aliasing the same
+// mavlink_message_t is safe only because every case in that function fully
+// decodes what it needs from msg into locals (mavlink_command_long_t,
+// mavlink_timesync_t, or a single scalar read) before ever writing to reply;
+// see its definition in src/mavlink.cpp for the invariant this relies on.
+// Scheduled telemetry reuses it the same way, one frame at a time, never
+// concurrently -- TaskCli builds and sends a single frame before starting
+// the next. Kept as one 291-byte static rather than two (or a 291-byte stack
+// local in every caller): board-measured (task 4.6), the real MAVLink-mode
+// stack peak left only 5 of 224 words free even after every affordable byte
+// of stack growth and rebalancing src/main.cpp's over-provisioned
+// mavlinkStack -- taking a second 291-byte item off the RAM budget entirely
+// is what actually closed the gap. See design.md's "Stack growth" risk entry.
+static mavlink_message_t mavlinkMsg;
+static bool mavlinkMode = false;
+
+// Wire size ceiling for what this task ever actually sends -- not
+// MAVLINK_MAX_PACKET_LEN (280 B), which sizes for the protocol's absolute
+// worst case (a 255-byte payload plus a signature block this firmware never
+// uses). The four builders here top out at STATUSTEXT's 54-byte payload
+// (MAVLINK_MSG_ID_STATUSTEXT_LEN); 80 covers that plus header, checksum and
+// margin for a future message without chasing an exact-fit number. A buffer
+// this size is safe only because every message on this path comes from our
+// own four builders -- never a forwarded or attacker-sized payload.
+static constexpr size_t kMaxOutFrameLen = 80;
+
+// Packs msg and writes it only if the port already has room for the whole
+// frame -- no allocation, no queue, no wait. Follows madflight's telem_send:
+// a host that stops draining loses this frame rather than stalling the
+// round-robin pass behind it. This is deliberately not writeChunk(), which
+// retries until it can send everything -- that retry is what CLI-mode replies
+// want (design.md accepts TaskCli parking on a stalled host) and exactly what
+// the USB transmit path must not do (design.md, "The USB transmit path does
+// not use the queue" -- lossy by design, see specs/mavlink-link/spec.md).
+static bool sendMavlinkNonBlocking(const mavlink_message_t *msg)
+{
+    // Checked against msg->len -- the payload length -- before touching the
+    // buffer, not after: mavlink_msg_to_send_buffer() writes based on this
+    // same length with no bound of its own, so validating afterward would be
+    // validating a write that already happened. 12 is MAVLink2's non-payload
+    // overhead (10-byte header + 2-byte checksum; this firmware never signs).
+    if ((size_t) msg->len + 12 > kMaxOutFrameLen) {
+        return false;
+    }
+
+    uint8_t buf[kMaxOutFrameLen];
+    uint16_t len = mavlink_msg_to_send_buffer(buf, msg);
+    if (CLI_SERIAL.availableForWrite() < len) {
+        return false;
+    }
+    CLI_SERIAL.write(buf, len);
+    return true;
+}
+
+// The {function, interval, last} schedule (design.md, "The schedule lives in
+// the console task, not in the existing producers"). One entry is attempted
+// per pass, in round-robin order, stopping at the first entry that is due --
+// whether or not its send succeeds -- so a full transmit buffer costs one
+// failed attempt this pass, not a spin, and no single message can starve the
+// others by always winning the race to be "due" first.
+struct TelemetryEntry {
+    void (*build)(mavlink_message_t *, uint8_t chan);
+    uint32_t intervalMs;
+    TickType_t lastTick;
+};
+
+static TelemetryEntry telemetrySchedule[] = {
+    { mavlinkBuildHeartbeat, 1000, 0 },
+    { mavlinkBuildSystemTime, 1000, 0 },
+    { mavlinkBuildBatteryStatus, 2000, 0 },
+};
+static constexpr size_t kTelemetryCount = sizeof(telemetrySchedule) / sizeof(telemetrySchedule[0]);
+static size_t telemetryCursor = 0;
+
+static void runTelemetryPass()
+{
+    TickType_t now = xTaskGetTickCount();
+
+    for (size_t i = 0; i < kTelemetryCount; i++) {
+        size_t idx = (telemetryCursor + i) % kTelemetryCount;
+        TelemetryEntry &entry = telemetrySchedule[idx];
+        uint32_t elapsedMs = (now - entry.lastTick) * portTICK_PERIOD_MS;
+
+        if (elapsedMs >= entry.intervalMs) {
+            entry.build(&mavlinkMsg, MAVLINK_COMM_1);
+            if (sendMavlinkNonBlocking(&mavlinkMsg)) {
+                entry.lastTick = now;
+            }
+            // Only the entry lastTick reflects skips a failed send -- moving
+            // on regardless is what "one message per pass" means: this pass
+            // is spent either way, not retried immediately for the same slot.
+            telemetryCursor = (idx + 1) % kTelemetryCount;
+            return;
+        }
+    }
+}
+
+// A reboot request's reply must reach the host before NVIC_SystemReset() --
+// Serial1's caller in src/mavlink.cpp delays to let TaskSerialWrite drain a
+// queue; here there is no queue, but the USB hardware still needs a moment to
+// actually put the written bytes on the wire, not merely to have accepted
+// them into its own FIFO. Same delay, same reasoning, different reason for
+// needing it -- see MavlinkShared.h's note.
+static void handleMavlinkFrame()
+{
+    bool rebootRequested = false;
+    bool hasReply = mavlinkHandleInbound(&mavlinkMsg, MAVLINK_COMM_1, &mavlinkMsg, &rebootRequested);
+
+    if (hasReply) {
+        sendMavlinkNonBlocking(&mavlinkMsg);
+    }
+
+    if (rebootRequested) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        NVIC_SystemReset();
+    }
+}
+
+// No unsolicited output in CLI mode: the console stays silent until the first
+// byte arrives. Once mavlinkMode switches, the scheduled telemetry above is
+// unsolicited by design -- that is the whole point of section 4 -- so this
+// silence guarantee is scoped to CLI mode only (specs/console-cli/spec.md,
+// "Firmware running normally").
 [[noreturn]] void TaskCli(void *pvParameters)
 {
     (void) pvParameters;
@@ -260,6 +397,27 @@ static constexpr uint8_t kMaxBytesPerPass = 64;
             char c = (char) CLI_SERIAL.read();
             processed++;
 
+            uint8_t frameComplete = mavlink_parse_char(MAVLINK_COMM_1, (uint8_t) c, &mavlinkMsg, NULL);
+
+            if (frameComplete) {
+                mavlinkMode = true; // one-way; re-setting true is harmless
+                handleMavlinkFrame();
+                continue;
+            }
+
+            if (mavlinkMode) {
+                // Mid-frame bytes or parse noise while already switched:
+                // never fed to the command buffer once in MAVLink mode
+                // (task 3.4) -- the CLI is unreachable here by design.
+                continue;
+            }
+
+            // Still in CLI mode, and this byte did not complete a MAVLink
+            // frame: treat it as command text. Line noise or a partial frame
+            // that never completes lands here too and is handled the same as
+            // any other unrecognised text (design.md's "Line noise on an
+            // open port" scenario) -- nothing about mode detection needs the
+            // CLI's own framing to be noise-aware.
             if (c == '\r') {
                 continue;
             }
@@ -284,6 +442,12 @@ static constexpr uint8_t kMaxBytesPerPass = 64;
                 // rather than overflowing the buffer.
                 lineOverflowed = true;
             }
+        }
+
+        // Task 4.3: pending input is fully drained above before telemetry is
+        // even considered, so a reply is never starved by the schedule below.
+        if (mavlinkMode) {
+            runTelemetryPass();
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);

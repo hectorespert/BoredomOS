@@ -56,11 +56,14 @@ change's own `tasks.md` (numbers below refer to it):
   been observed firing.** Needs an uninterrupted capture spanning at least two retry
   intervals (an hour-plus), with the inducing fault held present for the second half to
   confirm it returns to reduced rather than oscillating.
-- **9.5 — one new `pio check` finding against the pre-change baseline.** `13` LOW
-  findings now, not `12`: `src/mavlink.cpp`'s new `sendCommandAck()` uses the same
-  C-style pointer cast six other functions in that file already use. Decide once:
-  convert all seven to `static_cast`, accept the one new hit, or suppress the rule —
-  don't let it drift as an unexplained baseline change.
+- **9.5 — resolved incidentally, not by a decision.** Was: one new `pio check` finding
+  (`13` LOW, not `12`) from `sendCommandAck()`'s C-style cast. `openspec/changes/
+  add-usb-dual-protocol` removed `sendCommandAck()` entirely while sharing the inbound
+  switch between both MAVLink endpoints (`mavlinkHandleInbound` packs the ack straight
+  into the caller-provided buffer, no separate allocation or cast) — the count is back
+  to `12` as a side effect, not because anyone decided between `static_cast`,
+  accepting the hit, or suppressing the rule. The other six C-style casts this task
+  pointed at are untouched and the decision they raise is still open.
 - **9.6 — the flight build (not `bench`) has never been run through `pio test` proper**,
   and the reduced-configuration counter values were never decoded from a live heartbeat
   and recorded alongside a HIL pass. Both need the board, with a USB-TTL adapter or the
@@ -285,7 +288,7 @@ messages come in and go out without a GCS on the other end interpreting them. Th
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on `openspec/changes/add-console-cli`, not only on the `move-mavlink-link-
+Depends on `openspec/changes/archive/2026-09-13-add-console-cli`, not only on the `move-mavlink-link-
 to-serial1` change (archived) that freed the console port. That change gives the
 console an owner, `src/cli.cpp`, and makes it the port's only writer while tasks
 run: a trace can no longer `print()` into `CLI_SERIAL` directly without becoming a
@@ -390,7 +393,7 @@ It fits with two things the firmware already has half done:
   exactly the candidate it points at without adopting it. Both entries share the
   same source: a centralised health state, which does not exist today.
 - `errors_count1..4` is where to keep the count of failed `pvPortMalloc` calls —
-  checked as of `openspec/changes/add-console-cli`, which absorbed the entry this
+  checked as of `openspec/changes/archive/2026-09-13-add-console-cli`, which absorbed the entry this
   used to point at, but the failures themselves are still silently skipped rather
   than counted — and of the sends dropped by a full queue, which are silently
   lost today.
@@ -770,7 +773,7 @@ tight it actually measures.
 **Status:** defined
 **Scope:** `src/logger.cpp`, `src/main.cpp`
 
-`openspec/changes/add-console-cli` gave the firmware a `ps` command, and the first
+`openspec/changes/archive/2026-09-13-add-console-cli` gave the firmware a `ps` command, and the first
 live reading it produced showed `TaskLogger`'s unused stack at **5 of 96 words** —
 20 bytes of headroom, tighter than every other task by a wide margin. The
 next-tightest is `TaskHeartbeat` (128 words) at 28 free; everything else has more
@@ -792,6 +795,31 @@ if it does, that it is verified back down with the SD log's own recorded figure 
 `ps`'s live one, not assumed. Re-check after any change to `src/logger.cpp`'s body,
 `include/Data.h`'s size, or `lib/SdData`'s JSON conversion, since any of the three
 changes how much stack one `TaskLogger` cycle needs.
+
+
+### `ps`'s live high-water marks were never cross-checked against the SD log
+
+**Status:** defined
+**Scope:** none yet — blocked on *[Download the SD files over MAVLink FTP]*
+
+`openspec/changes/archive/2026-09-13-add-console-cli` task 4.2 required confirming
+that `ps`'s live stack high-water marks agree with what the SD housekeeping log
+records for the same tasks. That comparison was never done and the task was left
+unticked rather than marked complete: this repository has no way to read `.mpk`
+content without physically pulling the card — no MAVLink FTP, no other channel —
+so there was nothing to compare `ps`'s numbers against.
+
+What was done instead, and is not a substitute: `ps` was read live, repeatedly,
+across normal and reduced configurations, and none of the figures looked
+corrupted or anomalously low in a way `configUSE_TRACE_FACILITY` (the flag that
+prompted the re-check — it adds fields to each TCB, not stack) could explain. That
+is evidence the numbers are plausible, not evidence they match the SD log.
+
+To decide: nothing to decide yet. This is blocked on *[Download the SD files over
+MAVLink FTP]* landing — once `.mpk` content can be read without the card physically
+in hand, pull a recent housekeeping record and diff its `System` block's high-water
+marks against a same-moment `ps` reading. If they disagree, that is a bug in one of
+the two readers, not in either task's actual stack use.
 
 
 ### The stack overflow hook hangs before it warns
@@ -952,17 +980,21 @@ misleading fields. No new hardware is needed to fix a good part of it:
 
 Small, unrelated things worth getting out of the way in one go:
 
-- `src/mavlink.cpp` declares `extern RTC_DS1307 rtc;`, a global that exists nowhere.
-  It does not fail to link only because nobody uses it.
+- ~~`src/mavlink.cpp` declares `extern RTC_DS1307 rtc;`, a global that exists
+  nowhere.~~ Gone: `openspec/changes/add-usb-dual-protocol` rewrote the file to
+  share its message logic with the USB endpoint and never carried this dead
+  declaration forward — found while rewriting, not deliberately removed for this
+  reason, but confirmed gone.
 - `src/logger.cpp` initialises `Data` with the GNU label syntax (`unixtime: ...`),
   an extension that recent GCC versions reject in C++. The C++20 designated
   initialisers (`.unixtime = ...`) are the standard equivalent.
-- `src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
-  with no braces of its own, which puts a declaration in the scope of the rest of
-  the switch. It compiles because it has no initialiser. Note that cppcheck does
-  **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
-  actually reports, and this is not in it. It does report the GCC initialiser syntax
-  above, as three `unusedLabel` findings in `src/logger.cpp`.
+- ~~`src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
+  with no braces of its own~~. Gone the same way: the same rewrite gave that `case`
+  its own braces as an ordinary consequence of restructuring the switch, not a
+  deliberate fix. cppcheck never flagged it either way — the `add-static-analysis-
+  to-ci` change measured what the checker actually reports, and this was not in it.
+  It does report the GCC initialiser syntax above, as three `unusedLabel` findings
+  in `src/logger.cpp`.
 - `test/test_main.cpp` uses `StaticJsonDocument`, deprecated in ArduinoJson 7, while
   `src/sdwrite.cpp` already uses `JsonDocument`.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
@@ -1127,11 +1159,17 @@ The HIL suite claims a coverage it does not record, and the claim was false in t
 places until it was removed from `CLAUDE.md` and `test/test_hil/README.md`. Measured on
 this tree:
 
-- Nine `test_*` cases across four modules — `check_clock.py` 1, `check_silence.py` 1,
+- Eight `test_*` cases across three modules for `mavlink-link` — `check_clock.py` 1,
   `check_timesync.py` 1, `check_telemetry.py` 6 — against **eight** `#### Scenario:`
-  headings in `openspec/specs/mavlink-link/spec.md`, so no one-to-one mapping is even
-  arithmetically possible.
-- The six cases in `check_telemetry.py`, two thirds of the suite, name no scenario at all.
+  headings in `openspec/specs/mavlink-link/spec.md`. The count now matches by
+  coincidence, not by design: `openspec/changes/archive/*-add-usb-dual-protocol`
+  deleted `check_silence.py` (its scenario stopped holding once USB gained a
+  permanent MAVLink endpoint) without anyone counting scenarios against cases, and
+  that same change added `console-cli`'s own `check_cli.py` (2 cases) and
+  `check_mode.py` (3), which this entry's original count never covered at all — the
+  mapping problem below applies to those too, not just the original four modules.
+- The six cases in `check_telemetry.py`, still the largest single group, name no
+  scenario at all.
 - `check_clock.py` says it covers the scenario *"inbound SYSTEM_TIME and TIMESYNC sent on
   that port are acted upon"*. That text appears nowhere in the live spec — it is a
   requirement phrasing that has since been rewritten.

@@ -28,7 +28,7 @@ approach fits here without disturbing the radio link at all.
   under load it is the one that slips. That asymmetry is deliberate — the bench port
   must never cost the radio a deadline.
 - **Both ports run the same message logic.** The construction of every outbound
-  message and the handling of every inbound one move behind `include/Mavlink.h`, with
+  message and the handling of every inbound one move behind `include/MavlinkShared.h`, with
   one definition in `src/mavlink.cpp` and two callers. USB does not get its own copy of
   the identity triple or its own inbound `switch`, so "the same message set on both
   ports" is structural rather than a promise to keep. This refactors the `send*`
@@ -76,26 +76,45 @@ know about.
 
 ## Impact
 
-**RAM.** Against the 8 KB FreeRTOS heap:
+**RAM.** This entry originally framed the cost against the 8 KB FreeRTOS heap, on the
+assumption that a second parser state and a transmit buffer would be the main cost.
+Both assumptions were wrong once implemented and board-measured (task 4.6 has the full
+story); the real cost is almost entirely static task-stack sizing, not heap, and the
+actual numbers are substantially different from the original estimate:
 
 | Item | Cost | Where |
 |---|---|---|
 | New task | none — the console task from `add-console-cli` gains the MAVLink mode | — |
 | New queue | none — the USB transmit path writes directly, by design | — |
-| Second MAVLink parser state (`mavlink_message_t` + `mavlink_status_t`) | ~300 B | `.bss` |
-| `MAVLINK_MAX_PACKET_LEN` transmit buffer | 280 B | **stack** |
-| Console task stack, 192 -> ~384 words to hold that buffer | 4 x 192 = **768 B** | `.bss` — the `StackType_t` array declared in `src/main.cpp` grows with it |
-| | **768 B of 8192 (9%) on top of `add-console-cli`** | |
+| Shared inbound/outbound `mavlink_message_t` (`src/cli.cpp`'s `mavlinkMsg`) | 291 B | `.bss` |
+| Telemetry schedule (3 entries) | 36 B | `.bss` |
+| `MAVLINK_COMM_NUM_BUFFERS` 4 -> 2 (`platformio.ini`) | ~0 net | `.bss` — shrinks `src/serial.cpp`'s existing per-channel arrays by the same amount `src/cli.cpp`'s new usage of them costs |
+| Console task stack (`src/cli.cpp`'s `TaskCli`), 128 -> 160 words | **+128 B** | `.bss` |
+| Radio task stack (`src/mavlink.cpp`'s `TaskMavlink`), 256 -> 248 words | **-32 B** | `.bss` — reclaimed, not spent; see below |
+| | **~388 B net, against the 1468 B of headroom `add-console-cli` archived with — 1080 B left, 56 B above the 1024 B floor** | |
 
-The stack growth is the whole cost, and it is the same shape as `src/serial.cpp`,
-which already holds a `uint8_t buf[MAVLINK_MAX_PACKET_LEN]` inside a 192-word task.
-The 384 words is an estimate to be replaced by a measurement; `ps` reports the console
-task's own row, so the change measures itself.
+What actually happened, briefly (task 4.6 in `tasks.md` has the board-by-board account):
+the console task's stack didn't grow to a round provisional number and get measured
+down — it **overflowed for real** at 128 words (`Watchdog` reset, `StackOverflowFault`
+phase, reproduced three times) once `mavlinkHandleInbound`'s reply and the transmit
+buffer nested several hundred bytes deep in the same call chain. Closing that gap
+inside an already-tight RAM budget took real savings, not just growth: the transmit
+buffer is 80 B, not `MAVLINK_MAX_PACKET_LEN`'s 280 B (this firmware's largest message,
+`STATUSTEXT`, needs nowhere near the protocol's absolute worst case); the separate
+inbound and outbound `mavlink_message_t` locals became one shared static, safe because
+`mavlinkHandleInbound`'s cases always finish reading `msg` before writing `reply` (see
+its own comment); and `TaskMavlink`'s own stack, over-provisioned at 256 relative to
+its real 188-word measured peak, gave back 32 B toward the console task's growth once
+that peak was itself properly measured (a first attempt at shrinking it, based on an
+under-exercised 109-word reading, also overflowed — see task 4.6). Final measured
+margins are thinner than this project's usual 35-45%: 10.6% for the console task,
+24% for the radio task, both board-verified stable under sustained, deliberately
+adversarial exercise rather than assumed from either number.
 
 Deleting `bench` returns nothing to the heap but removes a build configuration from
 every future change's test matrix.
 
-**Files.** New: `include/Mavlink.h`. Modified: `src/mavlink.cpp` (the `send*`
+**Files.** New: `include/MavlinkShared.h`. Modified: `src/mavlink.cpp` (the `send*`
 functions split into builders plus a queue push, and `TaskMavlink` becomes a thin loop
 over the shared dispatch), `src/cli.cpp` (mode detection and the MAVLink mode),
 `platformio.ini` (delete `[env:bench]`, keep `LINK_BAUD` for the radio),
@@ -106,5 +125,8 @@ over the shared dispatch), `src/cli.cpp` (mode detection and the MAVLink mode),
 **A consequence worth stating up front.** The mode switch is one-way, so on any given
 boot the USB port answers the CLI or talks MAVLink, never both in sequence. The HIL
 suite currently opens the link and starts framing immediately, which would leave the
-CLI unreachable for the rest of that run. Test ordering, or a reset between phases,
-becomes load-bearing — see `design.md`.
+CLI unreachable for the rest of that run. Test ordering becomes load-bearing — see
+`design.md`. A reset between phases was the original fallback if ordering alone were
+not enough; task 1.3 found the board's only reset-like mechanism on this port (a
+1200-baud touch) parks it in DFU indefinitely rather than resuming the firmware, so
+that fallback does not exist and ordering has to carry the whole requirement.
