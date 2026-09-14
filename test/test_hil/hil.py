@@ -13,6 +13,14 @@ DEFAULT_BAUD = 57600  # matches LINK_BAUD in include/Link.h
 ARDUINO_VID = 0x2341
 PORT_WAIT = 25.0  # seconds; a CDC port re-enumerates slowly after an upload
 
+# Cases in these files exercise the console CLI and must run before anything
+# sends a valid MAVLink frame on the same port -- once that happens the
+# switch to MAVLink mode is permanent for the rest of the boot
+# (specs/console-cli/spec.md) and the CLI becomes unreachable. run.py uses
+# this to order cases into a CLI phase and a MAVLink phase, calling
+# Link.enter_mavlink_mode() only between them.
+CLI_PHASE_FILES = frozenset({"check_cli.py", "check_mode.py"})
+
 
 class NoLinkError(Exception):
     """Raised when no port could be opened. Reported as skipped, not failed."""
@@ -22,8 +30,12 @@ def find_port(wait=PORT_WAIT):
     """Return the port to talk to, or raise NoLinkError.
 
     Order: --port/HIL_PORT, then an Arduino CDC device, then a lone USB serial
-    adapter. The adapter case matters because with the default build the link is
-    on Serial1 (D0/D1), so the board's own CDC port carries nothing.
+    adapter. Since add-usb-dual-protocol there is one board port for
+    everything: the Arduino CDC device is the USB endpoint, which starts in
+    CLI mode and switches permanently to MAVLink on the first valid frame
+    (see Link.enter_mavlink_mode()) -- it is preferred over a lone USB-serial
+    adapter, which would mean a USB-TTL adapter wired to the radio UART on
+    D0/D1 instead. Both carry MAVLink; only the port differs.
 
     Waits for the port to appear. Under `pio test` this runs seconds after the
     upload, and a USB CDC port takes a moment to re-enumerate after the board
@@ -78,13 +90,17 @@ class Link:
         except Exception as exc:  # pylint: disable=broad-except
             raise NoLinkError(f"cannot open {self.port}: {exc}") from exc
         self._sample = None
+        self._mavlink_mode = False
 
     @property
-    def is_usb_cdc(self):
-        """True when we are talking over the board's own USB CDC port.
+    def is_board_usb(self):
+        """True when self.port is the board's own USB CDC device.
 
-        That means the firmware was built with -D LINK_SERIAL=Serial, which changes
-        what "the USB port should be silent" is allowed to mean.
+        False when HIL_PORT points elsewhere -- a USB-TTL adapter or the
+        radio wired to D0/D1, testing the physical radio link rather than the
+        board's own USB endpoint. The console CLI only ever lives on the
+        board's own port, so CLI-phase cases use this to self-skip when it is
+        not the one in use.
         """
         from serial.tools import list_ports
 
@@ -93,10 +109,33 @@ class Link:
                 return p.vid == ARDUINO_VID
         return False
 
+    def enter_mavlink_mode(self):
+        """Send one HEARTBEAT to switch the port into MAVLink mode.
+
+        Only meaningful on the board's own USB CDC port, where the switch is
+        one-way and permanent for the boot (specs/console-cli/spec.md, "The
+        USB port chooses its protocol from what arrives on it"). Opening a
+        pymavlink connection sends nothing by itself -- CLI-phase cases in
+        run.py rely on exactly that to run before this is ever called. Safe
+        to call more than once: the second HEARTBEAT is just ordinary
+        traffic once already switched. Idempotent per Link instance so
+        callers do not have to track whether it was already sent.
+        """
+        if self._mavlink_mode:
+            return
+        from pymavlink import mavutil
+
+        self.mav.mav.heartbeat_send(
+            mavutil.mavlink.MAV_TYPE_GCS, mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
+        )
+        self._mavlink_mode = True
+
     def sample(self, seconds=12.0):
         """Listen once and cache it, so the rate checks share one observation."""
         if self._sample is not None:
             return self._sample
+
+        self.enter_mavlink_mode()
 
         counts = Counter()
         identities = set()

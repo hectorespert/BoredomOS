@@ -70,7 +70,19 @@ StaticTask_t serialWriteTcb;
 StackType_t heartbeatStack[128];
 StaticTask_t heartbeatTcb;
 
-StackType_t mavlinkStack[256];
+// A fuller board measurement (task 4.6) than the first attempt found this
+// task's real peak at 188/256 words used -- not the 109 a handful of manual
+// bench commands suggested. That first, smaller number missed the
+// default-branch STATUSTEXT path (an unhandled inbound message, e.g.
+// MISSION_REQUEST_LIST), which turned out to be the deepest call chain in
+// this task by a wide margin; shrinking to 176 on the strength of the first
+// number overflowed the same way src/cli.cpp's first attempt did. 248 keeps
+// a 60-word margin (24%) over the properly-measured 188 -- src/cli.cpp's
+// mavlinkRxMsg/mavlinkOutMsg consolidation into one shared static (see its
+// comment) freed enough RAM budget to afford this over the initial 224;
+// re-verify with the same message-type coverage after any change to
+// mavlinkHandleInbound.
+StackType_t mavlinkStack[248];
 StaticTask_t mavlinkTcb;
 
 StackType_t loggerStack[96];
@@ -82,16 +94,27 @@ StaticTask_t statusTcb;
 StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
 
-// Measured on the board (task 4.1): ps's own row for this task never dropped
-// below 113 words free of the provisional 192 while exercising every command.
-// 128 keeps a comparable margin to the other light tasks (SerialRead's own
-// watermark runs 35-46 of 96) at less than the provisional cost. Re-measured
-// after src/cli.cpp's write path was rewritten to yield instead of spin on a
-// stalled host (design.md's "A blocking write stalls the task", Copilot
-// review): the rewrite costs its own stack, down to 38 of 128 free under the
-// same flood -- more than before, but still comfortably inside 128, so the
-// size was kept rather than grown again.
-StackType_t cliStack[128];
+// add-console-cli measured this at 128 (CLI-text commands only; see that
+// change's own history for the 192->128 story). add-usb-dual-protocol's
+// MAVLink handling needs substantially more: mavlinkHandleInbound's reply and
+// the outbound send buffer nest several hundred bytes deep in the same call
+// chain, and 128 genuinely overflowed on the board (Watchdog reset,
+// StackOverflowFault phase -- not a close call, reproduced three times before
+// the fix). Two changes bought back enough room within the RAM budget rather
+// than growing this array to match the overflow directly: src/cli.cpp's
+// mavlink_message_t for every inbound and outbound frame is now one shared
+// static (mavlinkMsg) instead of a fresh 291-byte stack local per caller --
+// two statics at first, then consolidated into one once the inbound and
+// outbound roles turned out safe to alias (see its own comment) -- and
+// mavlinkStack below was trimmed from its own over-provisioned 256 (see its
+// comment; that trim needed its own re-measurement after a first, smaller
+// attempt also overflowed). 160 measured 17 words free (10.6%) under
+// sustained MAVLink-mode telemetry and command handling -- thinner than this
+// project's usual 35-45%, accepted deliberately against an already-tight RAM
+// budget rather than spent further (see tasks.md task 4.6). Re-measure with
+// ps after any change to mavlinkHandleInbound, the telemetry schedule, or
+// what either builds.
+StackType_t cliStack[160];
 StaticTask_t cliTcb;
 
 // Queue structures and item storage. Each queue carries pointers, so the storage is
@@ -352,13 +375,13 @@ void setup()
   taskHeartbeatHandler = xTaskCreateStatic(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, heartbeatStack, &heartbeatTcb);
   configASSERT(taskHeartbeatHandler != NULL);
 
-  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, mavlinkStack, &mavlinkTcb);
+  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 248, NULL, PRIORITY_LOW, mavlinkStack, &mavlinkTcb);
   configASSERT(taskMavlinkHandler != NULL);
 
   // Starts in every configuration, reduced included: it touches nothing the
   // reduced configuration withholds (no SD card, no RTC, no battery sense),
   // and it is most useful exactly when something else has already gone wrong.
-  taskCliHandler = xTaskCreateStatic(TaskCli, "Cli", 128, NULL, PRIORITY_LOWEST, cliStack, &cliTcb);
+  taskCliHandler = xTaskCreateStatic(TaskCli, "Cli", 160, NULL, PRIORITY_LOWEST, cliStack, &cliTcb);
   configASSERT(taskCliHandler != NULL);
 
   if (!reducedConfiguration) {

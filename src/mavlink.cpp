@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
-#include <MAVLink.h>
+#include <MavlinkShared.h>
 #include <Battery.h>
 #include <SystemTime.h>
 #include <Recovery.h>
@@ -9,6 +9,8 @@
 extern QueueHandle_t serialWriteQueue;
 
 extern SystemTime systemTime;
+
+extern Battery battery;
 
 extern bool reducedConfiguration;
 extern Recovery::ResetReason previousResetReason;
@@ -37,72 +39,6 @@ static uint32_t packCustomMode()
         | ((uint32_t)previousBootPhase << 8)
         | ((uint32_t)consecutive << 16)
         | ((uint32_t)cumulative << 24);
-}
-
-static void sendHeartbeat() {
-    mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (heartbeatMsg != NULL) {
-        uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
-        if (!reducedConfiguration) {
-            baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
-        }
-
-        mavlink_msg_heartbeat_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            heartbeatMsg,
-            MAV_TYPE_ROCKET,
-            MAV_AUTOPILOT_GENERIC,
-            baseMode,
-            packCustomMode(),
-            reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
-        );
-
-        if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
-        {
-            vPortFree(heartbeatMsg);
-        }
-    }
-}
-
-static void sendSystemTime()
-{
-    mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (systemTimeMsg != NULL) {
-        uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-        mavlink_msg_system_time_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            systemTimeMsg,
-            systemTime.getUnixTimeUsec(),
-            boot_ms
-        );
-
-        if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
-        {
-            vPortFree(systemTimeMsg);
-        }
-    }
-}
-
-static void sendStatusText(const char* text, uint8_t severity)
-{
-    mavlink_message_t* statusMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (statusMsg != NULL) {
-        mavlink_msg_statustext_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            statusMsg,
-            severity,
-            text,
-            0,
-            0
-        );
-        if (xQueueSend(serialWriteQueue, &statusMsg, 0) != pdPASS) {
-            vPortFree(statusMsg);
-        }
-    }
 }
 
 static const char* resetReasonText(Recovery::ResetReason reason)
@@ -134,6 +70,134 @@ static const char* bootPhaseText(Recovery::BootPhase phase)
     return "unknown";
 }
 
+// ---------------------------------------------------------------------------
+// The four shared builders (include/MavlinkShared.h). Each fills the
+// mavlink_message_t the caller provides -- see design.md, "The message logic
+// is shared with src/mavlink.cpp, not duplicated" -- so both Serial1's
+// allocate-and-queue path below and the USB endpoint's pack-and-write path
+// call the exact same packing code with the exact same identity triple.
+// ---------------------------------------------------------------------------
+
+void mavlinkBuildHeartbeat(mavlink_message_t *out, uint8_t chan)
+{
+    uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
+    if (!reducedConfiguration) {
+        baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
+    }
+
+    mavlink_msg_heartbeat_pack_chan(
+        1,
+        MAV_COMP_ID_AUTOPILOT1,
+        chan,
+        out,
+        MAV_TYPE_ROCKET,
+        MAV_AUTOPILOT_GENERIC,
+        baseMode,
+        packCustomMode(),
+        reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
+    );
+}
+
+void mavlinkBuildSystemTime(mavlink_message_t *out, uint8_t chan)
+{
+    uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    mavlink_msg_system_time_pack_chan(
+        1,
+        MAV_COMP_ID_AUTOPILOT1,
+        chan,
+        out,
+        systemTime.getUnixTimeUsec(),
+        boot_ms
+    );
+}
+
+void mavlinkBuildBatteryStatus(mavlink_message_t *out, uint8_t chan)
+{
+    uint16_t voltages[10];
+    voltages[0] = battery.millivolts();
+    for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
+
+    uint16_t voltages_ext[4] = {0, 0, 0, 0};
+
+    mavlink_msg_battery_status_pack_chan(
+        1,
+        MAV_COMP_ID_AUTOPILOT1,
+        chan,
+        out,
+        0,
+        MAV_BATTERY_FUNCTION_ALL,
+        MAV_BATTERY_TYPE_LIPO,
+        INT16_MAX,
+        voltages,
+        -1,
+        -1,
+        -1,
+        battery.remaining(),
+        0,
+        MAV_BATTERY_CHARGE_STATE_UNDEFINED,
+        voltages_ext,
+        MAV_BATTERY_MODE_UNKNOWN,
+        0
+    );
+}
+
+void mavlinkBuildStatusText(mavlink_message_t *out, uint8_t chan, uint8_t severity, const char *text)
+{
+    mavlink_msg_statustext_pack_chan(
+        1,
+        MAV_COMP_ID_AUTOPILOT1,
+        chan,
+        out,
+        severity,
+        text,
+        0,
+        0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Serial1's producers: allocate, build, queue -- the pattern
+// ARCHITECTURE.md's queue memory ownership protocol requires. Unchanged in
+// shape from before this refactor; only the packing itself moved above.
+// ---------------------------------------------------------------------------
+
+static void sendHeartbeat() {
+    mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (heartbeatMsg != NULL) {
+        mavlinkBuildHeartbeat(heartbeatMsg, MAVLINK_COMM_0);
+
+        if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
+        {
+            vPortFree(heartbeatMsg);
+        }
+    }
+}
+
+static void sendSystemTime()
+{
+    mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (systemTimeMsg != NULL) {
+        mavlinkBuildSystemTime(systemTimeMsg, MAVLINK_COMM_0);
+
+        if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
+        {
+            vPortFree(systemTimeMsg);
+        }
+    }
+}
+
+static void sendStatusText(const char* text, uint8_t severity)
+{
+    mavlink_message_t* statusMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (statusMsg != NULL) {
+        mavlinkBuildStatusText(statusMsg, MAVLINK_COMM_0, severity, text);
+        if (xQueueSend(serialWriteQueue, &statusMsg, 0) != pdPASS) {
+            vPortFree(statusMsg);
+        }
+    }
+}
+
 // Longest combination is 48 characters ("Reset: backup state invalid, phase
 // malloc failed"), under the 50-byte STATUSTEXT text field -- no printf family
 // involved, per review.md's note that newlib-nano's vsnprintf costs stack this
@@ -148,27 +212,6 @@ static void sendBootStatusText()
     strncat(text, bootPhaseText(previousBootPhase), sizeof(text) - 1 - strlen(text));
 
     sendStatusText(text, MAV_SEVERITY_CRITICAL);
-}
-
-static void sendCommandAck(uint16_t command, uint8_t result)
-{
-    mavlink_message_t* ackMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (ackMsg != NULL) {
-        mavlink_msg_command_ack_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            ackMsg,
-            command,
-            result,
-            0,
-            0,
-            0,
-            0
-        );
-        if (xQueueSend(serialWriteQueue, &ackMsg, 0) != pdPASS) {
-            vPortFree(ackMsg);
-        }
-    }
 }
 
 [[noreturn]] void TaskHeartbeat(void *pvParameters)
@@ -212,37 +255,11 @@ static void sendCommandAck(uint16_t command, uint8_t result)
     }
 }
 
-extern Battery battery;
-
 static void sendBatteryStatus()
 {
     mavlink_message_t* batteryMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
     if (batteryMsg != NULL) {
-        uint16_t voltages[10];
-        voltages[0] = battery.millivolts();
-        for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
-
-        uint16_t voltages_ext[4] = {0, 0, 0, 0};
-
-        mavlink_msg_battery_status_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            batteryMsg,
-            0,
-            MAV_BATTERY_FUNCTION_ALL,
-            MAV_BATTERY_TYPE_LIPO,
-            INT16_MAX,
-            voltages,
-            -1,
-            -1,
-            -1,
-            battery.remaining(),
-            0,
-            MAV_BATTERY_CHARGE_STATE_UNDEFINED,
-            voltages_ext,
-            MAV_BATTERY_MODE_UNKNOWN,
-            0
-        );
+        mavlinkBuildBatteryStatus(batteryMsg, MAVLINK_COMM_0);
 
         if (xQueueSend(serialWriteQueue, &batteryMsg, 0) != pdPASS)
         {
@@ -264,8 +281,131 @@ static void sendBatteryStatus()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The shared inbound dispatch (include/MavlinkShared.h). Both Serial1's
+// TaskMavlink below and the USB endpoint call this for every message they
+// parse; neither keeps its own copy of what a message means -- see design.md.
+//
+// rebootRequested is set, not acted on, when a message commands one: the
+// caller owns its own transport's timing (Serial1 queues and needs a moment
+// to drain; USB writes synchronously and does not), so only the caller knows
+// when it is safe to reset after the reply -- review.md's PRCR/timing notes,
+// carried forward from before this refactor rather than re-derived.
+//
+// INVARIANT a caller MAY rely on: msg and reply may point to the SAME
+// mavlink_message_t. src/cli.cpp does exactly this (one static buffer for
+// both directions, to afford a second 291-byte item on an already-tight RAM
+// budget -- see its own comment). This holds only because every case below
+// fully extracts what it needs from msg -- into a local struct
+// (mavlink_command_long_t, mavlink_timesync_t) or a single scalar read --
+// before the first write to reply in that same case. A case that reads msg
+// again after writing reply would read its own output instead and silently
+// break this. Serial1's caller does not alias them (msg is a heap pointer
+// freed separately from reply's own lifetime), so this invariant is
+// USB-specific, not a general property callers must exploit.
+// ---------------------------------------------------------------------------
+
+bool mavlinkHandleInbound(const mavlink_message_t *msg, uint8_t replyChan, mavlink_message_t *reply, bool *rebootRequested)
+{
+    *rebootRequested = false;
+
+    switch (msg->msgid)
+    {
+        case MAVLINK_MSG_ID_HEARTBEAT:
+            return false;
+
+        case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
+            return false;
+
+        case MAVLINK_MSG_ID_COMMAND_LONG: {
+            mavlink_command_long_t command;
+            mavlink_msg_command_long_decode(msg, &command);
+
+            if (command.command == MAV_CMD_GET_HOME_POSITION) {
+                return false;
+            }
+
+            if (command.command == MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN) {
+                // Acknowledged rather than silently handled -- review.md
+                // finding 17. This is a new message on the wire; the
+                // closed-set HIL case (test/test_hil/check_recovery.py,
+                // task 7.5) must expect it.
+                mavlink_msg_command_ack_pack_chan(
+                    1,
+                    MAV_COMP_ID_AUTOPILOT1,
+                    replyChan,
+                    reply,
+                    command.command,
+                    MAV_RESULT_ACCEPTED,
+                    0,
+                    0,
+                    0,
+                    0
+                );
+
+                // reinitialise() clears the deliberate-reset field along
+                // with both counters and the snapshot, so it has to run
+                // *before* the marker is set, not after -- otherwise it
+                // would wipe the very marker that stops this reboot from
+                // counting as evidence of a fault (design.md's
+                // deliberate-reset carve-out, review.md finding 4).
+                Recovery::reinitialise();
+                Recovery::setDeliberateReset(Recovery::DeliberateReset::Commanded);
+
+                *rebootRequested = true;
+                return true;
+            }
+
+            return false;
+        }
+
+        case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
+            return false;
+
+        case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
+            return false;
+
+        case MAVLINK_MSG_ID_SYSTEM_TIME: {
+            time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / USEC_PER_SEC;
+            systemTime.setUnixTime(unix_time_from_gcs);
+            return false;
+        }
+
+        case MAVLINK_MSG_ID_TIMESYNC: {
+            mavlink_timesync_t timesync;
+            mavlink_msg_timesync_decode(msg, &timesync);
+
+            if (timesync.tc1 == 0) {
+                mavlink_msg_timesync_pack_chan(
+                    1,
+                    MAV_COMP_ID_AUTOPILOT1,
+                    replyChan,
+                    reply,
+                    systemTime.getUnixTimeNsec(),
+                    timesync.ts1,
+                    timesync.target_system,
+                    timesync.target_component
+                );
+                return true;
+            }
+
+            return false;
+        }
+
+        default:
+            // Same pointer-arithmetic defect as before this refactor --
+            // TODO.md's "Fix the pointer arithmetic in the unknown-message
+            // STATUSTEXT" entry already tracks it, and preserving it
+            // unchanged here is what keeps this section's Serial1 behaviour
+            // byte-identical (task 2.4). It is now reachable from the USB
+            // endpoint too, once section 3/4 wires that path in; noted in
+            // that entry rather than fixed as a drive-by here.
+            mavlinkBuildStatusText(reply, replyChan, MAV_SEVERITY_WARNING, "Mensaje recibido con ID desconocido: " + msg->msgid);
+            return true;
+    }
+}
+
 extern QueueHandle_t serialReadQueue;
-extern RTC_DS1307 rtc;
 
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
@@ -276,93 +416,29 @@ extern RTC_DS1307 rtc;
         mavlink_message_t* msg;
         if (xQueueReceive(serialReadQueue, &msg, portMAX_DELAY))
         {
-
-            switch (msg->msgid)
-            {
-                case MAVLINK_MSG_ID_HEARTBEAT:
-                    break;
-
-                case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
-                    break;
-
-                case MAVLINK_MSG_ID_COMMAND_LONG:
-                    mavlink_command_long_t command;
-                    mavlink_msg_command_long_decode(msg, &command);
-
-                    if (command.command == MAV_CMD_GET_HOME_POSITION) {
-                        break;
-                    }
-
-                    if (command.command == MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN) {
-                        // Acknowledged rather than silently handled -- review.md
-                        // finding 17. This is a new message on the wire; the
-                        // closed-set HIL case (test/test_hil/check_recovery.py,
-                        // task 7.5) must expect it.
-                        sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
-
-                        // reinitialise() clears the deliberate-reset field along
-                        // with both counters and the snapshot, so it has to run
-                        // *before* the marker is set, not after -- otherwise it
-                        // would wipe the very marker that stops this reboot from
-                        // counting as evidence of a fault (design.md's
-                        // deliberate-reset carve-out, review.md finding 4).
-                        Recovery::reinitialise();
-                        Recovery::setDeliberateReset(Recovery::DeliberateReset::Commanded);
-
-                        // Gives TaskSerialWrite, which is higher priority than
-                        // this task, a chance to drain the ack onto the link
-                        // before the reset -- see review.md's PRCR/timing notes.
-                        vTaskDelay(pdMS_TO_TICKS(50));
-
-                        NVIC_SystemReset();
-                    }
-
-                    break;
-
-                case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
-                    break;
-
-                case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
-                    break;
-
-                case MAVLINK_MSG_ID_SYSTEM_TIME: {
-                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / USEC_PER_SEC;
-                    systemTime.setUnixTime(unix_time_from_gcs);
-                    break;
-                }
-
-                case MAVLINK_MSG_ID_TIMESYNC: {
-                    mavlink_timesync_t timesync;
-                    mavlink_msg_timesync_decode(msg, &timesync);
-
-                    if (timesync.tc1 == 0) {
-                        mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-                        if (timeSyncMsg != NULL) {
-                            mavlink_msg_timesync_pack(
-                                1,
-                                MAV_COMP_ID_AUTOPILOT1,
-                                timeSyncMsg,
-                                systemTime.getUnixTimeNsec(),
-                                timesync.ts1,
-                                timesync.target_system,
-                                timesync.target_component
-                            );
-
-                            if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
-                                vPortFree(timeSyncMsg);
-                            }
-                        }
-                    }
-
-                    break;
-                }
-        
-                default:
-                    sendStatusText("Mensaje recibido con ID desconocido: " + msg->msgid, MAV_SEVERITY_WARNING);
-                    break;
-            }
+            mavlink_message_t reply;
+            bool rebootRequested = false;
+            bool hasReply = mavlinkHandleInbound(msg, MAVLINK_COMM_0, &reply, &rebootRequested);
 
             vPortFree(msg);
+
+            if (hasReply) {
+                mavlink_message_t* replyMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+                if (replyMsg != NULL) {
+                    memcpy(replyMsg, &reply, sizeof(mavlink_message_t));
+                    if (xQueueSend(serialWriteQueue, &replyMsg, 0) != pdPASS) {
+                        vPortFree(replyMsg);
+                    }
+                }
+            }
+
+            if (rebootRequested) {
+                // Gives TaskSerialWrite, which is higher priority than this
+                // task, a chance to drain the ack onto the link before the
+                // reset -- see review.md's PRCR/timing notes.
+                vTaskDelay(pdMS_TO_TICKS(50));
+                NVIC_SystemReset();
+            }
         }
     }
 

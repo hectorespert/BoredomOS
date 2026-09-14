@@ -53,14 +53,12 @@ SHALL require a reset first.
 - **WHEN** the board is reset with no ground station sending frames
 - **THEN** the port is in CLI mode again and commands are executed
 
-## MODIFIED Requirements
-
-### Requirement: The console CLI is carried on the USB CDC port
+### Requirement: The console CLI answers on the USB port while it is in CLI mode
 
 The firmware SHALL accept text commands and emit text replies on the USB CDC port at
-115200, while that port is in CLI mode. The same port SHALL also carry MAVLink, per
+115200 while that port is in CLI mode. The same port SHALL also carry MAVLink, per
 the `mavlink-link` capability, once it has switched modes. No other port SHALL carry
-the CLI, and the choice SHALL NOT be a build-time option.
+the CLI, and the choice of port SHALL NOT be a build-time option.
 
 #### Scenario: Host opens the USB port after boot
 
@@ -73,3 +71,20 @@ the CLI, and the choice SHALL NOT be a build-time option.
 - **WHEN** any build of the firmware is flashed
 - **THEN** the USB port carries the CLI and, after a valid frame, MAVLink
 - **AND** no build flag moves the CLI to another port
+
+## REMOVED Requirements
+
+### Requirement: The console CLI is carried on the USB CDC port
+
+**Reason**: The requirement forbade MAVLink on the USB port in the flight build and
+made the console's port a build-time choice, naming a single definition a build could
+override to move it. This change makes the USB port carry both protocols at runtime,
+selected by what arrives on it rather than by what was flashed, so both the
+prohibition and the build-time choice cease to hold.
+
+**Migration**: Replaced by *The console CLI answers on the USB port while it is in
+CLI mode*, which keeps the "commands in, text replies out, at 115200" behaviour
+verbatim and states the new mode-dependent scope. The mode-switching behaviour itself
+is covered by *The USB port chooses its protocol from what arrives on it*, above.
+Builds that overrode `CLI_SERIAL` no longer need to: every build carries the CLI and
+MAVLink on the same USB port, distinguished by mode, not by build flag.

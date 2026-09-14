@@ -2,15 +2,12 @@
 #ifndef BOREDOMOS_LINK_H
 #define BOREDOMOS_LINK_H
 
-// The port carrying the MAVLink link and its speed. Override from build_flags:
-// -D LINK_SERIAL=Serial puts the link back on USB CDC for bench work, where
-// LINK_BAUD is ignored because a CDC port has no real line rate.
-// LINK_SERIAL must name a concrete port, never a HardwareSerial reference: a
-// base-class reference selects Print::write and transmits one byte at a time.
+// The radio link is fixed to Serial1: add-usb-dual-protocol gave the USB port
+// its own permanent MAVLink endpoint (see include/Cli.h), so there is no
+// longer a build that needs the radio link moved onto USB, and no override
+// point for the port. LINK_BAUD stays a build-time override.
 
-#ifndef LINK_SERIAL
 #define LINK_SERIAL Serial1
-#endif
 
 #ifndef LINK_BAUD
 #define LINK_BAUD 57600
