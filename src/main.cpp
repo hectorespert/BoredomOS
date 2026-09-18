@@ -93,8 +93,16 @@ uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
 StaticQueue_t serialReadQueueBuffer;
 uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t*)];
 
+// Depth 5, not 4: a fourth independently-clocked TaskMavlink schedule entry
+// (housekeeping, openspec/changes/add-mavlink-housekeeping-telemetry) can be
+// due on the same pass as the three that justified depth 4 -- heartbeat,
+// battery status and a TIMESYNC reply (ARCHITECTURE.md's queue table) -- and
+// a pass where all four coincide is not excluded by anything in the
+// schedule. Re-derived, not assumed, per CLAUDE.md's rule on changing a
+// queue's backing. This depth and the housekeeping cycle length both follow
+// the task count in this file -- a new task needs both re-checked.
 StaticQueue_t serialWriteQueueBuffer;
-uint8_t serialWriteQueueStorage[4 * sizeof(mavlink_message_t*)];
+uint8_t serialWriteQueueStorage[5 * sizeof(mavlink_message_t*)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
@@ -316,13 +324,19 @@ void setup()
   serialReadQueue = xQueueCreateStatic(8, sizeof(mavlink_message_t*), serialReadQueueStorage, &serialReadQueueBuffer);
   configASSERT(serialReadQueue != NULL);
 
-  serialWriteQueue = xQueueCreateStatic(4, sizeof(mavlink_message_t*), serialWriteQueueStorage, &serialWriteQueueBuffer);
+  serialWriteQueue = xQueueCreateStatic(5, sizeof(mavlink_message_t*), serialWriteQueueStorage, &serialWriteQueueBuffer);
   configASSERT(serialWriteQueue != NULL);
 
   Recovery::setPhase(Recovery::BootPhase::QueuesDone);
 
   // With static storage these cannot fail for want of memory, so a NULL handle means
   // an argument is wrong -- a programming error, and worth trapping at boot.
+  //
+  // Every handle set here has a matching entry in src/mavlink.cpp's
+  // housekeeping task table, published over MAVLink as a NAMED_VALUE_INT
+  // round-robin. Adding a task here means adding it there too, and
+  // re-checking serialWriteQueue's depth above -- both follow the task
+  // count (see that table's comment).
   //
   // The link reader, the link writer and Mavlink -- which carries the protocol
   // handler, the heartbeat and the system-time/battery telemetry schedule --

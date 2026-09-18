@@ -81,27 +81,53 @@ None.
 ## Impact
 
 **RAM**, against the current build's own reported headroom (not quoted from another
-change — read fresh via `pio run` on this tree, reproduced twice): `committed
-29084 B of 32768, headroom 3684 B` (minimum floor 1024 B).
+change — read fresh via `pio run` on this tree, reproduced twice before this change
+was implemented, and again after): before, `committed 29084 B of 32768, headroom
+3684 B`; after implementing every task in `tasks.md` that does not need the
+assembled board, `committed 29092 B of 32768, headroom 3676 B` (minimum floor
+1024 B). **The measured delta is 8 B, not the ~337 B this section originally
+estimated** — task 6.1 caught the gap; see the corrected table and explanation
+below.
 
-**This conflicts with `ARCHITECTURE.md:482-489`**, which states `30140 B` committed
+**This conflicted with `ARCHITECTURE.md:482-489`**, which stated `30140 B` committed
 and `2628 B` headroom, last updated at `9483ebe` (`configUSE_TIME_SLICING` landing).
-The two disagree by exactly 1056 B in both directions, which is consistent with
-something freeing RAM after that commit without `ARCHITECTURE.md` being updated —
-not with either number being read wrong. `add-usb-dual-protocol`'s own proposal,
-written independently after that commit, also cites 3684 B. This change uses the
-freshly measured figure, per `CLAUDE.md`'s "read fresh, never quote" rule, and
-Impact/Files below adds correcting `ARCHITECTURE.md`'s stale figure as part of this
-change, so the two stop disagreeing.
+The two disagreed by exactly 1056 B in both directions, consistent with something
+freeing RAM after that commit without `ARCHITECTURE.md` being updated — not with
+either number being read wrong. `add-usb-dual-protocol`'s own proposal, written
+independently after that commit, also cited 3684 B. `ARCHITECTURE.md` now carries
+this change's own post-implementation figures instead (task 7.1), so the two no
+longer disagree.
 
-| Item | Cost | Where |
-|---|---|---|
-| New task | none | — |
-| New queue | none | — |
-| `serialWriteQueue` depth: 4 -> 5 | 291 B (one more possible in-flight `mavlink_message_t`) | FreeRTOS heap, worst case |
-| Round-robin state: a cursor plus a table of the six existing task handles to call `uxTaskGetStackHighWaterMark()` against, skipping any that are `NULL` (no `TaskStatus_t` snapshot needed — unlike `cli.cpp`'s `ps`, this only ever needs the stack mark, not name/priority/state, so it skips that struct's 432 B entirely) | ~30 B, estimate to be replaced by a measurement | `.bss` |
-| One more `ScheduleEntry` in `TaskMavlink`'s existing schedule array | ~16 B | `TaskMavlink`'s own stack (256 words, already sized with headroom per `add-usb-dual-protocol`'s design notes) |
-| | **~337 B of 3684 B headroom** | |
+| Item | Estimated | Measured | Where |
+|---|---|---|---|
+| New task | none | none | — |
+| New queue | none | none | — |
+| `serialWriteQueue` depth: 4 -> 5 | 291 B (one more possible in-flight `mavlink_message_t`) | **4 B** (one more pointer slot in `.bss`) | see below |
+| Round-robin state: a cursor plus a table of the six existing task handles, skipping any that are `NULL` | ~30 B | **~1-4 B** (just the cursor; the table is `const`) | `.bss` |
+| One more `ScheduleEntry` in `TaskMavlink`'s schedule array | ~16 B | **0 B** (`TaskMavlink`'s own stack, not `.bss`/`.data`) | `TaskMavlink`'s stack |
+| | **~337 B of 3684 B headroom** | **8 B of 3684 B headroom** | |
+
+**Why the estimate overstated it by roughly 40x.** Two things in the original
+estimate conflated *capacity* with *footprint*:
+
+- The task-name table (`kNameHeapFree` through `kNameSdWrite`, and the table of
+  handle-pointer/name pairs) is declared `const`. The compiler places `const` data
+  in flash (`.rodata`), not RAM — the ~30 B estimate assumed `.bss` the way a
+  mutable table would need, but nothing here is mutated after it is built.
+- The 291 B "cost" of the queue depth change was never a `.bss`/`.data` allocation
+  to begin with — it was FreeRTOS heap *capacity* (`configTOTAL_HEAP_SIZE`, a fixed
+  `0x1800`-byte array already reserved in `.bss` before this change). Raising the
+  queue's depth means more of that already-reserved 6136 B usable capacity can be
+  in use at once (5200 B worst case before this change, 5504 B after — see
+  `ARCHITECTURE.md` §4), not that the array itself grows. The existing 936 B of
+  slack in that capacity absorbs the increase without `configTOTAL_HEAP_SIZE`
+  needing to change; only the queue's own pointer-slot array (`sizeof(void*)` per
+  extra depth, 4 B on this 32-bit target) is new `.bss`.
+
+The real cost is one pointer in `.bss` (the queue storage array) plus a
+single-byte cursor — `TaskMavlink`'s own stack, not global RAM, absorbs the fourth
+schedule entry, and its high-water mark against the 256-word budget is what task
+6.2 checks on the board, which a RAM figure cannot substitute for.
 
 **Files.** Modified: `src/mavlink.cpp` (new schedule entry, new `COMMAND_LONG` case),
 `src/main.cpp` (`serialWriteQueue`'s depth constant, and the two Risk comments
@@ -127,10 +153,11 @@ loop over a shared `mavlinkHandleInbound()` and moves message construction behin
 the structure as it exists today. Whichever lands second has to carry its addition
 into whatever shape the first one left behind — this change does not depend on that
 one, and either order is workable, but the order should be a decision made when one
-of them is picked up for implementation, not discovered mid-edit. If this change
-lands first, it also shrinks the 3684 B headroom `add-usb-dual-protocol`'s own RAM
-ledger is computed against by the ~337 B above; that change's arithmetic would need
-re-checking against the new baseline, not reused from its current proposal.
+of them is picked up for implementation, not discovered mid-edit. Now that this
+change has landed, `add-usb-dual-protocol`'s own RAM ledger should be computed
+against the measured baseline above (`29092 B` committed, `3676 B` headroom), not
+against the `3684 B` figure its current proposal cites — an 8 B difference, not
+the ~337 B this section originally estimated before implementation corrected it.
 
 `TODO.md`'s *"Publish housekeeping live with `NAMED_VALUE_INT` / `NAMED_VALUE_FLOAT"*
 entry is deleted in the same commit as this proposal.

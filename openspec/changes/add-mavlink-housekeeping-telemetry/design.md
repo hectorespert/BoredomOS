@@ -164,8 +164,12 @@ pass. Depth 4 would drop one of them, deterministically, on that specific
 coincidence, exactly the failure mode the previous version of this design ruled out
 for a single entry's own burst but did not check across entries.
 
-**Cost:** one more `mavlink_message_t*` slot backed by one more possible in-flight
-allocation — 291 B, against the headroom `proposal.md`'s Impact section states.
+**Cost:** measured after implementation at 4 B, not the 291 B first estimated here —
+`proposal.md`'s Impact section explains the gap (task 6.1). The queue's own storage
+array grows by one `mavlink_message_t*` slot (4 B, `.bss`); the extra in-flight
+`mavlink_message_t` this depth allows for draws on `configTOTAL_HEAP_SIZE`'s
+existing 936 B of slack (`ARCHITECTURE.md` §4) rather than growing that fixed-size
+array, so it costs FreeRTOS heap headroom, not `.bss`/`.data`.
 
 **Alternative rejected: stagger housekeeping's phase to never coincide with the
 other three.** Possible for as long as the other three keep exactly their current
