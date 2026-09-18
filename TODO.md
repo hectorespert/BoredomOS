@@ -1484,13 +1484,14 @@ Counting anywhere earlier proves less, and the difference matters:
 
 | Where | What it proves |
 |---|---|
-| In `TaskHeartbeat` | that `TaskHeartbeat` lives — and `sendHeartbeat()` ignores whether `xQueueSend` succeeded, so it lives happily while nothing drains the queue |
+| In `TaskMavlink`'s schedule | that `TaskMavlink` lives — and `sendHeartbeat()` ignores whether `xQueueSend` succeeded, so it lives happily while nothing drains the queue |
 | After `xQueueSend` | that the queue accepted it, not that anyone drains it |
 | After `LINK_SERIAL.write()` | that it left the satellite |
 
-`TaskHeartbeat` alternates `HEARTBEAT` and `SYSTEM_TIME` every 500 ms and stays in the
-reduced task set, so at least two frames a second leave in any working configuration.
-The staleness threshold follows from that rather than being invented.
+`TaskMavlink`'s schedule (`fold-periodic-telemetry-into-mavlink-task` folded this in
+from `TaskHeartbeat`) fires `HEARTBEAT` and `SYSTEM_TIME` every 1 s, 500 ms apart, and
+stays in the reduced task set, so at least two frames a second leave in any working
+configuration. The staleness threshold follows from that rather than being invented.
 
 **What this still would not cover, and the reason is in the specs.** Outbound liveness
 is observable; inbound liveness is not, because silence on the inbound link is the

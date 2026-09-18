@@ -103,10 +103,11 @@ uint8_t getCumulativeCount();
 void setCumulativeCount(uint8_t value);
 
 // The cumulative count recorded at the moment the reduced configuration was last
-// entered. The automatic retry (src/mavlink.cpp's TaskHeartbeat) compares the
-// *current* cumulative count against this snapshot rather than against
-// CUMULATIVE_THRESHOLD, so the retry's own reset does not immediately re-select
-// the reduced configuration -- see design.md finding 3.
+// entered. The automatic retry (src/mavlink.cpp's TaskMavlink, which carries this
+// since fold-periodic-telemetry-into-mavlink-task folded TaskHeartbeat into it)
+// compares the *current* cumulative count against this snapshot rather than
+// against CUMULATIVE_THRESHOLD, so the retry's own reset does not immediately
+// re-select the reduced configuration -- see design.md finding 3.
 uint8_t getCumulativeSnapshot();
 void setCumulativeSnapshot(uint8_t value);
 

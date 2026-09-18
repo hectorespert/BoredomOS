@@ -70,11 +70,15 @@ def test_cli_ps_lists_every_task(link):
         body = body[:-1]
     rows = [line for line in body if not line.startswith("heap free")]
 
-    # The reduced configuration starts only 5 firmware tasks (including Cli
-    # itself) plus IDLE -- 6 rows is the floor in any configuration, not the 7
-    # (now 9, with Cli) the normal configuration happens to show. See tasks.md
-    # task 3.3, which observed both counts on this board.
-    assert len(rows) >= 6, f"expected at least 6 task rows, got {len(rows)}: {rows}"
+    # The reduced configuration starts only 4 firmware tasks -- SerialRead,
+    # SerialWrite, Mavlink, Cli -- plus IDLE: 5 rows is the floor in any
+    # configuration, not the 7 the normal configuration shows (6 firmware
+    # tasks plus IDLE). Was 6/9 before fold-periodic-telemetry-into-mavlink-task
+    # folded TaskHeartbeat and TaskMavlinkBatteryStatus into TaskMavlink's
+    # schedule, which is two fewer tasks in both configurations. See that
+    # change's tasks.md 5.3, which observed the normal-mode count on this board;
+    # the reduced-mode count is not yet observed (that change's task 5.7).
+    assert len(rows) >= 5, f"expected at least 5 task rows, got {len(rows)}: {rows}"
 
     for row in rows:
         fields = row.split()

@@ -214,13 +214,23 @@ extern QueueHandle_t serialReadQueue;
 extern RTC_DS1307 rtc;
 
 // {function, interval_ms, last_ms, enabled} -- last_ms is the tick (in ms since
-// boot) an entry last fired, or, for these seeds, one interval before boot so
-// the first pass finds it already due. An entry is due once
-// now >= last_ms + interval_ms; a fired entry advances with
+// boot) an entry last fired, seeded one interval before TaskMavlink's own start
+// (not before absolute tick zero -- Copilot's PR review caught that the earlier
+// version anchored to boot, which could fire every entry back-to-back on the
+// first pass if setup() ever took longer than an interval) so the first pass
+// finds each entry already due. An entry is due once
+// (now - last_ms) >= interval_ms; a fired entry advances with
 // last_ms += interval_ms rather than to "now", so a late pass does not push
 // the cadence forward -- this is what replaces vTaskDelayUntil's drift-free
 // property now that three producers share one task instead of two dedicated
-// ones. `0u - N` is well-defined unsigned wraparound, not UB.
+// ones.
+//
+// Both comparisons above use "now - last_ms" (an unsigned delta from a fixed
+// reference), never "now >= last_ms + interval_ms" (comparing two absolute,
+// independently-drifting values). Only the delta form survives the 32-bit
+// millisecond wrap at ~49.7 days (TODO.md's `uptime` overflows after ~49.7
+// days), the same shape elapsedMs below already relies on -- also flagged by
+// Copilot's review, which is why it is spelled out here.
 //
 // sendHeartbeat and sendSystemTime are unconditional in every configuration,
 // reduced included: this is the only task that runs in every configuration
@@ -244,26 +254,27 @@ struct ScheduleEntry {
     sendBootStatusText();
 
     TickType_t bootTick = xTaskGetTickCount();
+    uint32_t startMs = (uint32_t)bootTick * portTICK_PERIOD_MS;
     bool stabilityCleared = false;
     bool retryAttempted = false;
 
     ScheduleEntry schedule[] = {
-        { sendHeartbeat,     1000, 0u - 1000u, true },
-        { sendSystemTime,    1000, 0u - 500u,  true },
-        { sendBatteryStatus, 2000, 0u - 2000u, !reducedConfiguration },
+        { sendHeartbeat,     1000, startMs - 1000u, true },
+        { sendSystemTime,    1000, startMs - 500u,  true },
+        { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
     };
 
     for (;;)
     {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        uint32_t nextDue = UINT32_MAX;
+        uint32_t waitMs = UINT32_MAX;
         for (const ScheduleEntry &entry : schedule) {
             if (!entry.enabled) continue;
-            uint32_t due = entry.last_ms + entry.interval_ms;
-            if (due < nextDue) nextDue = due;
+            uint32_t elapsed = now - entry.last_ms;
+            uint32_t due = (elapsed >= entry.interval_ms) ? 0 : (entry.interval_ms - elapsed);
+            if (due < waitMs) waitMs = due;
         }
-        uint32_t waitMs = (nextDue > now) ? (nextDue - now) : 0;
 
         mavlink_message_t* msg;
         if (xQueueReceive(serialReadQueue, &msg, pdMS_TO_TICKS(waitMs)))
@@ -359,7 +370,7 @@ struct ScheduleEntry {
 
         now = xTaskGetTickCount() * portTICK_PERIOD_MS;
         for (ScheduleEntry &entry : schedule) {
-            if (entry.enabled && now >= entry.last_ms + entry.interval_ms) {
+            if (entry.enabled && (now - entry.last_ms) >= entry.interval_ms) {
                 entry.function();
                 entry.last_ms += entry.interval_ms;
             }

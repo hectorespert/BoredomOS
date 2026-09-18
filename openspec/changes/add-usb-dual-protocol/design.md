@@ -145,8 +145,10 @@ Each builder fills a `mavlink_message_t` the **caller** provides, which is what 
 one function serve both transports without a copy:
 
 - `Serial1` passes the heap block it already allocates, exactly as today. No extra
-  copy, and no extra stack in `TaskHeartbeat` or `TaskMavlinkBatteryStatus`, which are
-  128-word tasks with no room for a 291-byte local.
+  copy, and no extra stack in `TaskMavlink`, whose schedule
+  (`fold-periodic-telemetry-into-mavlink-task`) carries what `TaskHeartbeat` and
+  `TaskMavlinkBatteryStatus` used to — a 256-word task with headroom, but still no
+  room to spare for a 291-byte local on top of its existing union of paths.
 - USB passes its `.bss` static, then runs `mavlink_msg_to_send_buffer` and writes.
 
 `mavlinkHandleInbound` returning the reply by value into a caller buffer avoids a sink

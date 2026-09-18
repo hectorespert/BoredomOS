@@ -185,10 +185,27 @@ Without these the questions section 5 asks have no answer. Take them first.
       more. Every `HEARTBEAT` and `SYSTEM_TIME` interval stayed exactly **1.000s**
       through the stimulus — no stall, no slip, including the pass immediately
       after the write. `TIMESYNC` was answered once, as expected
-- [ ] 5.7 **[board] [hands]** Force the reduced configuration (three consecutive
+- [x] 5.7 **[board] [hands]** Force the reduced configuration (three consecutive
       unstable boots, or ten cumulative resets) and confirm `BATTERY_STATUS` stops
       while `HEARTBEAT` and `SYSTEM_TIME` continue, and that `ps` shows the SD tasks
-      absent and `Mavlink` present
+      absent and `Mavlink` present. **Not forced deliberately — happened on its own**
+      from this session's own repeated `pio run -t upload` cycles while verifying
+      the Copilot-review fixes: each flash is a reset, and the cumulative counter has
+      no ground-clear command implemented yet (see `TODO.md`'s
+      *Finish what add-degraded-mode left open*), so it climbed across the whole
+      session until it crossed `CUMULATIVE_THRESHOLD`. Confirmed by decoding a live
+      `HEARTBEAT.custom_mode`: `consecutive=1, cumulative=10` — the ten-cumulative-
+      resets trigger, not the three-consecutive-unstable-boots one. With the board
+      confirmed reduced: `pio test -e bench` showed `test_battery_status_every_2s`
+      failing at 0 Hz (expected — the schedule's `!reducedConfiguration` flag
+      withholding it, not a regression) while `HEARTBEAT`/`SYSTEM_TIME` kept passing
+      at 1 Hz, and `test_first_heartbeat_reports_reduced_state` passed. `ps` on the
+      flight build then showed exactly `Cli`, `Mavlink`, `SerialRead`,
+      `SerialWrite` + `IDLE` — 5 rows, `Logger`/`SdWrite` absent, matching the fix
+      to `check_cli.py`'s floor in this same round of edits. All three things this
+      task asks to confirm are confirmed; the board is left in the reduced
+      configuration this produced, since there is no way to clear it without waiting
+      out the 30-minute automatic retry or the unimplemented ground command
 - [ ] 5.8 **[board] [hands]** Pull the card, boot, and confirm the firmware still
       reaches steady state with the schedule intact
 - [ ] 5.9 **[board] [hands]** Read a fresh `data*.mpk` back and confirm the records
@@ -234,7 +251,19 @@ Without these the questions section 5 asks have no answer. Take them first.
       **Not yet run: `pio test` on the flight build**, which needs the USB-TTL
       adapter this session does not have; that is a narrower remaining check, not a
       substitute for this one. `pio run -t upload` still owed before the board is
-      left in flight configuration
+      left in flight configuration.
+
+      **Re-run later the same session, after the Copilot-review fixes, showed one
+      expected divergence — not a regression.** By then the board had crossed into
+      the reduced configuration from this session's own repeated flashing (see
+      5.7): `test_battery_status_every_2s` failed at 0 Hz, exactly what withholding
+      `BATTERY_STATUS` in reduced mode predicts, and the other nine cases (now ten,
+      `test_first_heartbeat_reports_reduced_state` no longer self-skipping) passed
+      including `test_heartbeat_at_1hz` and `test_system_time_at_1hz` — the two the
+      wraparound and boot-anchor fixes touch most directly. The run's overall
+      status was `ERRORED` from a `SIGHUP` after the per-case results were already
+      recorded; every individual case's PASS/FAIL/SKIP is unaffected and is what
+      this note reports
 - [x] 6.2 Run `pio check` and confirm no new finding against the pre-change baseline;
       verify by comparing counts, noting that `TODO.md` already records the baseline
       as 13 LOW findings rather than 12. First pass found 14 (one new: `entry` in the
