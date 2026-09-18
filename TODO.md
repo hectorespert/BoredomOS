@@ -551,30 +551,6 @@ To decide:
   chunked, not dumped as every `PARAM_VALUE` at once.
 
 
-### Publish housekeeping live with `NAMED_VALUE_INT` / `NAMED_VALUE_FLOAT`
-
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `src/logger.cpp`
-
-The whole housekeeping log exists to size the stacks, and today it can only be
-consulted by pulling the card out of the board. `NAMED_VALUE_INT` (252) and
-`NAMED_VALUE_FLOAT` (251) allow publishing the free heap and each task's high-water
-mark over the link, live, without inventing custom messages or touching the `.mpk`
-schema.
-
-It is the cheap way to close the loop that `ARCHITECTURE.md` describes: the
-high-water marks exist to size the stacks, so review them after changing a task
-body. With this they are reviewed with the board assembled, rather than after the
-fact.
-
-To decide: which values are published and at what rate — there are eight fields and
-the name takes 10 characters per message, so at 1 Hz this alone is not free over a
-narrow link — and whether it should be exclusive to the profile of *[Debug and
-release builds...]*.
-
-Partial alternative: `MEMINFO` (152) for the heap, although it is ArduPilot-specific
-and does not cover the per-task stacks.
-
 
 ## To change
 
