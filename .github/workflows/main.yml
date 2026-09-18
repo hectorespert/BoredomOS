@@ -22,7 +22,12 @@ jobs:
       uses: actions/cache@v6
       with:
         path: ~/.platformio
-        key: ${{ runner.os }}-${{ hashFiles('**/lockfiles') }}
+        # hashFiles('**/lockfiles') hashed a file that has never existed in this
+        # repo, so the key was a constant and the cache was never invalidated --
+        # harmless while the toolchain never changed, silently stale once it does.
+        key: ${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+        restore-keys: |
+          ${{ runner.os }}-
     - name: Set up Python
       uses: actions/setup-python@v7
     - name: Install PlatformIO

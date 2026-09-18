@@ -231,17 +231,95 @@ Implementation points:
 - Check in `test/test_main.cpp`, which runs on real hardware and can therefore
   validate the state with the board plugged in (charging) and unplugged.
 
-### Download the SD files over MAVLink FTP
+### Download the flight log over the MAVLink log protocol
 
 **Status:** proposed
 **Scope:** `src/mavlink.cpp`, `lib/SdData`, `src/sdwrite.cpp`, `src/main.cpp`
 
 Today the housekeeping log can only be recovered by pulling the card out of the
-board: nothing exposes it over the link. Implementing MAVLink FTP
-(`FILE_TRANSFER_PROTOCOL`) would allow listing and downloading `data0..N.mpk` and
-`index.bin` from the ground with the reference GCS (`ftp list` / `ftp get` in
-MAVProxy), which is the only realistic way of reading them with the satellite
-assembled.
+board: nothing exposes it over the link, which is not a realistic way of reading it
+with the satellite assembled.
+
+This entry is the **log protocol**: `LOG_REQUEST_LIST` / `LOG_ENTRY` /
+`LOG_REQUEST_DATA` / `LOG_DATA` / `LOG_REQUEST_END` / `LOG_ERASE`, ids 117–122. Its
+sibling is *[Serve the SD card over MAVLink FTP]*, and **the firmware wants both**:
+they are not alternatives and the two ground tools this project targets drive each of
+them for different things.
+
+| | log protocol | FTP |
+|---|---|---|
+| what it exposes | the flight logs, as an enumerated list | the filesystem, by path |
+| the GCS finds them | by itself, from `LOG_ENTRY` | only if told the filename |
+| QGroundControl | *Analyze → Log Download* | parameter and mission files, component metadata |
+| MAVProxy | `module load log`, `log list` / `log download` | `module load ftp`, `ftp list` / `ftp get` |
+| can write | no (`LOG_ERASE` only) | yes, which is the dangerous part |
+| reaches `index.bin` | no | yes |
+
+So this one is the path an operator uses to pull a flight log without knowing anything
+about the card's layout, and FTP is the one that reaches everything else. All six
+messages here are already in `common/` in the dialect this project compiles, so no
+dialect change is needed.
+
+Whichever lands first settles the card-access design for the other — see the
+concurrency point below.
+
+**Depends on *[The flight log is a private MessagePack format no tool can read]*.**
+Downloading `.mpk` files accomplishes little, since nothing on the ground opens one.
+This feature is worth having once the log is DataFlash `.BIN`.
+
+Points to resolve before implementing:
+
+- **Mapping the ring onto log ids.** `LOG_ENTRY` carries `id`, `num_logs`,
+  `last_log_num`, `time_utc` and `size`. Decide how `data0..N.BIN` map onto ids given
+  that the ring overwrites in place, and where `time_utc` comes from — the `TIME`
+  record at the head of each file is the natural source.
+- **Concurrency with `TaskSdWrite`.** `lib/SdData` keeps `_dataFile` open for writing
+  while the logger dumps at 1 Hz, and the SD card hangs off SPI with `CS` on pin 9.
+  Two tasks touching the card at once is corruption: either a mutex is needed, or
+  access goes through `TaskSdWrite`, which already owns the medium. This is the main
+  design decision of this feature, and it is **shared with *[Serve the SD card over
+  MAVLink FTP]***: both need a reader alongside the writer, so solve it once, in
+  whichever lands first, and let the other reuse it. Solving it twice, differently, is
+  the way this ends up with two paths to the card and a corruption bug that only
+  appears when both are in use.
+- **RAM.** The usual constraint: `mavlink_message_t` alone is ~290 bytes and the
+  stacks are tight, between 96 and 256 words. A download path with its read buffer
+  does not fit without measuring; the log high-water marks have to be checked before
+  and after.
+- **Download time.** `LOG_DATA` moves 90 useful bytes in a 111-byte frame, ~4,6 KB/s
+  at `LINK_BAUD`. Whether a whole file is viable is set by the ring default, which is
+  where the size criterion lives — see *[The default SD ring is 4 GiB and never
+  rotates]*. Serving by offset is supported by the protocol (`LOG_REQUEST_DATA` takes
+  `ofs` and `count`) and is worth implementing regardless.
+- **Consistency of what is downloaded.** The active file is being written while it is
+  read. Define whether it is served as is — the DataFlash `0xA3 0x95` header means a
+  half-written record at the end is survivable rather than fatal, which FTP over
+  MessagePack was not — or whether only the closed files of the ring are offered.
+- **What QGroundControl calls the result.** QGC picks how to treat the downloaded
+  bytes from the autopilot type, and this firmware announces `MAV_AUTOPILOT_GENERIC`.
+  See the identity point in *[The flight log is a private MessagePack format no tool
+  can read]*; it is a decision shared with that entry.
+- Keep the identity triple of the rest of the firmware: system `1`,
+  `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+
+### Serve the SD card over MAVLink FTP
+
+**Status:** proposed
+**Scope:** `src/mavlink.cpp`, `lib/SdData`, `src/sdwrite.cpp`, `src/main.cpp`
+
+MAVLink FTP (`FILE_TRANSFER_PROTOCOL`) exposes the card as a filesystem: listing a
+directory and reading a file by path, with the reference GCS (`ftp list` / `ftp get`
+in MAVProxy, and QGroundControl's own uses). It is the sibling of *[Download the
+flight log over the MAVLink log protocol]*, and the firmware wants both — that entry
+has the table of which tool drives which, and why one does not replace the other.
+
+The short version: the log protocol is the one an operator reaches for to pull a
+flight log, because the GCS enumerates them without being told anything. FTP is what
+reaches **everything the log protocol cannot name** — `index.bin`, and any
+configuration file the card grows later. *[Implement the MAVLink parameter
+protocol]* raises storing parameters on the already-mounted card as one of its
+options; if that is where it lands, FTP is how the ground inspects and repairs them,
+and this entry stops being a convenience.
 
 The slot is already marked: `src/mavlink.cpp` has an empty
 `case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:` in the `TaskMavlink` switch.
@@ -252,25 +330,29 @@ Points to resolve before implementing:
   (`ListDirectory`, `OpenFileRO`, `ReadFile`, `Terminate`, burst reads...). Decide
   the minimum subset: listing and reading read-only covers the use case; writing and
   deleting from the ground is another discussion, and a dangerous one over the file
-  the firmware holds open.
-- **Concurrency with `TaskSdWrite`.** `lib/SdData` keeps `_dataFile` open for
-  writing while the logger dumps at 1 Hz, and the SD card hangs off SPI with `CS` on
-  pin 9. Two tasks touching the card at once is corruption: either a mutex is
-  needed, or FTP access goes through `TaskSdWrite`, which already owns the medium.
-  This is the main design decision of this feature.
+  the firmware holds open. Note that read-only is also what makes this strictly
+  additive to the log protocol rather than a second way to destroy the log —
+  `LOG_ERASE` is already the sanctioned way to do that.
+- **Concurrency with `TaskSdWrite`.** The same problem, with the same two answers — a
+  mutex, or routing through the task that owns the medium — as the concurrency point
+  of *[Download the flight log over the MAVLink log protocol]*. **Solve it once.** If
+  that entry lands first this one inherits its answer; if this one lands first, build
+  the access path so a second reader can use it.
 - **RAM.** The usual constraint: `mavlink_message_t` alone is ~290 bytes and the
   stacks are tight, between 96 and 256 words. An FTP task with its session buffer
   does not fit without measuring; the log high-water marks have to be checked before
-  and after.
-- **Download time.** By default `SdData` is 4 files of 1 GiB. Over a radio link,
-  and with the ~239 useful bytes each FTP packet moves, downloading a whole one is
-  not viable: that default size is worth revisiting, or supporting reads by offset
-  to fetch only the stretch of interest. See *[The default SD ring is 4 GiB and
-  never rotates]*.
-- **Consistency of what is downloaded.** The active file is being written while it
-  is read. Define whether it is served as is (the receiver may find a half-written
-  MessagePack record at the end) or whether only the closed files of the ring are
-  offered.
+  and after. FTP's session state is the larger of the two features, so if both land,
+  measure with both present.
+- **Download time.** Each FTP packet moves ~239 useful bytes, so a whole ring file is
+  only viable once the ring has a sane default — see *[The default SD ring is 4 GiB
+  and never rotates]*, which derives the size from download time. Reads by offset are
+  part of the protocol and let the ground fetch only the stretch of interest.
+- **Consistency of what is served.** The active file is being written while it is
+  read. Define whether it is served as is or whether only the closed files of the ring
+  are offered. Once *[The flight log is a private MessagePack format no tool can
+  read]* lands, a half-written record at the tail is survivable rather than fatal,
+  because DataFlash records carry a `0xA3 0x95` resynchronisation header — but
+  `index.bin` has no such property and a torn read of it is simply wrong.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 
@@ -360,11 +442,13 @@ To decide:
   `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES` (520). It is what the GCS asks as soon as
   it connects, to know what the vehicle can do; with no answer it treats you as a
   minimal node. Cheap to implement and it improves everything else.
-- **Telemetry rates from the ground.** Today they are hard-wired in `TaskHeartbeat`
-  and `TaskMavlinkBatteryStatus`. Rather than implementing `REQUEST_DATA_STREAM`,
+- **Telemetry rates from the ground.** Today they are hard-wired in `TaskMavlink`'s
+  schedule table (`fold-periodic-telemetry-into-mavlink-task`). Rather than
+  implementing `REQUEST_DATA_STREAM`,
   which is deprecated, `MAV_CMD_SET_MESSAGE_INTERVAL` (511) with `MESSAGE_INTERVAL`
   (244) is the current mechanism. It matters over a narrow radio link, and even more
-  so if *[Download the SD files over MAVLink FTP]* lands and competes for it.
+  so once *[Download the flight log over the MAVLink log protocol]* or *[Serve the SD
+  card over MAVLink FTP]* lands and competes for it.
 - The parameter protocol has its own entry:
   *[Implement the MAVLink parameter protocol]*.
 
@@ -587,6 +671,178 @@ side the convergence replaces that change's telemetry scheduler with a queue dra
 leaves everything else — mode detection, the `availableForWrite()` measurement, the
 deleted `bench`, the HIL cases — untouched.
 
+### The flight log is a private MessagePack format no tool can read
+
+**Status:** defined
+**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `src/logger.cpp`, `src/mavlink.cpp`,
+`include/Data.h`, `platformio.ini`, `test/test_libs/test_main.cpp`
+
+`src/sdwrite.cpp` builds an ArduinoJson `JsonDocument` per sample and `lib/SdData`
+serialises it as MessagePack into `data<i>.mpk`. The result is a format that costs
+more than any of the standard ones and that nothing on the ground can open.
+
+**The size.** Counting the encoding by hand — not measured on the board — one record
+is 254 bytes, of which 208 are field-name strings rewritten 86 400 times a day:
+
+```
+  claves ("serialWriteAvailableStack" = 25 B, y catorce más) .... 208 B
+  cabeceras fixstr/fixmap ....................................... 15 B
+  valores, que son el dato de verdad ............................ 31 B
+                                                                 ------
+                                                                 254 B
+```
+
+82 % del registro de vuelo son los nombres de los campos. A 1 Hz son ~22 MB/día.
+
+**The RAM.** ArduinoJson 7 has no static document: `Memory/Allocator.hpp:27` is
+`return malloc(size);`. `TaskSdWrite` therefore mallocs and frees on the **newlib**
+heap once a second, for ever — the only recurring allocator in the firmware that does
+not follow the queue ownership protocol of `ARCHITECTURE.md` section 4.
+
+That is a second heap, distinct from the budgeted FreeRTOS one, and the board reserves
+both. Measured on the linked image:
+
+```
+  .heap          8192 B   newlib, BSP_CFG_HEAP_BYTES (0x2000) in the variant's
+                          bsp_cfg.h -- a fixed array, not leftover RAM
+  FreeRTOS heap  6144 B   configTOTAL_HEAP_SIZE (0x1800), inside .noinit
+                          ------
+                         14336 B, 44 % of the chip's 32 KB
+```
+
+`pio run` reports `committed 31300 B of 32768, headroom 1468 B`, so the 8192 are
+already spent whether or not anything uses them. Dropping ArduinoJson does not shrink
+`.heap` by itself — it is a compile-time constant — but it removes the 1 Hz churn from
+it and raises a question nobody has asked: **what is that heap's actual high-water
+mark?** Its remaining users would be `String` (`SdData::getLogFileName()`, and the SD
+library internally) and whatever the core does at startup. If 0x2000 turns out to be
+several times what is needed, lowering it is reclaimed RAM of a kind this project has
+none of. Nothing measures it today.
+
+**The tooling.** Nothing in this repository or anywhere else reads a `.mpk`. There is
+no script, no note and no test. `CLAUDE.md` tells you to check a task's high-water
+mark in the SD log after changing its body; the procedure for doing so has never been
+written down.
+
+The proposal is **ArduPilot DataFlash (`.BIN`)**, decided over ULog (explicitly
+excluded) and over MAVLink `.tlog`. `.tlog` loses on the first requirement: carrying
+the seven high-water marks as `NAMED_VALUE_INT` costs ~40 B per scalar once the
+MAVLink 2 header, the CRC and the tlog timestamp are counted, so nine scalars a
+second would be ~360 B/s — worse than today. A private dialect would fix the size and
+break the second requirement.
+
+DataFlash fits for three reasons specific to this project:
+
+- **The reader is already a dependency.** `test/test_hil/requirements.txt` pulls in
+  `pymavlink`, whose `DFReader` parses `.BIN` with arbitrary `FMT` definitions, and
+  which ships `mavlogdump.py` and `MAVExplorer.py`. The reference GCS is MAVProxy,
+  from the same family.
+- **Every record starts with `0xA3 0x95`**, which is a resynchronisation marker. The
+  expected way for a CubeSat log to end is the power dying mid-write; today that
+  truncation makes the rest of the file unparseable, because MessagePack records have
+  no framing. Worse, on the next boot `begin()` appends to the same file, so the
+  corrupt stretch ends up in the middle rather than at the end.
+- **`FMT` makes schema evolution additive.** *[Add the GY-87 IMU]*, *[Add a
+  temperature sensor]* and *[Detect when the battery is charging]* all say, in those
+  words, that they change the `.mpk` schema. With `FMT` they declare a new message id
+  instead of widening an existing record, and old logs stay readable.
+
+**The message set.** Separate messages, not one wide record:
+
+| id | name | format | labels | bytes | rate |
+|---|---|---|---|---|---|
+| 128 | `FMT` | `BBnNZ` | `Type,Length,Name,Format,Columns` | 89 | preamble |
+| 129 | `TIME` | `QIB` | `TimeUS,Unix,Src` | 16 | on change |
+| 130 | `SYS` | `QHHHHHHHH` | `TimeUS,Heap,Log,HB,Sta,SD,MAV,SRd,SWr` | 27 | 1 Hz |
+| 131 | `PWR` | `QHb` | `TimeUS,mV,Pct` | 14 | 0,5 Hz |
+
+356 bytes of preamble per file, then **34 B/s** — the same as a single combined
+record would cost, because `PWR` runs at the rate the battery is already read at
+rather than repeating an unchanged value at 1 Hz. Against 254 B/s that is a factor of
+7,5, and ~2,9 MB/day instead of ~22.
+
+Separating them buys two things a wide record cannot:
+
+- **`PWR` distinguishes absent from zero.** No battery means no records, not
+  `millivolts: 0` — which is the failure mode of *[The SD log never stores the battery
+  data]*, where the field has been written as zero in every file ever recorded. It
+  also settles the concern that entry deliberately leaves open: the producer becomes
+  `TaskMavlink`, which already reads `lib/Battery` every 2 s as part of its own
+  schedule (`fold-periodic-telemetry-into-mavlink-task`), so `Battery`'s unguarded
+  cache never becomes state shared between two priorities — `TaskLogger` at `LOW`
+  still would not touch it.
+- **`TIME` makes a clock set visible.** It is emitted at boot, on every ring
+  rotation, and whenever `setUnixTime()` accepts a time from the ground. `Src` records
+  the provenance — `0` internal RTC never synchronised (degraded mode), `1` seeded
+  from the DS1307, `2` set from the ground. Today a mid-flight clock set produces a
+  discontinuity in `unixtime` with nothing marking it, and a degraded-mode timestamp
+  is indistinguishable from a real one. Emitting it on rotation is what lets each ring
+  file be read on its own, for the same reason the `FMT` records are re-emitted there.
+
+`TimeUS` is microseconds since boot in `uint64`, which is the DataFlash convention and
+what makes MAVExplorer pick the time axis without configuration. It also retires
+*[`uptime` overflows after ~49.7 days]* instead of inheriting it: the 32-bit tick
+counter is extended in software by an accumulator sampled at 1 Hz, far faster than its
+wrap period.
+
+**What this costs elsewhere.** Two producers post to `sdWriteQueue` instead of one —
+`TaskLogger` for `SYS`, `TaskMavlink` for both `PWR` (from its own schedule) and
+`TIME` (on a clock set) — so the heap backing has to be re-derived, not estimated.
+Both `PWR` and `TIME` come from the same task, and the queue protocol allocates one
+block at a time per producer (§4), so this is still one producer block for
+`TaskMavlink` even though it can emit either record — not the three producers an
+earlier draft of this entry assumed, from when `TaskHeartbeat` and
+`TaskMavlinkBatteryStatus` were separate tasks (`fold-periodic-telemetry-into-
+mavlink-task`). Depth plus one block per producer holding an unsent item plus one
+per consumer gives 7 blocks, not 8, against a block that shrinks from
+`sizeof(Data)` = 56 B to a formed record of ~32 B — well under today's 336 B. This
+still has to be computed against the actual record sizes once decided, not
+eyeballed, and `ARCHITECTURE.md` section 4 updated to match. `TaskSdWrite` also has
+to be able to build a `TIME` record itself, since rotation happens inside it and it
+cannot ask `TaskMavlink` for one; reading `lib/SystemTime` from there is allowed —
+`src/logger.cpp` already does — but it is worth stating rather than discovering.
+
+Removing ArduinoJson from `lib_deps` should return flash as well as the newlib heap
+churn, and `TaskSdWrite` should get cheaper without `JsonDocument`. The baseline to
+measure against, from `pio run` on the flight environment before any of this:
+
+```
+  Flash       92628 B of 262144 (35,3 %)
+  RAM         committed 31300 B of 32768, headroom 1468 B
+              .data 740 · .noinit 28 · .bss 21060
+              .heap 8192 · .stack_dummy 1024 · .vector_table 256
+```
+
+Flash and the section sizes are settled by a build. `TaskSdWrite`'s stack is not: a
+change that touches a task body is not verified by building it, and the 256-word
+figure only proves out against the high-water mark in the log on the board.
+
+To decide:
+
+- **`SdData`'s API.** `write(const JsonDocument&)` should become
+  `write(const uint8_t*, size_t)`, which returns the ring to being format-agnostic and
+  moves format knowledge to `src/sdwrite.cpp`, the file that owns the card. It changes
+  the public API of a library `test/test_libs/test_main.cpp` exercises, so it drags in
+  the destructive Unity suite.
+- **How the preamble gets written.** The `FMT` and `TIME` records must be re-emitted
+  every time a file is opened — boot, rotation and resume from `index.bin`. `SdData`
+  opens files today without telling anyone. Either it gains a header blob or a
+  callback, or rotation moves up into `src/sdwrite.cpp`. This is the main design
+  decision, and it touches *[`SdData::begin()` is not idempotent, and the Unity tests
+  delete its open file]*.
+- **The file extension.** `data<i>.mpk` becomes `data<i>.BIN`, which is what the tools
+  filter on. `cleanSdFiles()` in the Unity suite and the destructive-test wording in
+  `CLAUDE.md` and `ARCHITECTURE.md` name the old one.
+- **The identity triple.** QGroundControl decides how to treat a downloaded log from
+  the autopilot type, and this firmware announces `MAV_AUTOPILOT_GENERIC`
+  (`src/mavlink.cpp:55`), which `CLAUDE.md` fixes as an invariant. Claiming
+  `MAV_AUTOPILOT_ARDUPILOTMEGA` would make QGC label the bytes correctly at the price
+  of lying about the vehicle. MAVProxy does not care — `mavlogdump.py` reads the
+  bytes, not the label. Only relevant together with *[Download the flight log over the
+  MAVLink log protocol]*.
+- **The ring size.** Left to *[The default SD ring is 4 GiB and never rotates]*, which
+  this entry gives a criterion for.
+
 ### The default SD ring is 4 GiB and never rotates
 
 **Status:** defined
@@ -600,13 +856,34 @@ opposite holds:
 - The ring needs a card with 4 GiB free. On a smaller one, the first file simply
   grows until `SD.open` or the write fails, and that failure is silent — see *[SD
   logging failure is silent]*.
-- One housekeeping record is on the order of a hundred bytes and `src/logger.cpp`
-  writes one per second. Filling 1 GiB at that rate takes around 115 days, so
-  rotation never actually happens in any realistic mission: `writeLogIndex()`,
-  `index.bin` and the whole resume-after-power-cycle mechanism are effectively dead
-  code that has never run in flight.
-- It also makes *[Download the SD files over MAVLink FTP]* impractical: nothing that
-  size comes down a telemetry radio.
+- One housekeeping record is 254 bytes — not the hundred this entry first estimated;
+  the encoding is counted out in *[The flight log is a private MessagePack format no
+  tool can read]* — and `src/logger.cpp` writes one per second. Filling 1 GiB at that
+  rate takes about 49 days, so rotation never actually happens in any realistic
+  mission: `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle
+  mechanism are effectively dead code that has never run in flight.
+- It also makes both download paths impractical — *[Download the flight log over the
+  MAVLink log protocol]* and *[Serve the SD card over MAVLink FTP]*: nothing that size
+  comes down a telemetry radio.
+
+**A criterion for the size.** Either download path moves roughly the same order of
+bytes: ~4,6 KB/s at `LINK_BAUD` for the log protocol (90 useful bytes in a 111-byte
+`LOG_DATA` frame at 57 600), and ~239 useful bytes per packet for FTP. So the file
+size can be derived from how long a download may take rather than picked round. At the
+34 B/s of the DataFlash format proposed in *[The flight log is a private MessagePack
+format no tool can read]*, using the log protocol's rate:
+
+| file size | covers | download |
+|---|---|---|
+| 1 GiB (today) | ~365 days | ~67 hours |
+| 4 MiB | ~34 h | ~15 min |
+| **1 MiB** | **~8,6 h** | **~3,7 min** |
+| 256 KiB | ~2,1 h | ~56 s |
+
+Four files of 1 MiB give ~34 h of continuous log, rotate several times a day — so
+`index.bin` stops being dead code — and each comes down in under four minutes. Note
+the dependency: at today's 254 B/s that same 1 MiB would hold 1,1 h, so the size only
+becomes useful once the format changes.
 
 Related: `test/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
 TEST_FILE_SIZE_MB)` with `TEST_FILE_SIZE_MB = 1024UL`, which is bytes, not
@@ -672,7 +949,8 @@ Current limitations, in order of impact:
 - **One second resolution.** `getUnixTimeUsec()` and `getUnixTimeNsec()` are
   `getUnixTime()` multiplied by 10^6 and 10^9, so the sub-second part is always
   zero. That goes into the `TIMESYNC` reply and into the `SYSTEM_TIME` emitted every
-  second from `TaskHeartbeat`: the GCS receives a timestamp quantised to the second
+  second from `TaskMavlink`'s schedule (`fold-periodic-telemetry-into-mavlink-task`
+  folded this in from `TaskHeartbeat`): the GCS receives a timestamp quantised to the second
   and its offset estimate inherits that error of up to ±1 s. Combining the RTC
   (seconds) with `xTaskGetTickCount()` or `micros()` for the fraction is what gives
   real resolution.
@@ -698,6 +976,44 @@ incoming `SYSTEM_TIME`.
 
 Touching `lib/SystemTime` means running `pio test`: `test/test_main.cpp` validates
 against the real DS1307, so this cannot be checked without the board.
+
+### Decide whether `SYSTEM_TIME` deserves 1 Hz
+
+**Status:** proposed
+**Scope:** `src/mavlink.cpp`, `openspec/specs/mavlink-link/`, `test/test_hil/`
+
+The link emits `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and `BATTERY_STATUS` every 2 s.
+Two of those three are where convention would put them, and one is not.
+
+`HEARTBEAT` at 1 Hz is not a policy this firmware gets to choose — it is the
+protocol's contract, and ground stations use its absence to declare the link dead.
+`BATTERY_STATUS` every 2 s is in line with how autopilots rate battery telemetry, and
+on a satellite the voltage moves over minutes anyway. `SYSTEM_TIME` at 1 Hz is the
+outlier: conventionally it belongs to a slow stream group rather than the 1 Hz core,
+nothing on the ground consumes it that often, and it costs about 24 B/s of the ~69 B/s
+the link emits — roughly a third of the downlink, spent restating a clock that
+advances predictably.
+
+There is a counter-argument specific to this firmware, and it is why this is a
+question rather than a defect. The RTC may be absent — the reduced configuration runs
+on ticks since boot — and it is the ground that sets the clock through inbound
+`SYSTEM_TIME` and `TIMESYNC`. Emitting it often is how the ground notices the clock is
+unset or wrong. Whether noticing that needs 1 Hz, or 0.2 Hz would do, is the decision.
+
+Bandwidth is not the argument today: at `LINK_BAUD` 57600 the whole telemetry set is
+about 1.2% duty cycle. Decide this against whatever the real radio's budget and pass
+structure turn out to be, not against the bench UART.
+
+**Changing any of these rates alters the MAVLink surface.** It needs a spec delta —
+`openspec/specs/mavlink-link/spec.md` states the three rates twice, in the scenario at
+lines 20-21 and again at line 90 — and it touches whichever HIL cases assert them. It
+is deliberately not folded into
+`openspec/changes/fold-periodic-telemetry-into-mavlink-task/`, whose value rests on
+being invisible from the ground; once that change lands, the rate is one number in its
+schedule table.
+
+Related: *Improve clock synchronisation* above covers the quality of the timestamp,
+not how often it is sent. The two are independent.
 
 ### Fix the pointer arithmetic in the unknown-message `STATUSTEXT`
 
@@ -754,7 +1070,9 @@ The fix is to declare the `extern`, include the header and fill `energy` with
 125 ms, so calling it at 1 Hz from `TaskLogger` adds no ADC reads.
 
 Careful with one thing: that cache (`_cachedVoltage`, `_lastRead`) is not guarded,
-and today only `TaskMavlinkBatteryStatus` touches it. Reading it from `TaskLogger`
+and today only `TaskMavlink` touches it, as part of its own `BATTERY_STATUS`
+schedule entry (`fold-periodic-telemetry-into-mavlink-task` folded this in from
+`TaskMavlinkBatteryStatus`). Reading it from `TaskLogger`
 as well makes `Battery` shared state between two tasks of different priorities. The
 worst case is benign — a torn read of a `float` and a stale timestamp, not
 corruption of anything else — but it should be a deliberate decision, not an
@@ -773,8 +1091,16 @@ tight it actually measures.
 `openspec/changes/add-console-cli` gave the firmware a `ps` command, and the first
 live reading it produced showed `TaskLogger`'s unused stack at **5 of 96 words** —
 20 bytes of headroom, tighter than every other task by a wide margin. The
-next-tightest is `TaskHeartbeat` (128 words) at 28 free; everything else has more
-room than that.
+next-tightest was `TaskHeartbeat` (128 words) at 28 free; everything else had more
+room than that. `TaskHeartbeat` no longer exists as its own task
+(`fold-periodic-telemetry-into-mavlink-task` folded it, and
+`TaskMavlinkBatteryStatus`, into `TaskMavlink`'s schedule), so this comparison
+point is gone. That change's task 5.10 re-read `TaskLogger`'s own margin on the
+board: **6 of 96 words free**, up from 5 — the small improvement `include/Data.h`'s
+`Tasks` losing two fields predicted, confirmed rather than assumed. Still the
+tightest margin in the project by a wide one-word difference from what used to be
+the next-tightest task, and still worth watching after any further change to
+`Data`'s size or to `src/logger.cpp`'s body.
 
 Nothing here is new to `add-console-cli`: `src/logger.cpp`'s task body is untouched
 by it, and the 96-word size predates it too — *[The SD log never stores the battery
@@ -905,6 +1231,86 @@ Tied to this: `lib_deps` pins no library version at all. Reproducing a build fro
 six months ago is not possible today, and a breaking update to any of the six lands
 in the next `pio run` with no warning.
 
+### The toolchain and uploader are x86_64-only, and Rosetta ends with macOS 28
+
+**Status:** proposed
+**Scope:** `platformio.ini`, upstream — no code of this project
+
+Neither of the two binaries this project needs to build and flash runs natively on an
+Apple Silicon Mac, and both are reached only through Rosetta:
+
+- **The compiler.** `platform-renesas-ra` pins `toolchain-gccarmnoneeabi` to
+  `~1.70201.0` (GCC 7.2.1). That package's manifest declares
+  `"system": ["darwin_x86_64", "darwin_arm64"]` but ships **one** Mach-O x86_64 binary
+  for both, so PlatformIO installs it on Apple Silicon without complaint and every
+  compile then fails with `Bad CPU type in executable`.
+- **The uploader.** `tool-dfuutil-arduino@1.11.0` — the only published version — has
+  exactly the same false claim and the same single x86_64 file.
+
+**This has been investigated and measured; the findings are worth not rediscovering.**
+
+A native arm64 alternative exists for the compiler and works:
+`platformio/toolchain-gccarmnoneeabi@1.120301.0` (GCC 12.3.1) has a genuine
+`darwin_arm64` artifact, set through `platform_packages` in `[env]`. It builds all
+three environments clean, `pio check` stays at 13 LOW findings, no new `-Wall -Wextra`
+warning appears in `src/`, `lib/` or `include/`, and RAM **improves**: `committed
+31176 B of 32768`, `headroom 1592 B` against 1468 today. Do not reach for the newest
+version instead: `1.140201.0` (GCC 14.2.1) fails to compile the Arduino core's
+vendored TinyUSB (`cores/arduino/tinyusb/rusb2/dcd_rusb2.c:289` — `TU_ASSERT` returns a
+value from a `void` function, which GCC 14 rejects as a hard error that `-w` does not
+suppress), because `framework-arduinorenesas-uno` publishes only version `1.6.0` and
+its own `installed.json` records Arduino building it with `arm-none-eabi-gcc
+7-2017q4` — upstream has never compiled it with anything newer.
+
+The uploader has **no working answer**. `platform_packages` cannot reach it:
+`builder/main.py:150` resolves it by the hardcoded name `tool-dfuutil-arduino`. An
+`upload_command` override does work as a mechanism and is CI-safe (only the upload
+target evaluates it), and `platformio/tool-dfuutil@1.11.241029` is a genuine arm64
+build — but that binary cannot claim the device on macOS: with the board confirmed in
+DFU mode by `ioreg` (`Santiago DFU`, `0x2341:0x0369`), `dfu-util -l` lists nothing. It
+also rejects `-Q`, which is an Arduino-fork flag absent upstream. A Homebrew
+`dfu-util` links its own libusb and might succeed; untested.
+
+Where each piece is maintained, since no manifest points at the right place — the
+`tool-dfuutil-arduino` manifest names upstream SourceForge while shipping Arduino's
+patched fork:
+
+| Piece | Repository |
+|---|---|
+| Arduino core (the TinyUSB that GCC 14 rejects) | `github.com/arduino/ArduinoCore-renesas` |
+| PlatformIO platform (the hardcoded uploader name) | `github.com/platformio/platform-renesas-ra` |
+| Arduino's `dfu-util` fork (no Apple Silicon target) | `github.com/arduino/dfu-utils-cross` |
+| PlatformIO picking x86_64 when Rosetta is absent | `platformio/platformio-core` issue 5393, open since 2026-03 |
+
+**The deadline.** Rosetta remains available through macOS 27 — it is uninstalled by the
+upgrade and restored with `softwareupdate --install-rosetta` — but macOS 28 removes it
+except for certain legacy games. Before then this project needs the native compiler
+above, a working uploader, or containerised builds. The compiler half is solved and
+verified; the uploader half is not, and it is the one that blocks every `[board]` step.
+
+Whoever picks this up: moving the compiler re-bases every RAM figure in
+`ARCHITECTURE.md` and in any change then in flight, so do it when nothing else is
+mid-flight, and re-read the high-water marks on the board — a new compiler changes
+stack frame sizes, and `TaskLogger` has 20 bytes of margin.
+
+### The CI PlatformIO cache key hashes a file that does not exist
+
+**Status:** defined
+**Scope:** `.github/workflows/main.yml`
+
+`main.yml`'s `Cache PlatformIO` step keyed `~/.platformio` on
+`hashFiles('**/lockfiles')`, and no file named `lockfiles` has ever existed in this
+repository. `hashFiles` returns an empty string for no match, so the key was the
+constant `Linux-`: it hit on every run, and because `actions/cache` only writes a new
+entry on a miss, it was never refreshed either. Harmless while the toolchain never
+changed — and silently wrong the moment it does, since the restored cache would keep
+serving the old one.
+
+Already fixed to `hashFiles('platformio.ini')` with `restore-keys: ${{ runner.os }}-`,
+matching the shape the pip cache block above it uses. This entry exists because that
+fix landed without a change behind it, found while investigating the toolchain, and
+because the same class of mistake is worth checking for in any cache key added later:
+confirm the path `hashFiles` is given actually matches something.
 
 ### Review the contents of the messages already emitted
 

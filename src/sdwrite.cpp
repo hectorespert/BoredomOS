@@ -24,8 +24,6 @@ SdData sdData;
             doc["uptime"] = data->uptime;
             doc["system"]["heap"] = data->system.heap;
             doc["system"]["tasks"]["loggerAvailableStack"] = data->system.tasks.loggerAvailableStack;
-            doc["system"]["tasks"]["heartbeatAvailableStack"] = data->system.tasks.heartbeatAvailableStack;
-            doc["system"]["tasks"]["statusAvailableStack"] = data->system.tasks.statusAvailableStack;
             doc["system"]["tasks"]["sdWriteAvailableStack"] = data->system.tasks.sdWriteAvailableStack;
             doc["system"]["tasks"]["mavlinkAvailableStack"] = data->system.tasks.mavlinkAvailableStack;
             doc["system"]["tasks"]["serialReadAvailableStack"] = data->system.tasks.serialReadAvailableStack;

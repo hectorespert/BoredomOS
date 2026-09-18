@@ -82,10 +82,15 @@ know about.
 |---|---|---|
 | New task | none — the console task from `add-console-cli` gains the MAVLink mode | — |
 | New queue | none — the USB transmit path writes directly, by design | — |
-| Second MAVLink parser state (`mavlink_message_t` + `mavlink_status_t`) | ~300 B | `.bss` |
+| Second MAVLink parser state (`mavlink_message_t` + `mavlink_status_t`) — raises `MAVLINK_COMM_NUM_BUFFERS` from 1 to 2, set by `fold-periodic-telemetry-into-mavlink-task` | 315 B (291 + 24, read from the image's symbol table) | `.bss` |
 | `MAVLINK_MAX_PACKET_LEN` transmit buffer | 280 B | **stack** |
 | Console task stack, 192 -> ~384 words to hold that buffer | 4 x 192 = **768 B** | `.bss` — the `StackType_t` array declared in `src/main.cpp` grows with it |
-| | **768 B of 8192 (9%) on top of `add-console-cli`** | |
+| | **1083 B of 8192 (13%) on top of `add-console-cli`** | |
+
+The 768 B is measured against the headroom `fold-periodic-telemetry-into-mavlink-task`
+leaves — 3684 B rather than the 1468 B this change was originally scoped against —
+so it and the 315 B above both still fit with margin to spare; the conclusion about
+whether this change fits changed even though its own cost did not.
 
 The stack growth is the whole cost, and it is the same shape as `src/serial.cpp`,
 which already holds a `uint8_t buf[MAVLINK_MAX_PACKET_LEN]` inside a 192-word task.

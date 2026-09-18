@@ -7,9 +7,7 @@ extern SystemTime systemTime;
 
 extern QueueHandle_t sdWriteQueue;
 
-extern TaskHandle_t taskStatusHandler;
 extern TaskHandle_t taskLoggerHandler;
-extern TaskHandle_t taskHeartbeatHandler;
 extern TaskHandle_t taskSdWriteHandler;
 extern TaskHandle_t taskMavlinkHandler;
 extern TaskHandle_t taskSerialWriteHandler;
@@ -29,8 +27,6 @@ extern TaskHandle_t taskSerialReadHandler;
                 heap: xPortGetFreeHeapSize(),
                 tasks: {
                     loggerAvailableStack: uxTaskGetStackHighWaterMark(taskLoggerHandler),
-                    heartbeatAvailableStack: uxTaskGetStackHighWaterMark(taskHeartbeatHandler),
-                    statusAvailableStack: uxTaskGetStackHighWaterMark(taskStatusHandler),
                     sdWriteAvailableStack: uxTaskGetStackHighWaterMark(taskSdWriteHandler),
                     mavlinkAvailableStack: uxTaskGetStackHighWaterMark(taskMavlinkHandler),
                     serialReadAvailableStack: uxTaskGetStackHighWaterMark(taskSerialReadHandler),
