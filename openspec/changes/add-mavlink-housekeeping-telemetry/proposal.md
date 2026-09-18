@@ -22,19 +22,33 @@ one hard-coded into the firmware.
   in bytes, each task's stack high-water mark in words — so `NAMED_VALUE_FLOAT` (251),
   which the TODO entry also named, is not needed.
 - **One new value per `TaskMavlink` pass, round-robin.** Free heap, minimum-ever-free
-  heap, then each task's high-water mark, one message per schedule tick, cycling back
-  to the start after the last task. Never more than one `NAMED_VALUE_INT` in flight at
-  a time — the same shape every existing entry in `TaskMavlink`'s schedule table
-  already has, so `serialWriteQueue` needs no depth change and no new backing.
-- **Off by default, armed by the ground.** The new schedule entry starts
-  `enabled: false`. `TaskMavlink`'s `COMMAND_LONG` switch gains a case for
-  `MAV_CMD_SET_MESSAGE_INTERVAL` (511) targeting message id 252: `param2 == -1`
-  disables it, `param2 == 0` asks for "the default rate" and that default is off
-  (the command's own documented meaning of `0`, not a firmware-specific reading of
-  it), `param2 > 0` sets the per-value interval and enables the entry. Every case
-  replies with `COMMAND_ACK`. Nothing is sent unless a ground station has asked,
-  matching the "console emits nothing unless spoken to" invariant `console-cli`
-  already holds on the USB side.
+  heap, then the stack high-water mark of every task that exists in the running
+  configuration, one message per schedule tick, cycling back to the start after the
+  last one. Never more than one `NAMED_VALUE_INT` in flight at a time — the same
+  shape every existing entry in `TaskMavlink`'s schedule table already has. The set
+  is 8 values (2 heap + 6 tasks) with an SD card in the normal configuration, and 6
+  (2 heap + 4 tasks) in the reduced configuration or with no SD card, since
+  `taskLoggerHandler`/`taskSdWriteHandler` are only created otherwise
+  (`src/main.cpp:350-357`) — a task that does not exist is skipped, not reported
+  under the wrong name. The FreeRTOS idle task is left out; see `design.md`.
+- **Off by default, armed by the ground, with a floor on the interval.** The new
+  schedule entry starts `enabled: false`. `TaskMavlink`'s `COMMAND_LONG` switch gains
+  a case for `MAV_CMD_SET_MESSAGE_INTERVAL` (511) targeting message id 252: `param2`
+  (microseconds, per the command's own field) is converted to milliseconds before
+  use. `-1` disables it, `0` asks for "the default rate" and that default is off (the
+  command's own documented meaning of `0`, not a firmware-specific reading of it,
+  and this stops an already-running stream too), a value at or above 1000 ms sets the
+  interval and enables the entry, and a positive value below 1000 ms is refused —
+  `COMMAND_ACK` / `MAV_RESULT_DENIED`, no silent clamp — both to hold the link's
+  existing cadence guarantee and to bound how often housekeeping can coincide with
+  the other three schedule entries in the same pass (see `design.md`'s queue-depth
+  decision). Every case replies with `COMMAND_ACK`. Nothing is sent unless a ground
+  station has asked, matching the "console emits nothing unless spoken to" invariant
+  `console-cli` already holds on the USB side.
+- **`serialWriteQueue` grows from depth 4 to 5.** A fourth independently-clocked
+  schedule entry can be due on the same pass as the three that already justify depth
+  4 (`ARCHITECTURE.md:216`); one more slot covers that coincidence. Re-derived, not
+  assumed — see `design.md`.
 - **Session-scoped, not persisted.** Rebooting returns the entry to disabled. This
   matches how `SET_MESSAGE_INTERVAL` is treated across the MAVLink ecosystem — a
   ground station re-requests the rates it wants on each connection, the vehicle does
@@ -67,21 +81,37 @@ None.
 ## Impact
 
 **RAM**, against the current build's own reported headroom (not quoted from another
-change — read fresh via `pio run` on this tree): `committed 29084 B of 32768,
-headroom 3684 B` (minimum floor 1024 B).
+change — read fresh via `pio run` on this tree, reproduced twice): `committed
+29084 B of 32768, headroom 3684 B` (minimum floor 1024 B).
+
+**This conflicts with `ARCHITECTURE.md:482-489`**, which states `30140 B` committed
+and `2628 B` headroom, last updated at `9483ebe` (`configUSE_TIME_SLICING` landing).
+The two disagree by exactly 1056 B in both directions, which is consistent with
+something freeing RAM after that commit without `ARCHITECTURE.md` being updated —
+not with either number being read wrong. `add-usb-dual-protocol`'s own proposal,
+written independently after that commit, also cites 3684 B. This change uses the
+freshly measured figure, per `CLAUDE.md`'s "read fresh, never quote" rule, and
+Impact/Files below adds correcting `ARCHITECTURE.md`'s stale figure as part of this
+change, so the two stop disagreeing.
 
 | Item | Cost | Where |
 |---|---|---|
 | New task | none | — |
 | New queue | none | — |
-| `serialWriteQueue` depth | unchanged (4) — this entry never holds more than one unsent item, the same as every existing schedule entry | — |
-| Round-robin state: an index plus a small table of task handles to call `uxTaskGetStackHighWaterMark()` against (no `TaskStatus_t` snapshot needed — unlike `cli.cpp`'s `ps`, this only ever needs the stack mark, not name/priority/state, so it skips that struct's 432 B entirely) | ~40 B, estimate to be replaced by a measurement | `.bss` |
+| `serialWriteQueue` depth: 4 -> 5 | 291 B (one more possible in-flight `mavlink_message_t`) | FreeRTOS heap, worst case |
+| Round-robin state: a cursor plus a table of the six existing task handles to call `uxTaskGetStackHighWaterMark()` against, skipping any that are `NULL` (no `TaskStatus_t` snapshot needed — unlike `cli.cpp`'s `ps`, this only ever needs the stack mark, not name/priority/state, so it skips that struct's 432 B entirely) | ~30 B, estimate to be replaced by a measurement | `.bss` |
 | One more `ScheduleEntry` in `TaskMavlink`'s existing schedule array | ~16 B | `TaskMavlink`'s own stack (256 words, already sized with headroom per `add-usb-dual-protocol`'s design notes) |
-| | **~56 B of 3684 B headroom** | |
+| | **~337 B of 3684 B headroom** | |
 
 **Files.** Modified: `src/mavlink.cpp` (new schedule entry, new `COMMAND_LONG` case),
-`CLAUDE.md` if the MAVLink command-handling convention needs updating,
-`openspec/specs/mavlink-link/spec.md` (via this change's spec delta).
+`src/main.cpp` (`serialWriteQueue`'s depth constant, and the two Risk comments
+`design.md` calls for near the task-creation calls), `ARCHITECTURE.md` (its stale RAM
+figures corrected to a fresh build's, and its `TaskMavlink` contract — three fixed
+sends, awake at least once a second — updated for the fourth, ground-selected entry;
+`CLAUDE.md:107` requires this in the same commit), `CLAUDE.md` if the MAVLink
+command-handling convention needs updating, `openspec/specs/mavlink-link/spec.md`
+(via this change's spec delta), `test/test_hil/` (new or extended cases, see
+`tasks.md`).
 
 **This alters the MAVLink surface**, per the rule requiring that be stated
 explicitly: no new message id is added to the dialect (`NAMED_VALUE_INT` and
@@ -99,7 +129,7 @@ into whatever shape the first one left behind — this change does not depend on
 one, and either order is workable, but the order should be a decision made when one
 of them is picked up for implementation, not discovered mid-edit. If this change
 lands first, it also shrinks the 3684 B headroom `add-usb-dual-protocol`'s own RAM
-ledger is computed against by the ~56 B above; that change's arithmetic would need
+ledger is computed against by the ~337 B above; that change's arithmetic would need
 re-checking against the new baseline, not reused from its current proposal.
 
 `TODO.md`'s *"Publish housekeeping live with `NAMED_VALUE_INT` / `NAMED_VALUE_FLOAT"*
