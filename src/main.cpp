@@ -35,13 +35,9 @@ bool reducedConfiguration = false;
 Recovery::BootPhase previousBootPhase = Recovery::BootPhase::Start;
 Recovery::ResetReason previousResetReason = Recovery::ResetReason::PowerOn;
 
-TaskHandle_t taskStatusHandler = NULL;
-
 TaskHandle_t taskSerialWriteHandler = NULL;
 
 TaskHandle_t taskSerialReadHandler = NULL;
-
-TaskHandle_t taskHeartbeatHandler = NULL;
 
 TaskHandle_t taskLoggerHandler = NULL;
 
@@ -67,17 +63,11 @@ StaticTask_t serialReadTcb;
 StackType_t serialWriteStack[192];
 StaticTask_t serialWriteTcb;
 
-StackType_t heartbeatStack[128];
-StaticTask_t heartbeatTcb;
-
 StackType_t mavlinkStack[256];
 StaticTask_t mavlinkTcb;
 
 StackType_t loggerStack[96];
 StaticTask_t loggerTcb;
-
-StackType_t statusStack[128];
-StaticTask_t statusTcb;
 
 StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
@@ -112,15 +102,11 @@ QueueHandle_t sdWriteQueue = NULL;
 
 [[noreturn]] extern void TaskSerialRead(void *pvParameters);
 
-[[noreturn]] extern void TaskHeartbeat(void *pvParameters);
-
 [[noreturn]] extern void TaskLogger(void *pvParameters);
 
 [[noreturn]] extern void TaskSdWrite(void *pvParameters);
 
 [[noreturn]] extern void TaskSensors(void *pvParameters);
-
-[[noreturn]] extern void TaskMavlinkBatteryStatus(void *pvParameters);
 
 [[noreturn]] extern void TaskMavlink(void *pvParameters);
 
@@ -338,21 +324,21 @@ void setup()
   // With static storage these cannot fail for want of memory, so a NULL handle means
   // an argument is wrong -- a programming error, and worth trapping at boot.
   //
-  // The link reader, the link writer, the heartbeat and the protocol handler start
-  // in every configuration, reduced included -- see the "reachable and commandable"
-  // requirement in specs/fault-recovery/spec.md. Housekeeping (the logger and the SD
-  // writer) and battery telemetry do not start when reduced, and the logger and the
-  // SD writer additionally do not start with no card, regardless of configuration.
+  // The link reader, the link writer and Mavlink -- which carries the protocol
+  // handler, the heartbeat and the system-time/battery telemetry schedule --
+  // start in every configuration, reduced included -- see the "reachable and
+  // commandable" requirement in specs/fault-recovery/spec.md. Mavlink's own
+  // schedule withholds BATTERY_STATUS when reduced (src/mavlink.cpp); it is no
+  // longer a decision made here. Housekeeping (the logger and the SD writer)
+  // does not start when reduced, and additionally does not start with no card,
+  // regardless of configuration.
   taskSerialReadHandler = xTaskCreateStatic(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, serialReadStack, &serialReadTcb);
   configASSERT(taskSerialReadHandler != NULL);
 
   taskSerialWriteHandler = xTaskCreateStatic(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, serialWriteStack, &serialWriteTcb);
   configASSERT(taskSerialWriteHandler != NULL);
 
-  taskHeartbeatHandler = xTaskCreateStatic(TaskHeartbeat, "Heartbeat", 128, NULL, PRIORITY_HIGH, heartbeatStack, &heartbeatTcb);
-  configASSERT(taskHeartbeatHandler != NULL);
-
-  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_LOW, mavlinkStack, &mavlinkTcb);
+  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_HIGH, mavlinkStack, &mavlinkTcb);
   configASSERT(taskMavlinkHandler != NULL);
 
   // Starts in every configuration, reduced included: it touches nothing the
@@ -362,9 +348,6 @@ void setup()
   configASSERT(taskCliHandler != NULL);
 
   if (!reducedConfiguration) {
-    taskStatusHandler = xTaskCreateStatic(TaskMavlinkBatteryStatus, "MavlinkBatteryStatus", 128, NULL, PRIORITY_HIGH, statusStack, &statusTcb);
-    configASSERT(taskStatusHandler != NULL);
-
     if (sdCardAvailable) {
       taskLoggerHandler = xTaskCreateStatic(TaskLogger, "Logger", 96, NULL, PRIORITY_LOW, loggerStack, &loggerTcb);
       configASSERT(taskLoggerHandler != NULL);

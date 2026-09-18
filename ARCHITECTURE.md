@@ -37,9 +37,7 @@ flowchart LR
 
         SR["TaskSerialRead<br/>HIGHEST · 96 w"]
         SW["TaskSerialWrite<br/>HIGH · 192 w"]
-        MV["TaskMavlink<br/>LOW · 256 w"]
-        HB["TaskHeartbeat<br/>HIGH · 128 w"]
-        BS["TaskMavlinkBatteryStatus<br/>HIGH · 128 w"]
+        MV["TaskMavlink<br/>HIGH · 256 w"]
         LG["TaskLogger<br/>LOW · 96 w"]
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
         CLI["TaskCli<br/>LOWEST · 128 w"]
@@ -67,16 +65,13 @@ flowchart LR
 
     SR --> RQ --> MV
     MV --> WQ
-    HB --> WQ
-    BS --> WQ
     WQ --> SW
 
     LG --> DQ --> SDW
     SDW --> SDD --> CARD
 
-    BS --> BAT --> ADC
+    MV --> BAT --> ADC
     MV --> ST
-    HB --> ST
     LG --> ST
     ST <--> RTC
 ```
@@ -89,7 +84,7 @@ clock that both of them stamp their data with.
 
 **One composition root.** `src/main.cpp` is the only file that creates anything.
 It defines the shared objects (`battery`, `systemTime`), the three queue handles
-and the eight task handles, then creates every task in `setup()` and calls
+and the six task handles, then creates every task in `setup()` and calls
 `vTaskStartScheduler()`. `loop()` is empty and never runs.
 
 **One task per translation unit.** Every other `src/*.cpp` is a task body — or a
@@ -121,33 +116,45 @@ SPI and nothing waits for it.
 
 `TaskSerialWrite` is deliberately **not** `HIGHEST`, even though it is serial I/O.
 The core's `UART::write()` busy-waits until the frame is on the wire rather than
-buffering and returning, and this port builds with `configUSE_TIME_SLICING` at `0`,
-so a task that never blocks is not preempted by its equals. At `HIGHEST` a single
-`BATTERY_STATUS` frame — 36 bytes of payload, 48 on the wire once MAVLink 2 trims
-the trailing zeroes — would stall every other task for 8.33 ms at 57600 baud.
-Nothing is lost by transmitting late — the frame waits in `serialWriteQueue` — so
-the writer sits at `HIGH`, level with its own producers, which yield every cycle on
-`vTaskDelayUntil`.
+buffering and returning. At `HIGHEST` a single `BATTERY_STATUS` frame — 36 bytes of
+payload, 48 on the wire once MAVLink 2 trims the trailing zeroes — would stall every
+other task for 8.33 ms at 57600 baud. Nothing is lost by transmitting late — the
+frame waits in `serialWriteQueue` — so the writer sits at `HIGH`, level with its
+only producer, `TaskMavlink`.
 
-**The eight tasks, and which configuration starts them.** Every task's storage is
+`TaskMavlink` does not actually yield every cycle: `xQueueReceive` only blocks when
+`serialReadQueue` is empty, and returns at once, without giving up the CPU, whenever
+it already holds a frame. A sustained inbound stream could otherwise let `TaskMavlink`
+run indefinitely at the same priority as `TaskSerialWrite` and starve it — found in
+Copilot's review of `fold-periodic-telemetry-into-mavlink-task`, the change that
+raised `TaskMavlink` to this band. `configUSE_TIME_SLICING` is `1` for exactly this:
+at `configTICK_RATE_HZ = 1000` the scheduler round-robins same-priority ready tasks
+every 1 ms regardless of whether either yields voluntarily, which is what actually
+guarantees `TaskSerialWrite` a turn — not any property of `TaskMavlink`'s own code.
+See `design.md` in that change.
+
+**The six tasks, and which configuration starts them.** Every task's storage is
 declared unconditionally in `src/main.cpp` — the linker counts it whether or not
-the task is started — but `setup()` only calls `xTaskCreateStatic` for five of
+the task is started — but `setup()` only calls `xTaskCreateStatic` for four of
 them in the reduced configuration described below.
 
 | Task | File | Stack | Priority | Cadence | Reduced? |
 |---|---|---|---|---|---|
 | `TaskSerialRead` | `src/serial.cpp` | 96 w | HIGHEST | polls every 10 ms | yes |
 | `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGH | blocks on `serialWriteQueue` | yes |
-| `TaskHeartbeat` | `src/mavlink.cpp` | 128 w | HIGH | `HEARTBEAT` and `SYSTEM_TIME`, alternating every 500 ms | yes |
-| `TaskMavlinkBatteryStatus` | `src/mavlink.cpp` | 128 w | HIGH | every 2 s | no |
-| `TaskMavlink` | `src/mavlink.cpp` | 256 w | LOW | blocks on `serialReadQueue` | yes |
+| `TaskMavlink` | `src/mavlink.cpp` | 256 w | HIGH | blocks on `serialReadQueue`, wakes at least once a second for its schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
 | `TaskLogger` | `src/logger.cpp` | 96 w | LOW | every 1 s | no, and not with no SD card either |
 | `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
 | `TaskCli` | `src/cli.cpp` | 128 w | LOWEST | polls every 10 ms | yes |
 
-Periodic tasks use `vTaskDelayUntil` against a `xLastWakeTime` seeded once, so the
-cadence does not drift with the work done in the body. Consumer tasks block on
-`xQueueReceive` with `portMAX_DELAY` and cost nothing when idle.
+`TaskLogger` and `TaskSdWrite` use `vTaskDelayUntil` and `xQueueReceive` with
+`portMAX_DELAY` respectively, against a `xLastWakeTime` seeded once for the former,
+so their cadence does not drift and both cost nothing when idle. `TaskMavlink` is
+the exception: it carries three periodic sends of its own (see §5.1) inside what is
+otherwise a `serialReadQueue` consumer, so its `xQueueReceive` timeout is the time
+to its next scheduled deadline rather than `portMAX_DELAY` — it wakes at least once
+a second regardless of link traffic, never idle-free, which is by design rather than
+a departure from the pattern above.
 
 **The boot decision.** `setup()` reads `R_SYSTEM->RSTSR0/1/2` to learn why the
 board reset, decodes it into one of five reasons (power-on, low-voltage,
@@ -156,12 +163,15 @@ watchdog, software, external/unknown), and updates two counters kept in
 reset: a count of consecutive boots that never ran stably, and a cumulative
 count only a ground command clears. After three consecutive unstable boots or
 ten cumulative resets, `setup()` starts only `TaskSerialRead`, `TaskSerialWrite`,
-`TaskHeartbeat`, `TaskMavlink` and `TaskCli` — the *reduced configuration*, which
-keeps the board reachable and commandable without the SD card, the real-time
-clock or the battery sense. `TaskHeartbeat` also carries the two mechanisms that get the board
-back out: it clears the consecutive counter once the firmware has run for the
-5-minute stability window, and, while reduced, retries the normal configuration
-every 30 minutes. Both figures are derived in `openspec/changes/add-degraded-mode/design.md`
+`TaskMavlink` and `TaskCli` — the *reduced configuration*, which keeps the board
+reachable and commandable without the SD card, the real-time clock or the battery
+sense; `TaskMavlink`'s own schedule additionally withholds `BATTERY_STATUS` in this
+configuration (see §5.1), so no task decides that at creation time any more.
+`TaskMavlink` also carries the two mechanisms that get the board back out, since it
+is the only task that runs in every configuration: it clears the consecutive
+counter once the firmware has run for the 5-minute stability window, and, while
+reduced, retries the normal configuration every 30 minutes. Both figures are
+derived in `openspec/changes/add-degraded-mode/design.md`
 from the heap's worst-case leak rate, not guessed. An independent watchdog,
 refreshed only from the idle hook, turns a task that stops yielding into a
 watchdog reset within `WDT_TIMEOUT_MS`. `include/Recovery.h` and `src/recovery.cpp`
@@ -195,16 +205,21 @@ the number that fits in the queues:
 | Queue | Depth | Also in existence | Blocks | Bytes |
 |---|---|---|---|---|
 | `serialReadQueue` | 8 | 1 producer, 1 consumer | 10 x 304 | 3040 |
-| `serialWriteQueue` | 4 | 3 producers, 1 consumer | 8 x 304 | 2432 |
+| `serialWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 304 | 1824 |
 | `sdWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 56 | 336 |
-| | | | **Total** | **5808** |
+| | | | **Total** | **5200** |
 
 against 6136 usable of `configTOTAL_HEAP_SIZE`. The extra blocks are not slack: a
 producer allocates *before* it sends, so learning that a queue is full costs a block
-beyond the depth; a consumer holds one between `xQueueReceive` and `vPortFree`; and
-`serialWriteQueue` has three producer tasks — `TaskHeartbeat`,
-`TaskMavlinkBatteryStatus` and `TaskMavlink`'s timesync reply — that can each be
-holding one at the same instant.
+beyond the depth; a consumer holds one between `xQueueReceive` and `vPortFree`.
+`serialWriteQueue` used to need an extra block for each of three producer tasks that
+could hold one at the same instant — `TaskHeartbeat`, `TaskMavlinkBatteryStatus` and
+`TaskMavlink`'s timesync reply. Since `fold-periodic-telemetry-into-mavlink-task`
+folded the first two into `TaskMavlink`, every send against this queue runs in one
+task, so it needs only the one producer block depth already assumed elsewhere in
+this table. The 608 bytes this released were not returned to `.bss`:
+`configTOTAL_HEAP_SIZE` stays at `0x1800` and the difference is margin, not a queue
+depth to spend again without re-deriving it.
 
 **The consequence is which failure a burst finds.** Because the depths are backed, a
 saturated queue reports itself through `xQueueSend`, which every producer handles by
@@ -264,9 +279,19 @@ silently select the per-byte fallback.
   `FILE_TRANSFER_PROTOCOL`) have explicit cases that are deliberately empty — they
   are the reserved slots for the features in `TODO.md`. Anything else falls to
   `default` and produces a `STATUSTEXT` warning.
-- `TaskHeartbeat` alternates `HEARTBEAT` and `SYSTEM_TIME`, 500 ms apart, so each
-  goes out at 1 Hz.
-- `TaskMavlinkBatteryStatus` emits `BATTERY_STATUS` every 2 s, reading `lib/Battery`.
+- The same task also carries the periodic telemetry that used to run as two
+  separate tasks (folded in by `fold-periodic-telemetry-into-mavlink-task`, since
+  both did nothing but pack a message and post it on a timer). A
+  `{function, interval_ms, last_ms}` schedule table drives absolute deadlines:
+  every pass emits whatever is due, then advances `last_ms += interval_ms` rather
+  than to "now", so a late pass does not push the cadence forward — this is what
+  replaces `vTaskDelayUntil`'s drift-free property now that the sends share a task
+  with inbound dispatch. `HEARTBEAT` and `SYSTEM_TIME` fire every 1000 ms, the
+  latter's `last_ms` seeded 500 ms behind so the two keep leaving 500 ms apart on
+  the wire, exactly as when they alternated on their own `vTaskDelayUntil`.
+  `BATTERY_STATUS` fires every 2000 ms, reading `lib/Battery`, and its schedule
+  entry is the one disabled in the reduced configuration — the withholding is a
+  table flag now, not a task `setup()` chooses not to create.
 
 **Identity on the bus is fixed and must be identical in every outbound message:**
 system id `1`, component `MAV_COMP_ID_AUTOPILOT1`, type `MAV_TYPE_ROCKET`,
@@ -282,8 +307,17 @@ only tells you after the fact.
 `src/logger.cpp` samples once a second into the `Data` struct of `include/Data.h`
 and posts it to `sdWriteQueue`. The struct is the log schema: Unix time, uptime in
 milliseconds, a `System` block with the free FreeRTOS heap and
-`uxTaskGetStackHighWaterMark` for each of the seven tasks, and an `Energy` block
-with the battery millivolts and charge percentage.
+`uxTaskGetStackHighWaterMark` for each of the five remaining tasks — down from
+seven before `fold-periodic-telemetry-into-mavlink-task` removed
+`TaskHeartbeat` and `TaskMavlinkBatteryStatus`, whose entries no longer name a
+task that exists — and an `Energy` block with the battery millivolts and charge
+percentage. `mavlinkAvailableStack` now covers `TaskMavlink`'s inbound dispatch
+*and* all three periodic sends it carries (§5.1), so it is the figure that
+matters most when checking whether that task's 256-word stack still fits.
+Records written before that change carry the old seven-field shape; `lib/SdData`'s
+ring can end up holding both shapes at once, and nothing in the firmware reads a
+record back, so whoever reads the `.mpk` files on the ground has to tolerate
+either.
 
 `src/sdwrite.cpp` **owns the card**. It converts the `Data` into an ArduinoJson
 `JsonDocument` and hands it to `lib/SdData`, which — despite the JSON document —

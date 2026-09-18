@@ -5,8 +5,6 @@
 struct Tasks
 {
     UBaseType_t loggerAvailableStack;
-    UBaseType_t heartbeatAvailableStack;
-    UBaseType_t statusAvailableStack;
     UBaseType_t sdWriteAvailableStack;
     UBaseType_t mavlinkAvailableStack;
     UBaseType_t serialReadAvailableStack;

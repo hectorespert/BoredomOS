@@ -103,11 +103,14 @@ it as an implementation accident.
 
 ### The schedule lives in the console task, not in the existing producers
 
-`TaskHeartbeat` and `TaskMavlinkBatteryStatus` produce for the queue that feeds
-`Serial1`. They are left alone. The console task gains its own `{function, interval,
-last}` table and its own round-robin pass, so the two streams are independent in
-exactly the way that was asked for: separate schedules, separate sequence numbers,
-separate failure behaviour.
+`fold-periodic-telemetry-into-mavlink-task` folded `TaskHeartbeat` and
+`TaskMavlinkBatteryStatus` into `TaskMavlink`'s own `{function, interval_ms,
+last_ms}` schedule, which produces for the queue that feeds `Serial1`. That
+schedule is left alone here. The console task gains its own, separate
+`{function, interval, last}` table and its own round-robin pass, so the two
+streams are independent in exactly the way that was asked for: separate
+schedules, separate sequence numbers, separate failure behaviour — two schedule
+tables in two different tasks, not one shared between them.
 
 It also keeps ownership clean. The console task owns the USB port; it is the only
 thing that writes to it, in either mode. No mutex is needed, which is the same reason
@@ -142,8 +145,10 @@ Each builder fills a `mavlink_message_t` the **caller** provides, which is what 
 one function serve both transports without a copy:
 
 - `Serial1` passes the heap block it already allocates, exactly as today. No extra
-  copy, and no extra stack in `TaskHeartbeat` or `TaskMavlinkBatteryStatus`, which are
-  128-word tasks with no room for a 291-byte local.
+  copy, and no extra stack in `TaskMavlink`, whose schedule
+  (`fold-periodic-telemetry-into-mavlink-task`) carries what `TaskHeartbeat` and
+  `TaskMavlinkBatteryStatus` used to — a 256-word task with headroom, but still no
+  room to spare for a 291-byte local on top of its existing union of paths.
 - USB passes its `.bss` static, then runs `mavlink_msg_to_send_buffer` and writes.
 
 `mavlinkHandleInbound` returning the reply by value into a caller buffer avoids a sink
@@ -173,9 +178,20 @@ otherwise cause, and it is the price of the guarantee.
 
 `src/serial.cpp` parses `Serial1` with `mavlink_parse_char(MAVLINK_COMM_0, ...)` and
 its own static `mavlink_message_t` / `mavlink_status_t`. The console uses
-`MAVLINK_COMM_1` with a second pair, roughly 300 bytes in `.bss`. Separate status
-structs are what make the sequence numbering and parse state independent rather than
+`MAVLINK_COMM_1` with a second pair, 315 bytes in `.bss` (291 for
+`mavlink_message_t` plus 24 for `mavlink_status_t`, read from the image's symbol
+table in `fold-periodic-telemetry-into-mavlink-task`). Separate status structs are
+what make the sequence numbering and parse state independent rather than
 interleaved.
+
+**This requires raising `MAVLINK_COMM_NUM_BUFFERS`.** That change set it to `1` in
+`platformio.ini`, since the firmware parsed exactly one channel at the time; a
+second channel cannot exist below that count. This change must raise it to `2` in
+the same commit that adds `MAVLINK_COMM_1`, and its own RAM table below carries the
+315 bytes that costs. `platformio.ini` already carries a comment on the flag naming
+this change for exactly this reason — two changes must not disagree about it,
+which is the collision `openspec/config.yaml` records as having happened once
+undetected.
 
 madflight goes further and sets `MAVLINK_COMM_NUM_BUFFERS` to 0 to elide a copy. Not
 copied here: it is a global build-level change to the MAVLink library affecting the

@@ -171,47 +171,6 @@ static void sendCommandAck(uint16_t command, uint8_t result)
     }
 }
 
-[[noreturn]] void TaskHeartbeat(void *pvParameters)
-{
-    (void)pvParameters;
-
-    sendBootStatusText();
-
-    TickType_t bootTick = xTaskGetTickCount();
-    bool stabilityCleared = false;
-    bool retryAttempted = false;
-
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    for (;;)
-    {
-        sendHeartbeat();
-
-        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
-
-        sendSystemTime();
-
-        vTaskDelayUntil(&xLastWakeTime, 500 / portTICK_PERIOD_MS);
-
-        // Both live here because TaskHeartbeat is the only task that runs in
-        // every configuration -- reduced included -- so it is the only place
-        // that can be trusted to ever clear the counter or fire the retry
-        // (review.md finding 16).
-        uint32_t elapsedMs = (xTaskGetTickCount() - bootTick) * portTICK_PERIOD_MS;
-
-        if (!stabilityCleared && elapsedMs >= STABILITY_WINDOW_MS) {
-            Recovery::setConsecutiveCount(0);
-            stabilityCleared = true;
-        }
-
-        if (reducedConfiguration && !retryAttempted && elapsedMs >= RETRY_INTERVAL_MS) {
-            retryAttempted = true;
-            Recovery::setDeliberateReset(Recovery::DeliberateReset::Retry);
-            NVIC_SystemReset();
-        }
-    }
-}
-
 extern Battery battery;
 
 static void sendBatteryStatus()
@@ -251,30 +210,74 @@ static void sendBatteryStatus()
     }
 }
 
-[[noreturn]] void TaskMavlinkBatteryStatus(void *pvParameters)
-{
-    (void)pvParameters;
-
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    for (;;)
-    {
-        sendBatteryStatus();
-        vTaskDelayUntil(&xLastWakeTime, 2000 / portTICK_PERIOD_MS);
-    }
-}
-
 extern QueueHandle_t serialReadQueue;
 extern RTC_DS1307 rtc;
+
+// {function, interval_ms, last_ms, enabled} -- last_ms is the tick (in ms since
+// boot) an entry last fired, seeded one interval before TaskMavlink's own start
+// (not before absolute tick zero -- Copilot's PR review caught that the earlier
+// version anchored to boot, which could fire every entry back-to-back on the
+// first pass if setup() ever took longer than an interval) so the first pass
+// finds each entry already due. An entry is due once
+// (now - last_ms) >= interval_ms; a fired entry advances with
+// last_ms += interval_ms rather than to "now", so a late pass does not push
+// the cadence forward -- this is what replaces vTaskDelayUntil's drift-free
+// property now that three producers share one task instead of two dedicated
+// ones.
+//
+// Both comparisons above use "now - last_ms" (an unsigned delta from a fixed
+// reference), never "now >= last_ms + interval_ms" (comparing two absolute,
+// independently-drifting values). Only the delta form survives the 32-bit
+// millisecond wrap at ~49.7 days (TODO.md's `uptime` overflows after ~49.7
+// days), the same shape elapsedMs below already relies on -- also flagged by
+// Copilot's review, which is why it is spelled out here.
+//
+// sendHeartbeat and sendSystemTime are unconditional in every configuration,
+// reduced included: this is the only task that runs in every configuration
+// (moved here from TaskHeartbeat, review.md finding 16), so the stability-
+// window clear and the 30-minute reduced-configuration retry below can only be
+// trusted to fire if HEARTBEAT's entry is never made conditional.
+// sendSystemTime is seeded half an interval (500 ms) behind sendHeartbeat so
+// the two keep leaving 500 ms apart, exactly as when they alternated on one
+// vTaskDelayUntil.
+struct ScheduleEntry {
+    void (*function)();
+    uint32_t interval_ms;
+    uint32_t last_ms;
+    bool enabled;
+};
 
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
     (void)pvParameters;
 
+    sendBootStatusText();
+
+    TickType_t bootTick = xTaskGetTickCount();
+    uint32_t startMs = (uint32_t)bootTick * portTICK_PERIOD_MS;
+    bool stabilityCleared = false;
+    bool retryAttempted = false;
+
+    ScheduleEntry schedule[] = {
+        { sendHeartbeat,     1000, startMs - 1000u, true },
+        { sendSystemTime,    1000, startMs - 500u,  true },
+        { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
+    };
+
     for (;;)
     {
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        uint32_t waitMs = UINT32_MAX;
+        for (const ScheduleEntry &entry : schedule) {
+            if (!entry.enabled) continue;
+            uint32_t elapsed = now - entry.last_ms;
+            uint32_t due = (elapsed >= entry.interval_ms) ? 0 : (entry.interval_ms - elapsed);
+            if (due < waitMs) waitMs = due;
+        }
+
         mavlink_message_t* msg;
-        if (xQueueReceive(serialReadQueue, &msg, portMAX_DELAY))
+        if (xQueueReceive(serialReadQueue, &msg, pdMS_TO_TICKS(waitMs)))
         {
 
             switch (msg->msgid)
@@ -364,6 +367,30 @@ extern RTC_DS1307 rtc;
 
             vPortFree(msg);
         }
-    }
 
+        now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        for (ScheduleEntry &entry : schedule) {
+            if (entry.enabled && (now - entry.last_ms) >= entry.interval_ms) {
+                entry.function();
+                entry.last_ms += entry.interval_ms;
+            }
+        }
+
+        // Both live here because this is the only task that runs in every
+        // configuration -- reduced included -- so it is the only place that
+        // can be trusted to ever clear the counter or fire the retry
+        // (review.md finding 16, moved from TaskHeartbeat).
+        uint32_t elapsedMs = (xTaskGetTickCount() - bootTick) * portTICK_PERIOD_MS;
+
+        if (!stabilityCleared && elapsedMs >= STABILITY_WINDOW_MS) {
+            Recovery::setConsecutiveCount(0);
+            stabilityCleared = true;
+        }
+
+        if (reducedConfiguration && !retryAttempted && elapsedMs >= RETRY_INTERVAL_MS) {
+            retryAttempted = true;
+            Recovery::setDeliberateReset(Recovery::DeliberateReset::Retry);
+            NVIC_SystemReset();
+        }
+    }
 }

@@ -27,30 +27,42 @@ it clears itself in that order.
 - [ ] 2.2 Split `sendHeartbeat`, `sendSystemTime`, `sendBatteryStatus` and
       `sendStatusText` in `src/mavlink.cpp` into a builder plus the existing allocate-
       and-queue step, keeping the heap block as the buffer the builder fills so no
-      128-word producer task gains a 291-byte local; verify with `pio run` and
-      **[board]** confirm the high-water marks of both producer tasks are unchanged
+      producer gains a 291-byte local. `fold-periodic-telemetry-into-mavlink-task`
+      folded the two producer tasks these builders used to belong to into
+      `TaskMavlink`'s own schedule, so there is one producer to check, not two; verify
+      with `pio run` and **[board]** confirm `TaskMavlink`'s high-water mark is no
+      worse than the baseline that change's task 5.1 recorded
 - [ ] 2.3 Move the inbound `switch` out of `TaskMavlink` into `mavlinkHandleInbound`,
-      returning the reply through a caller-provided buffer, and reduce `TaskMavlink` to
-      receive / dispatch / queue-the-reply / free; **[board]** verify with
+      returning the reply through a caller-provided buffer, and reduce `TaskMavlink`'s
+      *inbound path* to receive / dispatch / queue-the-reply / free — its schedule
+      loop (`fold-periodic-telemetry-into-mavlink-task`) is untouched by this task,
+      since extracting the builders behind `include/Mavlink.h` neither requires nor
+      blocks changing how or when they are called; **[board]** verify with
       `mavproxy.py` on the radio link that `TIMESYNC` and `SYSTEM_TIME` behave exactly
-      as before the refactor
+      as before the refactor, at the same 1 Hz / 500 ms-interleaved cadence
 - [ ] 2.4 **[board]** Confirm the radio link's behaviour is byte-identical to before
       this section: same messages, same rates, same identity — this refactor must be
       invisible on `Serial1`
 
 ## 3. Mode detection
 
-- [ ] 3.1 Add a second parser state to `src/cli.cpp` — `MAVLINK_COMM_1` with its own
+- [ ] 3.1 Raise `MAVLINK_COMM_NUM_BUFFERS` from `1` to `2` in `platformio.ini`,
+      updating the comment `fold-periodic-telemetry-into-mavlink-task` left on that
+      flag to point at this change instead of describing a future one; this must land
+      in the same commit as 3.2 below, since `MAVLINK_COMM_1` cannot exist below `2`;
+      verify with `pio run` and by confirming the 315-byte rise (291 + 24) against the
+      pre-3.2 baseline in the map file
+- [ ] 3.2 Add a second parser state to `src/cli.cpp` — `MAVLINK_COMM_1` with its own
       `mavlink_message_t` and `mavlink_status_t` in `.bss` — and feed every inbound
       byte to it before appending to the command buffer; verify with `pio run`
-- [ ] 3.2 Switch to MAVLink mode only when `mavlink_parse_char` reports a complete
+- [ ] 3.3 Switch to MAVLink mode only when `mavlink_parse_char` reports a complete
       frame, never on a header byte, and process the bytes already buffered as MAVLink
       once switched; **[board]** verify by pasting a lone `0xFD` and confirming the CLI
       still answers
-- [ ] 3.3 Make the switch one-way: no timer, no escape, no command returns to CLI mode;
+- [ ] 3.4 Make the switch one-way: no timer, no escape, no command returns to CLI mode;
       **[board]** verify that after a MAVProxy session the port ignores command text and
       that a reset restores the CLI
-- [ ] 3.4 Stop emitting CLI text once in MAVLink mode, so a frame parser never has to
+- [ ] 3.5 Stop emitting CLI text once in MAVLink mode, so a frame parser never has to
       discard a prompt; **[board]** verify with `mavproxy.py --master=/dev/ttyACM0` that
       no parse errors are reported
 
