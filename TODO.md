@@ -117,39 +117,34 @@ none of it is tracked. If this capability changes again, add the missing rows fi
 **Scope:** `test/test_hil/check_housekeeping.py`, hands at the board
 
 `openspec/changes/archive/2026-09-18-add-mavlink-housekeeping-telemetry/` shipped 10
-of its 21 tasks — every one that `pio run`/`pio check` alone could verify. The
-remaining 11 all need the assembled board, which this session did not have; each is
-already scoped in that change's own `tasks.md`, with the code already written where
-there was code to write:
+of its 21 tasks CI-verified; a later board session (2026-09-18, `pio test -e bench`
+against the physically attached board) closed out all but two more. What that run
+found, for whoever next touches this:
 
-- **1.2 — the `NULL`-handle skip needs confirming in the reduced configuration.**
-  `nextHousekeepingValue()` in `src/mavlink.cpp` skips a `NULL` task handle within
-  the same call rather than calling `uxTaskGetStackHighWaterMark()` on it, but this
-  has never been watched on a board actually missing `taskLoggerHandler`/
-  `taskSdWriteHandler` (reduced configuration, or no SD card) to confirm only the
-  four live tasks' names ever appear.
-- **2.2, 3.2-3.5 — the arm/deny/disable/default-rate command behaviour has never
-  run against real firmware.** Code and HIL cases both exist
-  (`test/test_hil/check_housekeeping.py`'s `test_no_request_means_silence`,
-  `test_interval_below_the_floor_is_denied`,
-  `test_default_rate_from_clean_boot_does_not_start_the_stream`,
-  `test_default_rate_stops_an_already_armed_stream`,
-  `test_disable_stops_an_armed_stream`) but none have been run.
-- **5.1-5.4 — the full HIL suite in `check_housekeeping.py` has never been run.**
-  Beyond the cases above: `test_arming_covers_the_full_cycle_without_disturbing_existing_telemetry`
-  (full round-robin order and that existing telemetry rates hold while armed),
-  `test_no_housekeeping_survives_a_reset` (manual, gated behind
-  `HIL_MANUAL_RESET=1` — needs a human at the RESET button, never a 1200-baud
-  touch: `test/test_hil/README.md:86-87`), and
-  `test_housekeeping_in_the_reduced_configuration` (self-skips unless the board is
-  already reduced — precondition and restore steps are in its own docstring: pull
-  the SD card and reset, then reinsert and reset again afterward).
-- **6.2 — `TaskMavlink`'s stack high-water mark with housekeeping armed has never
-  been measured.** The schedule table grew by one entry (16 B of `ScheduleEntry` on
-  a 256-word stack); needs several full cycles running with the stream armed, then
-  a read via the SD housekeeping log or `ps Mavlink`, to confirm it still fits with
-  margin — a build succeeding says nothing about this, per `CLAUDE.md`'s rule that a
-  task body change is not verified by compiling it.
+- **Confirmed on real hardware:** 1.2 (`NULL`-handle skip), 2.2, 3.2-3.5 (arm, deny
+  below the floor, disable, default-rate from clean boot and against an already-armed
+  stream), 5.1, 5.4 (reduced configuration — the board happened to already be
+  reduced, so this ran for real rather than self-skipping), and 6.2. All of
+  `check_housekeeping.py` passed except the manual-reset case (see below).
+  `TaskMavlink`'s stack high-water mark measured **127 of 256 words free** with
+  housekeeping armed — comfortable margin. `ps` and the housekeeping stream agreed
+  exactly on that figure, cross-validating both. The flight build was reflashed and
+  reachable afterward (`pio run -t upload`, confirmed via `ps`/`free` on the
+  console) — the board was not left on the bench build.
+- **Still open — 5.3, the manual reset case.** `test_no_housekeeping_survives_a_reset`
+  self-skips unless `HIL_MANUAL_RESET=1` is set, since it needs a human physically at
+  the **RESET button** when prompted (never a 1200-baud touch —
+  `test/test_hil/README.md:86-87`). Not attempted this session.
+  ‑ **Still open — the normal-configuration (8-value) round-robin has never been
+  observed.** The board was in the reduced configuration for this entire session
+  (accumulated resets from repeated flashing across prior sessions — the same known
+  hazard `fold-periodic-telemetry-into-mavlink-task`'s own TODO.md entry already
+  describes), so `test_arming_covers_the_full_cycle_without_disturbing_existing_telemetry`
+  and the reduced-configuration case both exercised the same 6-value set
+  (`HeapFree`, `HeapMin`, `SerialRead`, `SerialWrit`, `Mavlink`, `Cli`); `Logger` and
+  `SdWrite` have never actually appeared on the wire. Needs a session where the board
+  is confirmed in the normal configuration first (a fresh SD card boot with no recent
+  fault history, or the 30-minute automatic retry completing) before arming.
 
 Also worth knowing if this change is touched again: its own `proposal.md`/`design.md`
 originally estimated the RAM cost at ~337 B and were corrected, after implementation,
@@ -599,6 +594,22 @@ To decide:
 
 
 ## To change
+
+### `check_telemetry.py`'s `test_battery_status_every_2s` assumes the normal configuration
+
+**Status:** defined
+**Scope:** `test/test_hil/check_telemetry.py`
+
+Found incidentally during `add-mavlink-housekeeping-telemetry`'s post-archive board
+verification (2026-09-18): `pio test -e bench` failed this case —
+`BATTERY_STATUS at 0.00 Hz, expected 0.50 Hz (seen 0 in 12.1s)` — because the board
+was in the reduced configuration, where `sendBatteryStatus`'s schedule entry is
+correctly disabled (`src/mavlink.cpp`). The test itself is unchanged by that change;
+it has just never been run against a reduced board before. Unlike
+`check_recovery.py`'s state-decode cases, it does not check the current
+configuration first and self-skip (`NoLinkError`) when its assumption does not
+hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
+next `HEARTBEAT`'s `system_status`).
 
 ### Queue the message intent by value instead of a packed `mavlink_message_t`
 
