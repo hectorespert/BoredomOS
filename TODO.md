@@ -111,6 +111,52 @@ reduced configuration by its own action, the fault that caused it recurs) were n
 given a row.** Some of their substance got informal exercise during board testing, but
 none of it is tracked. If this capability changes again, add the missing rows first.
 
+### Finish what add-mavlink-housekeeping-telemetry left open
+
+**Status:** defined
+**Scope:** `test/test_hil/check_housekeeping.py`, hands at the board
+
+`openspec/changes/archive/2026-09-18-add-mavlink-housekeeping-telemetry/` shipped 10
+of its 21 tasks — every one that `pio run`/`pio check` alone could verify. The
+remaining 11 all need the assembled board, which this session did not have; each is
+already scoped in that change's own `tasks.md`, with the code already written where
+there was code to write:
+
+- **1.2 — the `NULL`-handle skip needs confirming in the reduced configuration.**
+  `nextHousekeepingValue()` in `src/mavlink.cpp` skips a `NULL` task handle within
+  the same call rather than calling `uxTaskGetStackHighWaterMark()` on it, but this
+  has never been watched on a board actually missing `taskLoggerHandler`/
+  `taskSdWriteHandler` (reduced configuration, or no SD card) to confirm only the
+  four live tasks' names ever appear.
+- **2.2, 3.2-3.5 — the arm/deny/disable/default-rate command behaviour has never
+  run against real firmware.** Code and HIL cases both exist
+  (`test/test_hil/check_housekeeping.py`'s `test_no_request_means_silence`,
+  `test_interval_below_the_floor_is_denied`,
+  `test_default_rate_from_clean_boot_does_not_start_the_stream`,
+  `test_default_rate_stops_an_already_armed_stream`,
+  `test_disable_stops_an_armed_stream`) but none have been run.
+- **5.1-5.4 — the full HIL suite in `check_housekeeping.py` has never been run.**
+  Beyond the cases above: `test_arming_covers_the_full_cycle_without_disturbing_existing_telemetry`
+  (full round-robin order and that existing telemetry rates hold while armed),
+  `test_no_housekeeping_survives_a_reset` (manual, gated behind
+  `HIL_MANUAL_RESET=1` — needs a human at the RESET button, never a 1200-baud
+  touch: `test/test_hil/README.md:86-87`), and
+  `test_housekeeping_in_the_reduced_configuration` (self-skips unless the board is
+  already reduced — precondition and restore steps are in its own docstring: pull
+  the SD card and reset, then reinsert and reset again afterward).
+- **6.2 — `TaskMavlink`'s stack high-water mark with housekeeping armed has never
+  been measured.** The schedule table grew by one entry (16 B of `ScheduleEntry` on
+  a 256-word stack); needs several full cycles running with the stream armed, then
+  a read via the SD housekeeping log or `ps Mavlink`, to confirm it still fits with
+  margin — a build succeeding says nothing about this, per `CLAUDE.md`'s rule that a
+  task body change is not verified by compiling it.
+
+Also worth knowing if this change is touched again: its own `proposal.md`/`design.md`
+originally estimated the RAM cost at ~337 B and were corrected, after implementation,
+to a measured 8 B — the task-name table is `const` (flash, not RAM) and the queue
+depth increase draws on already-reserved FreeRTOS heap slack rather than growing
+`.bss`. See the archived proposal's Impact section for the full explanation before
+assuming a similar table/queue change elsewhere costs what an estimate says it does.
 
 ### Add the GY-87 IMU
 
@@ -550,30 +596,6 @@ To decide:
 - Sending the full list cannot monopolise the link or the write queue: it has to be
   chunked, not dumped as every `PARAM_VALUE` at once.
 
-
-### Publish housekeeping live with `NAMED_VALUE_INT` / `NAMED_VALUE_FLOAT`
-
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `src/logger.cpp`
-
-The whole housekeeping log exists to size the stacks, and today it can only be
-consulted by pulling the card out of the board. `NAMED_VALUE_INT` (252) and
-`NAMED_VALUE_FLOAT` (251) allow publishing the free heap and each task's high-water
-mark over the link, live, without inventing custom messages or touching the `.mpk`
-schema.
-
-It is the cheap way to close the loop that `ARCHITECTURE.md` describes: the
-high-water marks exist to size the stacks, so review them after changing a task
-body. With this they are reviewed with the board assembled, rather than after the
-fact.
-
-To decide: which values are published and at what rate — there are eight fields and
-the name takes 10 characters per message, so at 1 Hz this alone is not free over a
-narrow link — and whether it should be exclusive to the profile of *[Debug and
-release builds...]*.
-
-Partial alternative: `MEMINFO` (152) for the heap, although it is ArduPilot-specific
-and does not cover the per-task stacks.
 
 
 ## To change

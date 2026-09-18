@@ -14,6 +14,17 @@ extern bool reducedConfiguration;
 extern Recovery::ResetReason previousResetReason;
 extern Recovery::BootPhase previousBootPhase;
 
+// Set once in setup(), before the scheduler starts (src/main.cpp:335-357), and
+// never reassigned after -- safe to read directly from the housekeeping table
+// below rather than snapshotting them into a table built at static-init time,
+// which would run before setup() and see every handle still NULL.
+extern TaskHandle_t taskSerialReadHandler;
+extern TaskHandle_t taskSerialWriteHandler;
+extern TaskHandle_t taskMavlinkHandler;
+extern TaskHandle_t taskCliHandler;
+extern TaskHandle_t taskLoggerHandler;
+extern TaskHandle_t taskSdWriteHandler;
+
 // How long the firmware must run before a boot counts as stable, and how long
 // the reduced configuration waits before trying the normal one again. Both are
 // derived in design.md from the heap's worst-case leak rate, not guessed
@@ -210,6 +221,134 @@ static void sendBatteryStatus()
     }
 }
 
+// Housekeeping telemetry -- free heap, minimum-ever-free heap, and each live
+// task's stack high-water mark, published one value per TaskMavlink pass as
+// NAMED_VALUE_INT (design.md, "One value per schedule pass, with its own
+// round-robin index"). Off by default; armed by MAV_CMD_SET_MESSAGE_INTERVAL
+// below.
+//
+// Every name is a full 10-byte array, not a shorter string literal: the pack
+// function's mav_array_memcpy always copies exactly 10 bytes from `name`
+// regardless of its actual length, so a literal shorter than 10 bytes (e.g.
+// "Cli") would read past the end of it. Declaring these as char[10] makes the
+// compiler pad the remainder with zeros instead. "SerialWrite" is 11
+// characters and truncates to "SerialWrit" in the 10-byte field -- no other
+// task name collides with the truncated form today, and cli.cpp's own
+// `ps <name>` already truncates its argument the same way, so this is an
+// existing acceptance, not a new one (design.md's Risks).
+// 12 bytes, not 10: a char[10] initialized from a 10-character literal (no
+// room left for the implicit terminator, e.g. "SerialRead") is a hard error
+// under this toolchain's g++ (-fpermissive would only downgrade the
+// standard-permitted exact-length case to a warning, and this build does not
+// pass that flag). 12 is comfortably more than the 10 bytes the pack
+// function ever reads from these, for every name here.
+static const char kNameHeapFree[12]    = "HeapFree";
+static const char kNameHeapMin[12]     = "HeapMin";
+static const char kNameSerialRead[12]  = "SerialRead";
+static const char kNameSerialWrite[12] = "SerialWrite";
+static const char kNameMavlink[12]     = "Mavlink";
+static const char kNameCli[12]         = "Cli";
+static const char kNameLogger[12]      = "Logger";
+static const char kNameSdWrite[12]     = "SdWrite";
+
+struct HousekeepingTaskEntry {
+    TaskHandle_t *handle;
+    const char *name;
+};
+
+// Points at the six extern handles above rather than copying their values, so
+// a NULL check always sees setup()'s actual outcome for this boot. Cycle
+// length follows the task count -- a future task added to src/main.cpp needs
+// an entry here too, and needs serialWriteQueue's depth (below) re-checked,
+// per design.md's Risks ("The cycle length grows every time a task is
+// added").
+static const HousekeepingTaskEntry kHousekeepingTasks[] = {
+    { &taskSerialReadHandler,  kNameSerialRead  },
+    { &taskSerialWriteHandler, kNameSerialWrite },
+    { &taskMavlinkHandler,     kNameMavlink     },
+    { &taskCliHandler,         kNameCli         },
+    { &taskLoggerHandler,      kNameLogger      },
+    { &taskSdWriteHandler,     kNameSdWrite     },
+};
+
+constexpr uint8_t kHousekeepingHeapSlots = 2;
+constexpr uint8_t kHousekeepingTaskSlots = sizeof(kHousekeepingTasks) / sizeof(kHousekeepingTasks[0]);
+constexpr uint8_t kHousekeepingSlots = kHousekeepingHeapSlots + kHousekeepingTaskSlots;
+
+static uint8_t housekeepingCursor = 0;
+
+// Reads the value at the cursor's current slot and advances, wrapping after
+// the last one. A task handle that is NULL in this configuration (the
+// reduced configuration or no SD card leave taskLoggerHandler/
+// taskSdWriteHandler NULL, src/main.cpp:350-357) is skipped -- the cursor
+// keeps advancing within this same call rather than reporting
+// uxTaskGetStackHighWaterMark(NULL), which FreeRTOS resolves to "the calling
+// task" (TaskMavlink itself), not an error, and would silently mislabel its
+// stack mark under the wrong task's name (design.md's Context). Returns
+// false only if every slot from the cursor onward is a NULL task handle,
+// which cannot happen today -- SerialRead, SerialWrite, Mavlink and Cli are
+// unconditional (src/main.cpp:335-348) -- but is handled rather than
+// assumed.
+static bool nextHousekeepingValue(const char **name, int32_t *value)
+{
+    for (uint8_t tries = 0; tries < kHousekeepingSlots; ++tries) {
+        uint8_t slot = housekeepingCursor;
+        housekeepingCursor = (housekeepingCursor + 1) % kHousekeepingSlots;
+
+        if (slot == 0) {
+            *name = kNameHeapFree;
+            *value = (int32_t)xPortGetFreeHeapSize();
+            return true;
+        }
+        if (slot == 1) {
+            *name = kNameHeapMin;
+            *value = (int32_t)xPortGetMinimumEverFreeHeapSize();
+            return true;
+        }
+
+        const HousekeepingTaskEntry &entry = kHousekeepingTasks[slot - kHousekeepingHeapSlots];
+        TaskHandle_t handle = *entry.handle;
+        if (handle == NULL) continue;
+
+        *name = entry.name;
+        *value = (int32_t)uxTaskGetStackHighWaterMark(handle);
+        return true;
+    }
+    return false;
+}
+
+// Follows sendHeartbeat/sendSystemTime's shape: pvPortMalloc, NULL check,
+// pack, xQueueSend onto serialWriteQueue, vPortFree on a failed send. Exactly
+// one value per call -- never a burst of several -- so this entry is
+// structurally identical to every other one from the queue's point of view
+// (design.md's "one ScheduleEntry function that sends all N values" was
+// rejected for exactly this reason).
+static void sendHousekeeping()
+{
+    const char *name;
+    int32_t value;
+    if (!nextHousekeepingValue(&name, &value)) return;
+
+    mavlink_message_t* housekeepingMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
+    if (housekeepingMsg != NULL) {
+        uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        mavlink_msg_named_value_int_pack(
+            1,
+            MAV_COMP_ID_AUTOPILOT1,
+            housekeepingMsg,
+            boot_ms,
+            name,
+            value
+        );
+
+        if (xQueueSend(serialWriteQueue, &housekeepingMsg, 0) != pdPASS)
+        {
+            vPortFree(housekeepingMsg);
+        }
+    }
+}
+
 extern QueueHandle_t serialReadQueue;
 extern RTC_DS1307 rtc;
 
@@ -258,11 +397,17 @@ struct ScheduleEntry {
     bool stabilityCleared = false;
     bool retryAttempted = false;
 
+    // Housekeeping starts disabled and at the 1000 ms floor -- the interval
+    // and enabled flag are both overwritten by MAV_CMD_SET_MESSAGE_INTERVAL
+    // below; these are placeholder values for a disabled entry, not a rate
+    // anything sends at. See specs/mavlink-link/spec.md, "off by default".
     ScheduleEntry schedule[] = {
         { sendHeartbeat,     1000, startMs - 1000u, true },
         { sendSystemTime,    1000, startMs - 500u,  true },
         { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
+        { sendHousekeeping,  1000, startMs,         false },
     };
+    constexpr uint8_t kHousekeepingScheduleIndex = 3;
 
     for (;;)
     {
@@ -318,6 +463,43 @@ struct ScheduleEntry {
                         vTaskDelay(pdMS_TO_TICKS(50));
 
                         NVIC_SystemReset();
+                    }
+
+                    if (command.command == MAV_CMD_SET_MESSAGE_INTERVAL
+                        && (uint16_t)command.param1 == MAVLINK_MSG_ID_NAMED_VALUE_INT) {
+                        // param2 is microseconds (matching MESSAGE_INTERVAL's own
+                        // interval_us field), not milliseconds -- converted before
+                        // it is compared against or stored in interval_ms
+                        // (design.md's Context; an earlier version of this task
+                        // stored it unconverted, which Copilot's review caught:
+                        // a 1 Hz request would have run at 1000 seconds).
+                        ScheduleEntry &housekeeping = schedule[kHousekeepingScheduleIndex];
+                        int32_t requestedUs = (int32_t)command.param2;
+
+                        if (requestedUs <= 0) {
+                            // -1 disables. 0 asks for "the default rate", and
+                            // that default is off -- both in the clean-boot
+                            // case and stopping an already-armed stream
+                            // (specs/mavlink-link/spec.md, "asks for the
+                            // default rate").
+                            housekeeping.enabled = false;
+                            sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+                        } else {
+                            uint32_t requestedMs = (uint32_t)requestedUs / 1000u;
+                            if (requestedMs < 1000u) {
+                                // Below the floor -- denied, not silently
+                                // clamped (design.md's "Converting the
+                                // command's interval, and rejecting one that
+                                // is too fast"). Publishing state is left
+                                // exactly as it was.
+                                sendCommandAck(command.command, MAV_RESULT_DENIED);
+                            } else {
+                                housekeeping.interval_ms = requestedMs;
+                                housekeeping.last_ms = now;
+                                housekeeping.enabled = true;
+                                sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+                            }
+                        }
                     }
 
                     break;

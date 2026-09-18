@@ -205,9 +205,9 @@ the number that fits in the queues:
 | Queue | Depth | Also in existence | Blocks | Bytes |
 |---|---|---|---|---|
 | `serialReadQueue` | 8 | 1 producer, 1 consumer | 10 x 304 | 3040 |
-| `serialWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 304 | 1824 |
+| `serialWriteQueue` | 5 | 1 producer, 1 consumer | 7 x 304 | 2128 |
 | `sdWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 56 | 336 |
-| | | | **Total** | **5200** |
+| | | | **Total** | **5504** |
 
 against 6136 usable of `configTOTAL_HEAP_SIZE`. The extra blocks are not slack: a
 producer allocates *before* it sends, so learning that a queue is full costs a block
@@ -216,10 +216,15 @@ beyond the depth; a consumer holds one between `xQueueReceive` and `vPortFree`.
 could hold one at the same instant — `TaskHeartbeat`, `TaskMavlinkBatteryStatus` and
 `TaskMavlink`'s timesync reply. Since `fold-periodic-telemetry-into-mavlink-task`
 folded the first two into `TaskMavlink`, every send against this queue runs in one
-task, so it needs only the one producer block depth already assumed elsewhere in
-this table. The 608 bytes this released were not returned to `.bss`:
-`configTOTAL_HEAP_SIZE` stays at `0x1800` and the difference is margin, not a queue
-depth to spend again without re-deriving it.
+task, so it needed only the one producer block depth already assumed elsewhere in
+this table — until `add-mavlink-housekeeping-telemetry` gave `TaskMavlink` a fourth,
+independently-clocked schedule entry (§5.1). `sendHeartbeat`, `sendSystemTime`,
+`sendBatteryStatus` and housekeeping can all be due on the same pass, and a
+`TIMESYNC` reply can land in that same pass too — five items wanting the queue at
+once, one more than depth 4 could hold, so the depth grew to 5 to cover it. Raising
+`configTOTAL_HEAP_SIZE` was not needed: the 608 bytes the earlier consolidation
+released as margin absorb the one extra block this costs, so `configTOTAL_HEAP_SIZE`
+stays at `0x1800`.
 
 **The consequence is which failure a burst finds.** Because the depths are backed, a
 saturated queue reports itself through `xQueueSend`, which every producer handles by
@@ -292,6 +297,17 @@ silently select the per-byte fallback.
   `BATTERY_STATUS` fires every 2000 ms, reading `lib/Battery`, and its schedule
   entry is the one disabled in the reduced configuration — the withholding is a
   table flag now, not a task `setup()` chooses not to create.
+- A fourth entry publishes housekeeping — free heap, minimum-ever-free heap, and
+  each live task's stack high-water mark — as one `NAMED_VALUE_INT` (252) per
+  pass, round-robin, cycling back to the start after the last live value. It
+  starts disabled: nothing is sent unless a ground station arms it with
+  `MAV_CMD_SET_MESSAGE_INTERVAL` targeting message id 252, and the requested
+  interval (microseconds on the wire, converted to milliseconds here) is floored
+  at 1000 ms — a faster request is answered `COMMAND_ACK` / `MAV_RESULT_DENIED`,
+  not silently clamped. The floor holds the cadence guarantee above and bounds
+  how often this entry can coincide with the other three on one pass, which is
+  what `serialWriteQueue`'s depth (§4) is now sized against. The armed state is
+  session-scoped, not persisted: a reset returns it to disabled.
 
 **Identity on the bus is fixed and must be identical in every outbound message:**
 system id `1`, component `MAV_COMP_ID_AUTOPILOT1`, type `MAV_TYPE_ROCKET`,
@@ -484,8 +500,10 @@ same static storage as the flight build.
 added, because the stacks and control blocks are in `.bss`. It still leaves out
 `g_heap`, the main stack and the vector table, another 9472 bytes, so on its own it
 understates the commitment. `scripts/ram_budget.py` runs after every link and prints
-the honest figure: **30140 bytes committed of 32768, 2628 bytes of headroom.** That
-headroom is what a new subsystem has to fit into, and the build fails if it drops
+the honest figure: **29092 bytes committed of 32768, 3676 bytes of headroom** (as of
+`add-mavlink-housekeeping-telemetry`; read fresh from a build rather than trusted from
+here, since this figure moves whenever a change touches `.data`, `.noinit` or `.bss`).
+That headroom is what a new subsystem has to fit into, and the build fails if it drops
 below the floor in `platformio.ini`.
 
 `test_hil/` is what exercises the assembled firmware. `run.py` discovers the cases,

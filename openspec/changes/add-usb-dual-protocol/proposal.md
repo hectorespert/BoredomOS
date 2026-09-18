@@ -92,6 +92,14 @@ leaves — 3684 B rather than the 1468 B this change was originally scoped again
 so it and the 315 B above both still fit with margin to spare; the conclusion about
 whether this change fits changed even though its own cost did not.
 
+**Note:** `add-mavlink-housekeeping-telemetry` landed after this proposal was
+written and moved the baseline again, slightly — `3676 B`, not `3684 B` (an 8 B
+difference; it also raised `serialWriteQueue`'s depth from 4 to 5, which this
+change does not use). This does not change the conclusion above (still comfortable
+margin); re-derive against a fresh `pio run` when this change is next picked up,
+per `CLAUDE.md`'s "read fresh, never quote" rule, rather than trusting either
+figure here.
+
 The stack growth is the whole cost, and it is the same shape as `src/serial.cpp`,
 which already holds a `uint8_t buf[MAVLINK_MAX_PACKET_LEN]` inside a 192-word task.
 The 384 words is an estimate to be replaced by a measurement; `ps` reports the console
