@@ -116,13 +116,22 @@ SPI and nothing waits for it.
 
 `TaskSerialWrite` is deliberately **not** `HIGHEST`, even though it is serial I/O.
 The core's `UART::write()` busy-waits until the frame is on the wire rather than
-buffering and returning, and this port builds with `configUSE_TIME_SLICING` at `0`,
-so a task that never blocks is not preempted by its equals. At `HIGHEST` a single
-`BATTERY_STATUS` frame — 36 bytes of payload, 48 on the wire once MAVLink 2 trims
-the trailing zeroes — would stall every other task for 8.33 ms at 57600 baud.
-Nothing is lost by transmitting late — the frame waits in `serialWriteQueue` — so
-the writer sits at `HIGH`, level with its only producer, `TaskMavlink`, which yields
-every cycle on `xQueueReceive`.
+buffering and returning. At `HIGHEST` a single `BATTERY_STATUS` frame — 36 bytes of
+payload, 48 on the wire once MAVLink 2 trims the trailing zeroes — would stall every
+other task for 8.33 ms at 57600 baud. Nothing is lost by transmitting late — the
+frame waits in `serialWriteQueue` — so the writer sits at `HIGH`, level with its
+only producer, `TaskMavlink`.
+
+`TaskMavlink` does not actually yield every cycle: `xQueueReceive` only blocks when
+`serialReadQueue` is empty, and returns at once, without giving up the CPU, whenever
+it already holds a frame. A sustained inbound stream could otherwise let `TaskMavlink`
+run indefinitely at the same priority as `TaskSerialWrite` and starve it — found in
+Copilot's review of `fold-periodic-telemetry-into-mavlink-task`, the change that
+raised `TaskMavlink` to this band. `configUSE_TIME_SLICING` is `1` for exactly this:
+at `configTICK_RATE_HZ = 1000` the scheduler round-robins same-priority ready tasks
+every 1 ms regardless of whether either yields voluntarily, which is what actually
+guarantees `TaskSerialWrite` a turn — not any property of `TaskMavlink`'s own code.
+See `design.md` in that change.
 
 **The six tasks, and which configuration starts them.** Every task's storage is
 declared unconditionally in `src/main.cpp` — the linker counts it whether or not

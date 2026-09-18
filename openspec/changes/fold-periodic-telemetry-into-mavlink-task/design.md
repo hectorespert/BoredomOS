@@ -14,8 +14,10 @@ The constraints that shape the approach:
 
 - **`configUSE_TIMERS` is 0**, set by `use-static-allocation` to reclaim the timer
   service. Software timers are not available without reversing that.
-- **`configUSE_TIME_SLICING` is 0.** Tasks of equal priority do not preempt each
-  other; a task that never blocks keeps the CPU until it does.
+- **`configUSE_TIME_SLICING` was 0** when the decisions below were first written —
+  the framework's own default, never a choice this project had made. Tasks of equal
+  priority did not preempt each other; a task that never blocked kept the CPU until
+  it did. Revised during this same change's review to `1`; see Decisions.
 - **Static allocation only.** Every task's storage is declared in `src/main.cpp`
   whether or not the task is started, so an unstarted task costs exactly as much RAM
   as a started one.
@@ -77,14 +79,55 @@ on the other yielding.
 
 It also preserves §3's stated reason for `TaskSerialWrite` sitting at `HIGH` rather
 than `HIGHEST`: "the writer sits at `HIGH`, level with its own producers, which yield
-every cycle". After this change `TaskMavlink` *is* its only producer, at `HIGH`, and
-still yields every cycle — on `xQueueReceive` instead of `vTaskDelayUntil`. The
-sentence becomes more literally true than it was.
+every cycle". After this change `TaskMavlink` *is* its only producer, at `HIGH` —
+but it does not actually yield every cycle, only when `serialReadQueue` is empty. A
+sustained inbound stream keeps `xQueueReceive` returning without blocking, which
+could starve `TaskSerialWrite` at equal priority. Caught in Copilot's review of this
+PR, not written down here first; see the next Decision for the fix.
+
+*(Lowering telemetry to `LOW` instead, mentioned above as putting it "level with
+`TaskLogger` and... dependent on the other yielding" — that consequence was specific
+to time slicing being off. It no longer applies once the next Decision turns it on,
+but the choice to raise rather than lower stands on the `mavlink-link` requirement
+regardless.)*
 
 What moves up with it: `mavlink_msg_*_decode`, `systemTime.setUnixTime()` and the
 `default` case's `sendStatusText`. All bounded, and all previously ran above
 `TaskSdWrite` anyway. The one to watch is `setUnixTime()`, which writes the DS1307
 over I2C — see Risks.
+
+### `configUSE_TIME_SLICING` moves from the framework's default of `0` to `1`
+
+The decision above raises `TaskMavlink` to `PRIORITY_HIGH`, sharing that band with
+`TaskSerialWrite`. Copilot's review of this change's PR pointed out what that
+combination means with time slicing off: `xQueueReceive` only yields the CPU when it
+genuinely blocks, and returns at once whenever `serialReadQueue` already holds a
+frame. A sustained inbound stream could therefore let `TaskMavlink` run indefinitely
+without ever giving `TaskSerialWrite` a turn, backing `serialWriteQueue` up until
+outbound telemetry is dropped. This risk did not exist before this change:
+`TaskMavlink` sat at `PRIORITY_LOW`, so `TaskSerialWrite` at `HIGH` always preempted
+it regardless of what either task was doing.
+
+`-D configUSE_TIME_SLICING=1` in `platformio.ini` closes this without touching
+`src/mavlink.cpp`. At `configTICK_RATE_HZ = 1000` (the framework default, also
+unchanged), the scheduler round-robins same-priority ready tasks every 1 ms tick
+whether or not either voluntarily yields. The alternative considered was an explicit
+`taskYIELD()` after each inbound message in `TaskMavlink`'s loop — cheaper in blast
+radius, since it touches only the one task, but narrower: it would leave
+`TaskSdWrite`/`TaskCli` at `PRIORITY_LOWEST` exposed to the same structural issue
+(`TaskSdWrite` blocks on SPI during a card write with no known internal yield point,
+and shares its priority with `TaskCli`), and it depends on every future task body at
+a shared priority remembering to yield, rather than on a scheduler guarantee that
+does not forget. Rejected for being a narrower fix to a problem that is not specific
+to `TaskMavlink`.
+
+Cost: none measured. This is scheduler policy — which same-priority ready task runs
+next — not a new structure, so it adds no RAM or flash. It also does not change any
+task's own stack high-water mark: preemption timing changes when a task runs, not
+how deep its own call stack goes at any point it is interrupted, so the board
+readings already taken for this change (`tasks.md` §5) stand. `pio run`/`pio check`/
+the HIL suite were re-run with the flag on regardless, since a global scheduler
+policy change is worth confirming rather than assuming inert.
 
 ### The table drives absolute deadlines, and `SYSTEM_TIME` keeps its 500 ms offset
 
