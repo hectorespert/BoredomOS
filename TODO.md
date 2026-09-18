@@ -18,6 +18,43 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what fold-periodic-telemetry-into-mavlink-task left open
+
+**Status:** defined
+**Scope:** `test/test_hil/`, hands at the board
+
+`openspec/changes/archive/2026-09-18-fold-periodic-telemetry-into-mavlink-task/` folded
+`TaskHeartbeat` and `TaskMavlinkBatteryStatus` into `TaskMavlink`'s schedule and
+landed with 32 of 36 tasks done. The remaining four all needed hands physically at
+the board, which this session did not have for the last stretch — each is already
+explained in that change's own `tasks.md`, not silently skipped:
+
+- **1.2 — no pre-change `mavproxy.py` trace was captured.** The code was already
+  edited by the time this session got board access (see 1.1's sequencing note in
+  the archived `tasks.md`), so there was nothing left to capture a "before" trace
+  against. 5.4 substituted a different comparison basis instead — this project's
+  own recorded pre-change CI passes of the same behavioural requirements, plus a
+  fresh direct capture — which is why 1.2 is not simply redone as a formality if
+  picked up: check whether 5.4's substitution is judged sufficient before spending
+  the board time.
+- **5.8 — pull the card, boot, confirm the firmware still reaches steady state.**
+  Needs the SD card physically removed.
+- **5.9 — read a fresh `data*.mpk` back and confirm it carries five per-task
+  fields, and that a card still holding old seven-field records is written to
+  without error.** Needs the card pulled and read on a separate machine.
+- **5.11 — the 30-minute reduced-configuration retry has still never been
+  observed firing**, moved in this change but not watched end to end. Needs an
+  uninterrupted capture spanning at least two retry intervals (over an hour),
+  which is the same debt `add-degraded-mode` already left at its own task 8.4 —
+  one board session could close both.
+
+One more thing this change's own board time surfaced, worth carrying forward: with
+no ground command yet to clear the cumulative-reset counter (`VBTBKR`), repeated
+`pio run -t upload` cycles during a single session can push the board into the
+reduced configuration by themselves — it happened during this change's own
+verification, at `cumulative=10`. Whoever next spends a long session reflashing
+should expect this, not be surprised by it.
+
 ### Finish what add-degraded-mode left open
 
 **Status:** defined
