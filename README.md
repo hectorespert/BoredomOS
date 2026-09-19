@@ -19,12 +19,13 @@ commands, and keeps a housekeeping log on an SD card.
 | microSD card module | SPI, `CS` on pin **9** |
 | DS1307 real-time clock | I2C, address `0x68` |
 | Solar charger with LiPo cell | battery sense on **A0** |
-| Ground link (MAVLink) | `Serial1` UART, **D0** (`RX`) / **D1** (`TX`), 57600 baud |
-| USB CDC, 115200 baud | console — reserved for debug and a CLI, unused today |
+| Ground link (MAVLink), primary | `Serial1` UART, **D0** (`RX`) / **D1** (`TX`), 57600 baud |
+| Ground link (MAVLink), secondary | USB CDC — always on, no line rate |
 
 Wiring is hardcoded in the firmware, not configurable. The one exception is the
-link port itself: `include/Link.h` defines `LINK_SERIAL` and `LINK_BAUD`, both
-overridable from `build_flags` (see `platformio.ini`).
+link ports themselves: `include/Link.h` defines `LINK_UART`, `LINK_USB` and
+`LINK_BAUD`, all overridable from `build_flags` (see `platformio.ini`).
+`LINK_BAUD` applies to the UART alone — a CDC port has no line rate.
 
 ## Quick start
 
@@ -33,7 +34,6 @@ Requires [PlatformIO](https://platformio.org/install/cli).
 ```bash
 pio run                  # build
 pio run -t upload        # flash the board
-pio device monitor       # USB console at 115200 — silent, nothing writes to it
 ```
 
 Tests run **on the board only**: they assert against a real battery, RTC and SD
@@ -47,24 +47,30 @@ pio test
 
 MAVProxy is the reference ground control station:
 
-```bash
-mavproxy.py --master=<link port>,57600 --load-module system_time
-```
-
-`<link port>` is whatever is wired to D0/D1 — the telemetry radio, or a USB-TTL
-adapter on the bench. **`/dev/ttyACM0` no longer carries MAVLink.**
-
-To test without a radio, build the link back onto USB and nothing else changes:
+The firmware answers MAVLink on **both ports at once**, with no build flag to
+choose between them. Over the USB cable, with nothing else attached:
 
 ```bash
-PLATFORMIO_BUILD_FLAGS="-D LINK_SERIAL=Serial -D LINK_BAUD=115200" pio run -t upload
-mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
+mavproxy.py --master=/dev/ttyACM0 --load-module system_time
 ```
 
-`LINK_BAUD` is pinned here only to keep both sides reading the same number: a USB
-CDC port has no real line rate and ignores it.
+Or over the UART, to whatever is wired to D0/D1 — the telemetry radio, or a
+USB-TTL adapter on the bench:
+
+```bash
+mavproxy.py --master=<uart port>,57600 --load-module system_time
+```
+
+Both can be connected at the same time. Each stream numbers its own frames, and a
+request is answered on the port it arrived on.
+
+There is **no text console**. `pio device monitor` shows binary MAVLink frames.
+The `ps` and `free` commands a previous version answered on USB are gone with
+`src/cli.cpp`; free heap, minimum-ever-free heap and each task's stack high-water
+mark are published as `NAMED_VALUE_INT` instead, once a ground station asks for
+them with `MAV_CMD_SET_MESSAGE_INTERVAL` on message id 252.
 
 The satellite identifies itself as system `1`, component `MAV_COMP_ID_AUTOPILOT1`,
-type `MAV_TYPE_ROCKET`. It emits `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and
-`BATTERY_STATUS` every 2 s, and its clock can be set from the ground with
-`SYSTEM_TIME` or `TIMESYNC`.
+type `MAV_TYPE_ROCKET` — one vehicle, on whichever port you attach to. It emits
+`HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and `BATTERY_STATUS` every 2 s, and its
+clock can be set from the ground with `SYSTEM_TIME` or `TIMESYNC`.

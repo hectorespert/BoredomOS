@@ -1,0 +1,281 @@
+## ADDED Requirements
+
+### Requirement: MAVLink is carried on both the UART and the USB CDC port
+
+The firmware SHALL exchange MAVLink frames over the hardware UART exposed on pins
+D0 (`RX`) and D1 (`TX`) at the link baud rate, and over the USB CDC port, in every
+build. Neither port SHALL be a precondition for the other: each SHALL reach and hold
+its steady-state cadence whether or not anything is attached to the other.
+
+#### Scenario: Ground station attached to the UART pins
+
+- **WHEN** a ground station is connected to D0/D1 at the link baud rate
+- **THEN** it receives `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and `BATTERY_STATUS`
+  every 2 s
+- **AND** inbound `SYSTEM_TIME` and `TIMESYNC` sent on that port are acted upon
+
+#### Scenario: Ground station attached to USB
+
+- **WHEN** a host opens the USB CDC port and speaks MAVLink
+- **THEN** it receives `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz and `BATTERY_STATUS`
+  every 2 s
+- **AND** inbound `SYSTEM_TIME` and `TIMESYNC` sent on that port are acted upon
+- **AND** it receives no text: the port carries MAVLink frames only
+
+#### Scenario: Only one port is attached
+
+- **WHEN** a ground station is attached to one port and nothing to the other
+- **THEN** the attached port carries the full telemetry set at its normal rates
+- **AND** commands sent on it are acted upon
+
+### Requirement: Each port is an independent MAVLink stream
+
+Each port SHALL number its outbound frames with its own sequence counter,
+incrementing by one per frame sent on that port and unaffected by traffic on the
+other. A message sent in response to an inbound message SHALL leave by the port the
+request arrived on, and SHALL NOT be emitted on any other port.
+
+#### Scenario: Two ground stations attached at once
+
+- **WHEN** a ground station is attached to each port and both observe the sequence
+  field of the frames they receive
+- **THEN** each sees a sequence that advances by one per frame, with no gaps
+  attributable to the other port's traffic
+
+#### Scenario: A command arrives on one port
+
+- **WHEN** a ground station on one port sends a message the firmware answers —
+  `TIMESYNC` with `tc1 == 0`, or `MAV_CMD_SET_MESSAGE_INTERVAL` targeting message
+  id 252
+- **THEN** the answer is received on that port
+- **AND** a ground station on the other port does not receive it
+
+### Requirement: Every port presents the same vehicle identity
+
+Every outbound message SHALL carry system id `1`, component
+`MAV_COMP_ID_AUTOPILOT1`, type `MAV_TYPE_ROCKET` and autopilot
+`MAV_AUTOPILOT_GENERIC`, on every port. The satellite SHALL appear as one vehicle,
+not one per port.
+
+#### Scenario: Identity observed on either port
+
+- **WHEN** a ground station is attached to the UART link, or to the USB port, or one
+  to each
+- **THEN** each sees exactly one vehicle, system `1`, component
+  `MAV_COMP_ID_AUTOPILOT1`, type `MAV_TYPE_ROCKET`
+- **AND** the two observers see the same vehicle, not two
+
+### Requirement: Each MAVLink port is named by a single definition
+
+Each port that carries MAVLink SHALL be named by a single definition that the whole
+firmware refers to, and the UART's baud rate likewise. Selecting a different UART
+port or speed SHALL be possible by overriding those definitions at build time,
+without editing any file that implements the MAVLink protocol or a task body. A USB
+CDC port has no line rate, so no baud definition SHALL apply to it.
+
+#### Scenario: Changing the link speed
+
+- **WHEN** the firmware is built with the UART baud rate overridden
+- **THEN** the UART link operates at that speed and no other behaviour changes
+- **AND** the USB port is unaffected
+
+#### Scenario: Moving the UART link to a different hardware port
+
+- **WHEN** the firmware is built with the UART port definition overridden to another
+  hardware serial port
+- **THEN** the build succeeds with no other source change
+- **AND** a ground station on that port sees the same messages, at the same rates,
+  with the same identity
+
+## MODIFIED Requirements
+
+### Requirement: No task waits for the link port to become ready
+
+No task SHALL block, spin or delay waiting for a link port to report itself ready
+before producing or transmitting telemetry. The satellite SHALL operate with no host
+and no ground station attached to either port.
+
+A USB CDC port, unlike a hardware UART, has a real readiness state: with no host
+attached, frames written to it cannot leave the board. The firmware SHALL discard
+those frames rather than wait for a host. A host that is attached but has stopped
+draining the port SHALL NOT stall any other task, SHALL NOT prevent the watchdog
+from being refreshed, and SHALL NOT delay traffic on the other port; frames that
+cannot be accepted SHALL be discarded, as they already are when an outbound queue
+is full.
+
+In the normal configuration, all tasks SHALL reach their steady-state cadence and
+housekeeping records SHALL continue to be written to the SD card at 1 Hz. Whether
+that holds in the reduced configuration, or with no SD card present, is governed by
+the `fault-recovery` capability, not by this requirement.
+
+#### Scenario: Board powered with nothing attached
+
+- **WHEN** the board is powered with neither a host on USB nor a ground station on
+  the UART, and starts in the normal configuration
+- **THEN** all tasks reach their steady-state cadence
+- **AND** housekeeping records continue to be written to the SD card at 1 Hz
+
+#### Scenario: Ground station attached after boot
+
+- **WHEN** a ground station connects to either port some time after boot
+- **THEN** it begins receiving telemetry at the normal rates without the board being
+  reset
+
+#### Scenario: A host opens the USB port and stops reading
+
+- **WHEN** a host opens the USB CDC port and then stops draining it, while the
+  firmware keeps producing telemetry for that port
+- **THEN** the board does not reset
+- **AND** a ground station on the UART continues to receive telemetry at the normal
+  rates
+- **AND** housekeeping records continue to be written to the SD card at 1 Hz
+
+### Requirement: Link traffic does not disturb periodic cadences
+
+Transmitting MAVLink frames on either port SHALL NOT shift the firmware's periodic
+cadences: housekeeping sampling stays at 1 Hz and telemetry keeps its declared rates
+regardless of link traffic on either port.
+
+This is a cadence guarantee, not a latency one. Transmission occupies the CPU for
+the duration of a frame — a few milliseconds at link speed — and lower-priority
+tasks do not run while it does. What SHALL hold is that this delay is absorbed
+within each task's period rather than accumulating into drift.
+
+#### Scenario: Sustained telemetry on a slow link
+
+- **WHEN** the UART is transmitting continuously at the link baud rate
+- **THEN** housekeeping records are still written once per second
+- **AND** `HEARTBEAT` and `SYSTEM_TIME` still leave at 1 Hz on both ports
+
+#### Scenario: Sustained inbound traffic on one port
+
+- **WHEN** a ground station sends a continuous stream of MAVLink frames to one port
+- **THEN** housekeeping records are still written once per second
+- **AND** the other port keeps emitting `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz
+
+### Requirement: Housekeeping telemetry is available on request, never unsolicited
+
+Each port SHALL be able to publish free heap, minimum-ever-free heap (in bytes), and
+the stack high-water mark (in words) of every task that exists in the running
+configuration, as `NAMED_VALUE_INT` messages, one message per schedule pass at a
+ground-controlled interval, cycling through the full set before repeating. A task
+that does not exist in the running configuration SHALL be omitted from the set rather
+than reported as a value belonging to a different task.
+
+This publishing SHALL be off by default on every port and SHALL start, on the port
+the request arrived on, only after a ground station sends
+`MAV_CMD_SET_MESSAGE_INTERVAL` targeting message id 252 (`NAMED_VALUE_INT`) with an
+interval greater than or equal to 1000 ms, and SHALL stop when a ground station sends
+that command on that port with an interval of `-1`. A request for "the default rate"
+(an interval of `0`) SHALL NOT start publishing, and SHALL stop it if it was already
+running, since the default rate is off in both cases. A request for a positive
+interval below 1000 ms SHALL NOT start or change publishing, and SHALL be answered
+with `COMMAND_ACK` / `MAV_RESULT_DENIED` rather than accepted or silently adjusted.
+Every `MAV_CMD_SET_MESSAGE_INTERVAL` targeting message id 252 SHALL be answered with
+`COMMAND_ACK`.
+
+Arming SHALL be per port: a request on one port SHALL NOT start, stop or change
+publishing on any other port, and each port SHALL keep its own position in the cycle.
+
+This request SHALL NOT be persisted: after any reset, for any reason, publishing SHALL
+be off on every port until a ground station requests it again in that session. Whether
+the request reaches the firmware and is acted on SHALL NOT depend on whether the
+firmware is in the normal or the reduced configuration; the set of values published,
+however, follows which tasks exist in that configuration.
+
+#### Scenario: No ground station has asked
+
+- **WHEN** the firmware is running and no `MAV_CMD_SET_MESSAGE_INTERVAL` targeting
+  message id 252 has been received on a port since the last reset
+- **THEN** no `NAMED_VALUE_INT` message is sent on that port
+
+#### Scenario: A ground station requests housekeeping
+
+- **WHEN** a ground station sends `MAV_CMD_SET_MESSAGE_INTERVAL` with the message id
+  parameter set to 252 and the interval parameter at or above 1000 ms
+- **THEN** the firmware replies with `COMMAND_ACK` / `MAV_RESULT_ACCEPTED`
+- **AND** begins sending one `NAMED_VALUE_INT` message per schedule pass at that
+  interval on that port, cycling through free heap, minimum-ever-free heap, then the
+  stack high-water mark of every task that exists in the running configuration,
+  before repeating
+
+#### Scenario: Arming one port leaves the other alone
+
+- **WHEN** a ground station arms housekeeping on one port and a ground station on the
+  other port has not
+- **THEN** `NAMED_VALUE_INT` messages are sent on the armed port only
+- **AND** the unarmed port continues to carry its other telemetry unchanged
+
+#### Scenario: A ground station requests an interval below the floor
+
+- **WHEN** a ground station sends `MAV_CMD_SET_MESSAGE_INTERVAL` with the message id
+  parameter set to 252 and the interval parameter greater than zero but below 1000 ms
+- **THEN** the firmware replies with `COMMAND_ACK` / `MAV_RESULT_DENIED`
+- **AND** publishing state on every port (on, off, and the interval in effect if
+  already on) is unchanged by the request
+
+#### Scenario: A ground station disables housekeeping
+
+- **WHEN** a ground station sends `MAV_CMD_SET_MESSAGE_INTERVAL` with the message id
+  parameter set to 252 and the interval parameter set to `-1`
+- **THEN** the firmware replies with `COMMAND_ACK`
+- **AND** stops sending `NAMED_VALUE_INT` messages on that port
+
+#### Scenario: A ground station asks for the default rate
+
+- **WHEN** a ground station sends `MAV_CMD_SET_MESSAGE_INTERVAL` with the message id
+  parameter set to 252 and the interval parameter set to `0`
+- **THEN** the firmware replies with `COMMAND_ACK`
+- **AND** `NAMED_VALUE_INT` messages are not sent on that port, whether or not
+  publishing was already active there before this request
+
+#### Scenario: The board resets after housekeeping was requested
+
+- **WHEN** a ground station had requested housekeeping on either port and the
+  firmware then resets, for any reason
+- **THEN** after the reset, no `NAMED_VALUE_INT` message is sent on any port until a
+  ground station requests it again
+
+#### Scenario: Requested while in the reduced configuration
+
+- **WHEN** the firmware is in the reduced configuration and a ground station sends
+  `MAV_CMD_SET_MESSAGE_INTERVAL` with the message id parameter set to 252 and the
+  interval parameter at or above 1000 ms
+- **THEN** the firmware replies with `COMMAND_ACK` / `MAV_RESULT_ACCEPTED` and begins
+  sending `NAMED_VALUE_INT` messages on that port, cycling through free heap,
+  minimum-ever-free heap, and the stack high-water mark of every task that exists in
+  the reduced configuration — a smaller set than the normal configuration's, since
+  not every task is created there
+
+## REMOVED Requirements
+
+### Requirement: The MAVLink link is carried on the hardware UART
+
+**Reason**: Its normative content was "SHALL NOT exchange MAVLink frames over the
+USB CDC port", which this change reverses outright. Editing it in place would leave
+a requirement whose name says "the hardware UART" describing behaviour on two ports.
+**Migration**: Replaced by *MAVLink is carried on both the UART and the USB CDC
+port*, which keeps the UART scenario unchanged and adds the USB one.
+
+### Requirement: The vehicle identity is unchanged by the move
+
+**Reason**: Phrased as a statement about a past change ("the move") rather than as a
+standing property of the system, which is meaningless now that the move it refers to
+is two changes back. The obligation it carries is real and is kept.
+**Migration**: Replaced by *Every port presents the same vehicle identity*, which
+states the same triple as a standing property and extends it to cover a ground
+station on each port seeing one vehicle rather than two.
+
+### Requirement: The link port and baud rate are defined in one place
+
+**Reason**: One of its scenarios, *Reverting the link to USB for bench work*,
+described building with the link overridden onto the USB CDC port so a ground
+station could reach it there. That override and the `bench` environment it named are
+retired by this change, because USB carries MAVLink in every build — the scenario
+does not fail, it stops being expressible. Editing the requirement in place would
+have had to carry a scenario that no longer describes anything.
+**Migration**: Replaced by *Each MAVLink port is named by a single definition*,
+which keeps the single-definition obligation for both ports and the baud override
+for the UART, drops the retired bench scenario, and adds one for moving the UART to
+a different hardware port — the general case that scenario was a special instance
+of.

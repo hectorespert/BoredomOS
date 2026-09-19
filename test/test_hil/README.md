@@ -81,6 +81,25 @@ Two details make it work, and neither is obvious:
   upload, and a USB CDC port takes a moment to re-enumerate after the board resets.
   Without the wait every case is skipped for no real reason.
 
+## Steps no script here can run
+
+Two things this suite cannot observe, recorded so they are not mistaken for
+covered. Both belong to `replace-console-cli-with-usb-mavlink-link`.
+
+- **A host that opens USB and stops reading must not reset the board.**
+  `_SerialUSB::write()` loops without yielding when its buffer is full, so a
+  stalled host above idle priority would keep `vApplicationIdleHook()` from
+  refreshing the watchdog. `TaskLinkWrite` guards this with
+  `availableForWrite()`. To check it: open `/dev/ttyACM0`, read nothing, and
+  watch the UART link with MAVProxy — telemetry must keep its cadence, the SD
+  log must keep writing, and the board must not reset. Automating it means
+  holding a port open and *not* draining it for long enough to matter, which is
+  the opposite of what every helper here does.
+- **The 8-value housekeeping cycle in the normal configuration**, which
+  `add-mavlink-housekeeping-telemetry` also left open and which is now a 9-value
+  cycle. A board in the reduced configuration exercises a shorter set, so a pass
+  there proves less than it appears to.
+
 ## One thing not to do
 
 Do not use a 1200-baud touch to reset this board. On the UNO R4 Minima that enters

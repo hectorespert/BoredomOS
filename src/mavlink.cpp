@@ -5,10 +5,25 @@
 #include <SystemTime.h>
 #include <Recovery.h>
 #include <LinkMsg.h>
+#include <LinkPort.h>
+#include <Link.h>
 #include <MavlinkPack.h>
 #include <string.h>
 
-extern QueueHandle_t serialWriteQueue;
+// Both ports, owned by src/link.cpp and only read here. Every send* below
+// takes the port index it is for: a reply goes out the port its request
+// arrived on, and each port's periodic schedule is its own
+// (specs/mavlink-link/spec.md, "Each port is an independent MAVLink stream").
+//
+// The index is the channel number: LINK_CHAN_UART is MAVLINK_COMM_0 and
+// LINK_CHAN_USB is MAVLINK_COMM_1, so an InboundMsg's chan indexes linkPorts
+// directly. The static_asserts below are what keep that true if either
+// definition moves.
+extern LinkPort linkPorts[2];
+
+constexpr uint8_t kPortCount = 2;
+static_assert(LINK_CHAN_UART == 0, "linkPorts is indexed by channel number");
+static_assert(LINK_CHAN_USB == 1, "linkPorts is indexed by channel number");
 
 extern SystemTime systemTime;
 
@@ -20,10 +35,11 @@ extern Recovery::BootPhase previousBootPhase;
 // never reassigned after -- safe to read directly from the housekeeping table
 // below rather than snapshotting them into a table built at static-init time,
 // which would run before setup() and see every handle still NULL.
-extern TaskHandle_t taskSerialReadHandler;
-extern TaskHandle_t taskSerialWriteHandler;
+extern TaskHandle_t taskUartReadHandler;
+extern TaskHandle_t taskUartWriteHandler;
+extern TaskHandle_t taskUsbReadHandler;
+extern TaskHandle_t taskUsbWriteHandler;
 extern TaskHandle_t taskMavlinkHandler;
-extern TaskHandle_t taskCliHandler;
 extern TaskHandle_t taskLoggerHandler;
 extern TaskHandle_t taskSdWriteHandler;
 
@@ -52,29 +68,29 @@ static uint32_t packCustomMode()
         | ((uint32_t)cumulative << 24);
 }
 
-static void sendHeartbeat() {
+static void sendHeartbeat(uint8_t port) {
     LinkMsg intent;
     intent.kind = LinkMsgKind::Heartbeat;
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
-static void sendSystemTime()
+static void sendSystemTime(uint8_t port)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::SystemTime;
     intent.system_time.unix_usec = systemTime.getUnixTimeUsec();
     intent.system_time.boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
-static void sendStatusText(const char* text, uint8_t severity)
+static void sendStatusText(uint8_t port, const char* text, uint8_t severity)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::StatusText;
     intent.statustext.severity = severity;
     strncpy(intent.statustext.text, text, sizeof(intent.statustext.text) - 1);
     intent.statustext.text[sizeof(intent.statustext.text) - 1] = '\0';
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
 static const char* resetReasonText(Recovery::ResetReason reason)
@@ -110,6 +126,10 @@ static const char* bootPhaseText(Recovery::BootPhase phase)
 // malloc failed"), under the 50-byte STATUSTEXT text field -- no printf family
 // involved, per review.md's note that newlib-nano's vsnprintf costs stack this
 // task's 128 words does not have to spare.
+//
+// Goes out both ports rather than one: it answers "why did you reset", and
+// which port a ground station happens to be on at boot is not something the
+// firmware knows. Unlike a reply, it has no originating port to route back to.
 static void sendBootStatusText()
 {
     char text[50];
@@ -119,27 +139,29 @@ static void sendBootStatusText()
     strncat(text, ", phase ", sizeof(text) - 1 - strlen(text));
     strncat(text, bootPhaseText(previousBootPhase), sizeof(text) - 1 - strlen(text));
 
-    sendStatusText(text, MAV_SEVERITY_CRITICAL);
+    for (uint8_t port = 0; port < kPortCount; ++port) {
+        sendStatusText(port, text, MAV_SEVERITY_CRITICAL);
+    }
 }
 
-static void sendCommandAck(uint16_t command, uint8_t result)
+static void sendCommandAck(uint8_t port, uint16_t command, uint8_t result)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::CommandAck;
     intent.command_ack.command = command;
     intent.command_ack.result = result;
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
 extern Battery battery;
 
-static void sendBatteryStatus()
+static void sendBatteryStatus(uint8_t port)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::BatteryStatus;
     intent.battery.millivolts = battery.millivolts();
     intent.battery.remaining = battery.remaining();
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
 // Housekeeping telemetry -- free heap, minimum-ever-free heap, and each live
@@ -151,26 +173,31 @@ static void sendBatteryStatus()
 // Every name is a full 10-byte array, not a shorter string literal: the pack
 // function's mav_array_memcpy always copies exactly 10 bytes from `name`
 // regardless of its actual length, so a literal shorter than 10 bytes (e.g.
-// "Cli") would read past the end of it. Declaring these as char[10] makes the
-// compiler pad the remainder with zeros instead. "SerialWrite" is 11
-// characters and truncates to "SerialWrit" in the 10-byte field -- no other
-// task name collides with the truncated form today, and cli.cpp's own
-// `ps <name>` already truncates its argument the same way, so this is an
-// existing acceptance, not a new one (design.md's Risks).
+// "Mavlink") would read past the end of it. Declaring these as char arrays
+// makes the compiler pad the remainder with zeros instead.
+//
+// NAMED_VALUE_INT.name is char[10], and that -- not configMAX_TASK_NAME_LEN,
+// which is 16 -- is the binding limit on a task name in this firmware. It is
+// what used to truncate "SerialWrite" to "SerialWrit" on the wire. Every name
+// below now fits in 10 with room to spare and none collides with another after
+// truncation, which matters because telling per-task high-water marks apart is
+// the only reason this stream exists (design.md, Decision 10).
+//
 // 12 bytes, not 10: a char[10] initialized from a 10-character literal (no
 // room left for the implicit terminator, e.g. "SerialRead") is a hard error
 // under this toolchain's g++ (-fpermissive would only downgrade the
 // standard-permitted exact-length case to a warning, and this build does not
 // pass that flag). 12 is comfortably more than the 10 bytes the pack
 // function ever reads from these, for every name here.
-static const char kNameHeapFree[12]    = "HeapFree";
-static const char kNameHeapMin[12]     = "HeapMin";
-static const char kNameSerialRead[12]  = "SerialRead";
-static const char kNameSerialWrite[12] = "SerialWrite";
-static const char kNameMavlink[12]     = "Mavlink";
-static const char kNameCli[12]         = "Cli";
-static const char kNameLogger[12]      = "Logger";
-static const char kNameSdWrite[12]     = "SdWrite";
+static const char kNameHeapFree[12]  = "HeapFree";
+static const char kNameHeapMin[12]   = "HeapMin";
+static const char kNameUartRead[12]  = "UartRead";
+static const char kNameUartWrite[12] = "UartWrite";
+static const char kNameUsbRead[12]   = "UsbRead";
+static const char kNameUsbWrite[12]  = "UsbWrite";
+static const char kNameMavlink[12]   = "Mavlink";
+static const char kNameLogger[12]    = "Logger";
+static const char kNameSdWrite[12]   = "SdWrite";
 
 struct HousekeepingTaskEntry {
     TaskHandle_t *handle;
@@ -180,23 +207,28 @@ struct HousekeepingTaskEntry {
 // Points at the six extern handles above rather than copying their values, so
 // a NULL check always sees setup()'s actual outcome for this boot. Cycle
 // length follows the task count -- a future task added to src/main.cpp needs
-// an entry here too, and needs serialWriteQueue's depth (below) re-checked,
+// an entry here too, and needs each port's write queue depth re-checked,
 // per design.md's Risks ("The cycle length grows every time a task is
 // added").
 static const HousekeepingTaskEntry kHousekeepingTasks[] = {
-    { &taskSerialReadHandler,  kNameSerialRead  },
-    { &taskSerialWriteHandler, kNameSerialWrite },
-    { &taskMavlinkHandler,     kNameMavlink     },
-    { &taskCliHandler,         kNameCli         },
-    { &taskLoggerHandler,      kNameLogger      },
-    { &taskSdWriteHandler,     kNameSdWrite     },
+    { &taskUartReadHandler,  kNameUartRead  },
+    { &taskUartWriteHandler, kNameUartWrite },
+    { &taskUsbReadHandler,   kNameUsbRead   },
+    { &taskUsbWriteHandler,  kNameUsbWrite  },
+    { &taskMavlinkHandler,   kNameMavlink   },
+    { &taskLoggerHandler,    kNameLogger    },
+    { &taskSdWriteHandler,   kNameSdWrite   },
 };
 
 constexpr uint8_t kHousekeepingHeapSlots = 2;
 constexpr uint8_t kHousekeepingTaskSlots = sizeof(kHousekeepingTasks) / sizeof(kHousekeepingTasks[0]);
 constexpr uint8_t kHousekeepingSlots = kHousekeepingHeapSlots + kHousekeepingTaskSlots;
 
-static uint8_t housekeepingCursor = 0;
+// One cursor per port, not one shared. Arming is per port
+// (specs/mavlink-link/spec.md, "Arming one port leaves the other alone"), so
+// each port has to keep its own position in the cycle -- a shared cursor would
+// make two armed ground stations each see every other value.
+static uint8_t housekeepingCursor[kPortCount] = { 0, 0 };
 
 // Reads the value at the cursor's current slot and advances, wrapping after
 // the last one. A task handle that is NULL in this configuration (the
@@ -210,11 +242,11 @@ static uint8_t housekeepingCursor = 0;
 // which cannot happen today -- SerialRead, SerialWrite, Mavlink and Cli are
 // unconditional (src/main.cpp:335-348) -- but is handled rather than
 // assumed.
-static bool nextHousekeepingValue(const char **name, int32_t *value)
+static bool nextHousekeepingValue(uint8_t port, const char **name, int32_t *value)
 {
     for (uint8_t tries = 0; tries < kHousekeepingSlots; ++tries) {
-        uint8_t slot = housekeepingCursor;
-        housekeepingCursor = (housekeepingCursor + 1) % kHousekeepingSlots;
+        uint8_t slot = housekeepingCursor[port];
+        housekeepingCursor[port] = (housekeepingCursor[port] + 1) % kHousekeepingSlots;
 
         if (slot == 0) {
             *name = kNameHeapFree;
@@ -239,30 +271,38 @@ static bool nextHousekeepingValue(const char **name, int32_t *value)
 }
 
 // Follows sendHeartbeat/sendSystemTime's shape: fill the intent, xQueueSend
-// onto serialWriteQueue, nothing to free either way. Exactly one value per
+// onto that port's write queue, nothing to free either way. One value per
 // call -- never a burst of several -- so this entry is structurally
 // identical to every other one from the queue's point of view (design.md's
 // "one ScheduleEntry function that sends all N values" was rejected for
 // exactly this reason).
-static void sendHousekeeping()
+static void sendHousekeeping(uint8_t port)
 {
     const char *name;
     int32_t value;
-    if (!nextHousekeepingValue(&name, &value)) return;
+    if (!nextHousekeepingValue(port, &name, &value)) return;
 
     LinkMsg intent;
     intent.kind = LinkMsgKind::NamedValueInt;
     intent.named_value_int.name = name;
     intent.named_value_int.value = value;
-    xQueueSend(serialWriteQueue, &intent, 0);
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
 // The only function in the firmware outside this file that may call a
-// mavlink_msg_*_pack function -- src/serial.cpp's TaskSerialWrite calls this
-// to turn what a producer meant into a wire-ready message, keeping protocol
+// mavlink_msg_*_pack function -- src/link.cpp's TaskLinkWrite calls this to
+// turn what a producer meant into a wire-ready message, keeping protocol
 // knowledge here rather than in the transport (design.md's Decisions,
 // queue-mavlink-messages-by-value).
-void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
+//
+// Every call below is the _pack_chan form, not the plain _pack one. The plain
+// form takes its sequence number from channel 0 unconditionally, so with two
+// ports both streams would share one counter and each ground station would see
+// gaps and infer packet loss. current_tx_seq lives in mavlink_status_t[chan],
+// so passing the channel is the whole of what makes the numbering per-port --
+// see specs/mavlink-link/spec.md, "Each port is an independent MAVLink
+// stream", and design.md, Decision 5.
+void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
 {
     switch (intent.kind) {
         case LinkMsgKind::Heartbeat: {
@@ -270,9 +310,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
             if (!reducedConfiguration) {
                 baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
             }
-            mavlink_msg_heartbeat_pack(
+            mavlink_msg_heartbeat_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 MAV_TYPE_ROCKET,
                 MAV_AUTOPILOT_GENERIC,
@@ -284,9 +325,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
         }
 
         case LinkMsgKind::SystemTime:
-            mavlink_msg_system_time_pack(
+            mavlink_msg_system_time_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 intent.system_time.unix_usec,
                 intent.system_time.boot_ms
@@ -300,9 +342,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
 
             uint16_t voltages_ext[4] = {0, 0, 0, 0};
 
-            mavlink_msg_battery_status_pack(
+            mavlink_msg_battery_status_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 0,
                 MAV_BATTERY_FUNCTION_ALL,
@@ -323,9 +366,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
         }
 
         case LinkMsgKind::TimesyncReply:
-            mavlink_msg_timesync_pack(
+            mavlink_msg_timesync_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 systemTime.getUnixTimeNsec(),
                 intent.timesync.ts1,
@@ -335,9 +379,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
             break;
 
         case LinkMsgKind::StatusText:
-            mavlink_msg_statustext_pack(
+            mavlink_msg_statustext_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 intent.statustext.severity,
                 intent.statustext.text,
@@ -347,9 +392,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
             break;
 
         case LinkMsgKind::CommandAck:
-            mavlink_msg_command_ack_pack(
+            mavlink_msg_command_ack_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 intent.command_ack.command,
                 intent.command_ack.result,
@@ -362,9 +408,10 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
 
         case LinkMsgKind::NamedValueInt: {
             uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            mavlink_msg_named_value_int_pack(
+            mavlink_msg_named_value_int_pack_chan(
                 1,
                 MAV_COMP_ID_AUTOPILOT1,
+                chan,
                 out,
                 boot_ms,
                 intent.named_value_int.name,
@@ -375,7 +422,7 @@ void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
     }
 }
 
-extern QueueHandle_t serialReadQueue;
+extern QueueHandle_t linkReadQueue;
 extern RTC_DS1307 rtc;
 
 // {function, interval_ms, last_ms, enabled} -- last_ms is the tick (in ms since
@@ -405,8 +452,13 @@ extern RTC_DS1307 rtc;
 // sendSystemTime is seeded half an interval (500 ms) behind sendHeartbeat so
 // the two keep leaving 500 ms apart, exactly as when they alternated on one
 // vTaskDelayUntil.
+//
+// One schedule per port, not one shared. Each port is an independent stream,
+// so each keeps its own last_ms and its own housekeeping arming -- a shared
+// table would make arming one port arm both and the cadences interlock
+// (design.md, Decision 2; specs/mavlink-link/spec.md).
 struct ScheduleEntry {
-    void (*function)();
+    void (*function)(uint8_t port);
     uint32_t interval_ms;
     uint32_t last_ms;
     bool enabled;
@@ -427,11 +479,19 @@ struct ScheduleEntry {
     // and enabled flag are both overwritten by MAV_CMD_SET_MESSAGE_INTERVAL
     // below; these are placeholder values for a disabled entry, not a rate
     // anything sends at. See specs/mavlink-link/spec.md, "off by default".
-    ScheduleEntry schedule[] = {
-        { sendHeartbeat,     1000, startMs - 1000u, true },
-        { sendSystemTime,    1000, startMs - 500u,  true },
-        { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
-        { sendHousekeeping,  1000, startMs,         false },
+    ScheduleEntry schedule[kPortCount][4] = {
+        {
+            { sendHeartbeat,     1000, startMs - 1000u, true },
+            { sendSystemTime,    1000, startMs - 500u,  true },
+            { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
+            { sendHousekeeping,  1000, startMs,         false },
+        },
+        {
+            { sendHeartbeat,     1000, startMs - 1000u, true },
+            { sendSystemTime,    1000, startMs - 500u,  true },
+            { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
+            { sendHousekeeping,  1000, startMs,         false },
+        },
     };
     constexpr uint8_t kHousekeepingScheduleIndex = 3;
 
@@ -440,16 +500,24 @@ struct ScheduleEntry {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
         uint32_t waitMs = UINT32_MAX;
-        for (const ScheduleEntry &entry : schedule) {
-            if (!entry.enabled) continue;
-            uint32_t elapsed = now - entry.last_ms;
-            uint32_t due = (elapsed >= entry.interval_ms) ? 0 : (entry.interval_ms - elapsed);
-            if (due < waitMs) waitMs = due;
+        for (uint8_t p = 0; p < kPortCount; ++p) {
+            for (const ScheduleEntry &entry : schedule[p]) {
+                if (!entry.enabled) continue;
+                uint32_t elapsed = now - entry.last_ms;
+                uint32_t due = (elapsed >= entry.interval_ms) ? 0 : (entry.interval_ms - elapsed);
+                if (due < waitMs) waitMs = due;
+            }
         }
 
-        mavlink_message_t msg;
-        if (xQueueReceive(serialReadQueue, &msg, pdMS_TO_TICKS(waitMs)))
+        // The item carries the port it arrived on. Every reply below goes to
+        // `port` and nowhere else, which is what makes a request answered on
+        // the link that asked it rather than broadcast to both
+        // (specs/mavlink-link/spec.md, "A command arrives on one port").
+        InboundMsg inbound;
+        if (xQueueReceive(linkReadQueue, &inbound, pdMS_TO_TICKS(waitMs)))
         {
+            const mavlink_message_t &msg = inbound.msg;
+            const uint8_t port = inbound.chan;
 
             switch (msg.msgid)
             {
@@ -472,7 +540,7 @@ struct ScheduleEntry {
                         // finding 17. This is a new message on the wire; the
                         // closed-set HIL case (test/test_hil/check_recovery.py,
                         // task 7.5) must expect it.
-                        sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+                        sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
 
                         // reinitialise() clears the deliberate-reset field along
                         // with both counters and the snapshot, so it has to run
@@ -499,7 +567,7 @@ struct ScheduleEntry {
                         // (design.md's Context; an earlier version of this task
                         // stored it unconverted, which Copilot's review caught:
                         // a 1 Hz request would have run at 1000 seconds).
-                        ScheduleEntry &housekeeping = schedule[kHousekeepingScheduleIndex];
+                        ScheduleEntry &housekeeping = schedule[port][kHousekeepingScheduleIndex];
                         int32_t requestedUs = (int32_t)command.param2;
 
                         if (requestedUs <= 0) {
@@ -509,7 +577,7 @@ struct ScheduleEntry {
                             // (specs/mavlink-link/spec.md, "asks for the
                             // default rate").
                             housekeeping.enabled = false;
-                            sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+                            sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
                         } else {
                             uint32_t requestedMs = (uint32_t)requestedUs / 1000u;
                             if (requestedMs < 1000u) {
@@ -518,12 +586,12 @@ struct ScheduleEntry {
                                 // command's interval, and rejecting one that
                                 // is too fast"). Publishing state is left
                                 // exactly as it was.
-                                sendCommandAck(command.command, MAV_RESULT_DENIED);
+                                sendCommandAck(port, command.command, MAV_RESULT_DENIED);
                             } else {
                                 housekeeping.interval_ms = requestedMs;
                                 housekeeping.last_ms = now;
                                 housekeeping.enabled = true;
-                                sendCommandAck(command.command, MAV_RESULT_ACCEPTED);
+                                sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
                             }
                         }
                     }
@@ -552,7 +620,7 @@ struct ScheduleEntry {
                         intent.timesync.ts1 = timesync.ts1;
                         intent.timesync.target_system = timesync.target_system;
                         intent.timesync.target_component = timesync.target_component;
-                        xQueueSend(serialWriteQueue, &intent, 0);
+                        xQueueSend(linkPorts[port].writeQueue, &intent, 0);
                     }
 
                     break;
@@ -567,16 +635,18 @@ struct ScheduleEntry {
                     // substring for any msgid at or past the literal's
                     // length. A fixed string avoids that without adding a
                     // formatting helper this path does not otherwise need.
-                    sendStatusText("Unhandled message received", MAV_SEVERITY_WARNING);
+                    sendStatusText(port, "Unhandled message received", MAV_SEVERITY_WARNING);
                     break;
             }
         }
 
         now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        for (ScheduleEntry &entry : schedule) {
-            if (entry.enabled && (now - entry.last_ms) >= entry.interval_ms) {
-                entry.function();
-                entry.last_ms += entry.interval_ms;
+        for (uint8_t p = 0; p < kPortCount; ++p) {
+            for (ScheduleEntry &entry : schedule[p]) {
+                if (entry.enabled && (now - entry.last_ms) >= entry.interval_ms) {
+                    entry.function(p);
+                    entry.last_ms += entry.interval_ms;
+                }
             }
         }
 

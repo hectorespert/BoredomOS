@@ -22,8 +22,13 @@ def find_port(wait=PORT_WAIT):
     """Return the port to talk to, or raise NoLinkError.
 
     Order: --port/HIL_PORT, then an Arduino CDC device, then a lone USB serial
-    adapter. The adapter case matters because with the default build the link is
-    on Serial1 (D0/D1), so the board's own CDC port carries nothing.
+    adapter.
+
+    Since replace-console-cli-with-usb-mavlink-link the board's own CDC port
+    carries MAVLink in every build, so the Arduino device found here is a
+    working target and the suite needs no adapter. Set HIL_PORT to an adapter's
+    device path to drive the UART link on D0/D1 instead; both ports answer at
+    once, so which one a case reaches is a choice rather than a constraint.
 
     Waits for the port to appear. Under `pio test` this runs seconds after the
     upload, and a USB CDC port takes a moment to re-enumerate after the board
