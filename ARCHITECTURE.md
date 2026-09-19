@@ -36,14 +36,14 @@ flowchart LR
         direction LR
 
         SR["TaskSerialRead<br/>HIGHEST · 96 w"]
-        SW["TaskSerialWrite<br/>HIGH · 192 w"]
-        MV["TaskMavlink<br/>HIGH · 256 w"]
+        SW["TaskSerialWrite<br/>HIGH · 384 w"]
+        MV["TaskMavlink<br/>HIGH · 384 w"]
         LG["TaskLogger<br/>LOW · 96 w"]
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
         CLI["TaskCli<br/>LOWEST · 128 w"]
 
-        RQ[["serialReadQueue<br/>16 × mavlink_message_t*"]]
-        WQ[["serialWriteQueue<br/>16 × mavlink_message_t*"]]
+        RQ[["serialReadQueue<br/>8 × mavlink_message_t"]]
+        WQ[["serialWriteQueue<br/>5 × LinkMsg"]]
         DQ[["sdWriteQueue<br/>16 × Data*"]]
 
         BAT["Battery<br/>(lib)"]
@@ -141,8 +141,8 @@ them in the reduced configuration described below.
 | Task | File | Stack | Priority | Cadence | Reduced? |
 |---|---|---|---|---|---|
 | `TaskSerialRead` | `src/serial.cpp` | 96 w | HIGHEST | polls every 10 ms | yes |
-| `TaskSerialWrite` | `src/serial.cpp` | 192 w | HIGH | blocks on `serialWriteQueue` | yes |
-| `TaskMavlink` | `src/mavlink.cpp` | 256 w | HIGH | blocks on `serialReadQueue`, wakes at least once a second for its schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
+| `TaskSerialWrite` | `src/serial.cpp` | 384 w | HIGH | blocks on `serialWriteQueue` | yes |
+| `TaskMavlink` | `src/mavlink.cpp` | 384 w | HIGH | blocks on `serialReadQueue`, wakes at least once a second for its schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
 | `TaskLogger` | `src/logger.cpp` | 96 w | LOW | every 1 s | no, and not with no SD card either |
 | `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
 | `TaskCli` | `src/cli.cpp` | 128 w | LOWEST | polls every 10 ms | yes |
@@ -191,63 +191,71 @@ about current behaviour.
 
 ## 4. Queue memory ownership protocol
 
-This is the rule most easily broken, so it is stated on its own.
+This used to be one rule for all three queues. Since `queue-mavlink-messages-by-value`
+it is two: `sdWriteQueue` still follows the heap-pointer protocol below; the two
+MAVLink queues do not, because their items shrank enough to make by-value storage
+cheaper than the heap-pointer machinery around it.
 
-**Queues carry heap pointers, never values.** All three queues are declared with
-`sizeof(T*)` as their element size. A queue of `mavlink_message_t` by value would
-stand permanently reserved at 291 bytes a slot; a queue of pointers is four bytes a
-slot, and the messages themselves exist only while they are in flight.
+**`serialReadQueue` and `serialWriteQueue` carry their items by value.**
+`serialReadQueue`'s element is a full `mavlink_message_t` (291 B); `TaskSerialRead`
+already owns one fully parsed, so it copies it into the queue directly.
+`serialWriteQueue`'s element is `LinkMsg` (`include/LinkMsg.h`, 64 B) — a tagged
+union of what a producer *means* (a `HEARTBEAT` needs no payload at all; a
+`STATUSTEXT` needs a severity and up to 50 characters, which is what sets the
+union's size) rather than a wire-ready frame. `src/mavlink.cpp`'s `mavlinkPack()`
+is the only place that turns a `LinkMsg` into a `mavlink_message_t`, called by
+`TaskSerialWrite` just before it writes — this is also the only function outside
+`src/mavlink.cpp` allowed to call a `mavlink_msg_*_pack` function, which is what
+keeps protocol knowledge in the one file that owns it (§5.1) even though the
+transport (`src/serial.cpp`) now does the final packing step.
 
-The queue structures and the slot arrays are static, in `.bss`. What is not static is
-the items, and the heap is sized to back them — from the number that can *exist*, not
-the number that fits in the queues:
+Both queues' storage is `depth x sizeof(item)`, entirely in `.bss`, and neither
+touches the FreeRTOS heap: `serialReadQueueStorage` is 8 x 291 = 2328 B,
+`serialWriteQueueStorage` is 5 x 64 = 320 B. There is no producer/consumer margin
+to add on top — with a by-value queue, an item "held before send" or "held after
+receive" is simply a local on that task's own stack, not a shared block, so the
+depth alone is what the storage needs.
+
+**`sdWriteQueue` still carries a heap pointer**, because its item (`Data`, from
+`include/Data.h`) is queued by `src/logger.cpp` and consumed by `src/sdwrite.cpp`,
+and this protocol has not been revisited for it:
 
 | Queue | Depth | Also in existence | Blocks | Bytes |
 |---|---|---|---|---|
-| `serialReadQueue` | 8 | 1 producer, 1 consumer | 10 x 304 | 3040 |
-| `serialWriteQueue` | 5 | 1 producer, 1 consumer | 7 x 304 | 2128 |
 | `sdWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 56 | 336 |
-| | | | **Total** | **5504** |
 
-against 6136 usable of `configTOTAL_HEAP_SIZE`. The extra blocks are not slack: a
-producer allocates *before* it sends, so learning that a queue is full costs a block
-beyond the depth; a consumer holds one between `xQueueReceive` and `vPortFree`.
-`serialWriteQueue` used to need an extra block for each of three producer tasks that
-could hold one at the same instant — `TaskHeartbeat`, `TaskMavlinkBatteryStatus` and
-`TaskMavlink`'s timesync reply. Since `fold-periodic-telemetry-into-mavlink-task`
-folded the first two into `TaskMavlink`, every send against this queue runs in one
-task, so it needed only the one producer block depth already assumed elsewhere in
-this table — until `add-mavlink-housekeeping-telemetry` gave `TaskMavlink` a fourth,
-independently-clocked schedule entry (§5.1). `sendHeartbeat`, `sendSystemTime`,
-`sendBatteryStatus` and housekeeping can all be due on the same pass, and a
-`TIMESYNC` reply can land in that same pass too — five items wanting the queue at
-once, one more than depth 4 could hold, so the depth grew to 5 to cover it. Raising
-`configTOTAL_HEAP_SIZE` was not needed: the 608 bytes the earlier consolidation
-released as margin absorb the one extra block this costs, so `configTOTAL_HEAP_SIZE`
-stays at `0x1800`.
+against `configTOTAL_HEAP_SIZE`, now `0x200` (512 B) — sized to this one queue with
+margin, since neither MAVLink queue draws on the heap any more. The extra two
+blocks beyond the depth are not slack: a producer allocates *before* it sends, so
+learning that the queue is full costs a block beyond the depth; a consumer holds
+one between `xQueueReceive` and `vPortFree`.
 
-**The consequence is which failure a burst finds.** Because the depths are backed, a
-saturated queue reports itself through `xQueueSend`, which every producer handles by
-freeing the item. Before, the allocator ran out first and returned `NULL` — the path
-that is not handled everywhere.
+**The consequence is which failure a burst finds, and it now differs by queue.**
+For `sdWriteQueue`, a saturated queue reports itself through `xQueueSend`, handled
+by freeing the item; before that, the allocator could run out first and return
+`NULL`. For `serialReadQueue`/`serialWriteQueue`, there is no allocator in the
+path at all: a saturated queue simply does not accept the new item, and the
+producer has nothing to free because it never held anything the queue didn't
+already copy.
 
-The protocol has exactly three rules, and every producer and consumer follows them:
+`sdWriteQueue`'s protocol has exactly three rules, and its producer and consumer
+follow them:
 
 1. **The producer allocates** with `pvPortMalloc`, fills the struct, and posts the
    pointer with `xQueueSend`.
 2. **The producer frees on failure.** If `xQueueSend` does not return `pdPASS` the
    queue is full, the pointer was not handed over, and the producer must
-   `vPortFree` it. Skipping this leaks, and on 8 KB of heap a leak is fatal within
-   minutes.
+   `vPortFree` it. Skipping this leaks, and on the heap this queue is now sized
+   against, a leak is fatal within minutes.
 3. **The consumer owns the pointer** once `xQueueReceive` returns it, and frees it
    after use — `TaskSdWrite` frees the `Data*` after copying it into the JSON
-   document, `TaskMavlink` frees the `mavlink_message_t*` at the end of the switch,
-   `TaskSerialWrite` frees it as soon as the frame is serialised into its local
-   buffer.
+   document.
 
-The reference implementations are `src/logger.cpp:42` and `src/serial.cpp:50`,
-which also show the fourth half-rule: **check that `pvPortMalloc` returned
-something** before writing through the pointer.
+The reference implementation is `src/logger.cpp:38`, which also shows the fourth
+half-rule: **check that `pvPortMalloc` returned something** before writing through
+the pointer. `src/serial.cpp` and `src/mavlink.cpp` no longer call `pvPortMalloc`
+at all — a CI step (`.github/workflows/main.yml`) greps those two files
+specifically and fails the build if it reappears there.
 
 ## 5. The three pipelines
 
@@ -267,17 +275,21 @@ virtual const version, so reaching the port through a `HardwareSerial&` would
 silently select the per-byte fallback.
 
 - `TaskSerialRead` drains available bytes and feeds them one at a time to
-  `mavlink_parse_char`. When a complete message is parsed it is copied to the heap
-  and posted to `serialReadQueue`. The parser state (`msg_to_read`, `status`) is
-  file-static, which is safe because exactly one task parses.
-- `TaskSerialWrite` blocks on `serialWriteQueue`, converts each message to wire
-  format with `mavlink_msg_to_send_buffer` into a local buffer, frees the message,
-  and writes the bytes.
+  `mavlink_parse_char`. When a complete message is parsed it is posted to
+  `serialReadQueue` **by value** — no heap involved (§4). The parser state
+  (`msg_to_read`, `status`) is file-static, which is safe because exactly one
+  task parses.
+- `TaskSerialWrite` blocks on `serialWriteQueue`, receives a `LinkMsg` by value,
+  calls `src/mavlink.cpp`'s `mavlinkPack()` to turn it into a `mavlink_message_t`
+  on its own stack, converts that to wire format with `mavlink_msg_to_send_buffer`
+  into a local buffer, and writes the bytes. Nothing is freed, because nothing was
+  allocated.
 
 `src/mavlink.cpp` **owns the protocol**. Nothing else in the firmware knows what a
 `msgid` is.
 
-- `TaskMavlink` consumes `serialReadQueue` and dispatches on `msg->msgid`. Two
+- `TaskMavlink` consumes `serialReadQueue` (a `mavlink_message_t` by value, not a
+  pointer) and dispatches on `msg.msgid`. Two
   messages are acted upon: `SYSTEM_TIME` sets the clock from the ground, and
   `TIMESYNC` with `tc1 == 0` is answered with the satellite's timestamp. Several
   more (`HEARTBEAT`, `PARAM_REQUEST_LIST`, `COMMAND_LONG`, `REQUEST_DATA_STREAM`,
@@ -406,17 +418,25 @@ for a single LiPo cell and honest about being an estimate.
 
 Most of what looks unusual in this firmware follows from four numbers.
 
-**2628 bytes of headroom.** Not 32 KB, and not the 37 % that `pio run` appears to
-leave free. Task stacks, control blocks and queue structures are in `.bss`, counted by
-the linker; `configTOTAL_HEAP_SIZE` is `0x1800` and backs the queued items only; and
-`g_heap`, the main stack and the vector table take another 9472 bytes that the printed
-figure omits. `scripts/ram_budget.py` prints the honest total after every link and
-fails the build before the headroom runs out. This is why queues carry pointers, why
-messages are freed the instant they are consumed, and why adding a library or a task
-is a decision rather than a detail — but it is now a decision the build can refuse.
+**5432 bytes of headroom** (as of `queue-mavlink-messages-by-value`, after growing
+`TaskSerialWrite` and `TaskMavlink`'s stacks to fit the by-value queue items they
+gained — see §3's task table; read fresh from
+a build rather than trusted from here, since this figure moves whenever a change
+touches `.data`, `.noinit` or `.bss`). Not 32 KB, and not what `pio run`'s own
+printed percentage appears to leave free. Task stacks, control blocks and queue
+structures are in `.bss`, counted by the linker; `configTOTAL_HEAP_SIZE` is now
+`0x200` and backs only `sdWriteQueue`'s items, since `serialReadQueue` and
+`serialWriteQueue` carry theirs by value (§4); and `g_heap`, the main stack and the
+vector table take another 9472 bytes that the printed figure omits.
+`scripts/ram_budget.py` prints the honest total after every link and fails the build
+before the headroom runs out. This is why `sdWriteQueue`'s items are still freed the
+instant they are consumed, why the two MAVLink queues were converted to by-value
+items instead once their item size made that cheaper, and why adding a library or a
+task is a decision rather than a detail — but it is now a decision the build can
+refuse.
 
-**Stack sizes are in words, not bytes**, and they are tuned tight — 96 to 256 words,
-384 to 1024 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled and
+**Stack sizes are in words, not bytes**, and they are tuned tight — 96 to 384 words,
+384 to 1536 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled and
 `src/hooks.cpp` traps an overflow into a slow `LED_BUILTIN` blink with interrupts
 disabled, and an allocation failure into a fast double blink. **A blinking board means
 a stack is too small or memory ran out, not a wiring fault** — the two patterns are in
@@ -496,12 +516,13 @@ section sizes show it — the Unity binary links 5340 bytes of RAM and contains 
 same static storage as the flight build.
 
 **What the build reports, and what it does not.** `pio run` prints
-`.data + .noinit + .bss` — 20668 of 32768, about 63 % — which now moves when a task is
-added, because the stacks and control blocks are in `.bss`. It still leaves out
-`g_heap`, the main stack and the vector table, another 9472 bytes, so on its own it
-understates the commitment. `scripts/ram_budget.py` runs after every link and prints
-the honest figure: **29092 bytes committed of 32768, 3676 bytes of headroom** (as of
-`add-mavlink-housekeeping-telemetry`; read fresh from a build rather than trusted from
+`.data + .noinit + .bss` — 17864 of 32768, about 55 % — which now moves when a task
+or a queue's storage is added or resized, because the stacks, control blocks and
+queue storage are in `.bss`. It still leaves out `g_heap`, the main stack and the
+vector table, another 9472 bytes, so on its own it understates the commitment.
+`scripts/ram_budget.py` runs after every link and prints the honest figure:
+**27336 bytes committed of 32768, 5432 bytes of headroom** (as of
+`queue-mavlink-messages-by-value`; read fresh from a build rather than trusted from
 here, since this figure moves whenever a change touches `.data`, `.noinit` or `.bss`).
 That headroom is what a new subsystem has to fit into, and the build fails if it drops
 below the floor in `platformio.ini`.

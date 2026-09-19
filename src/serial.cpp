@@ -3,6 +3,8 @@
 #include <MAVLink.h>
 #include <Serial.h>
 #include <Link.h>
+#include <LinkMsg.h>
+#include <MavlinkPack.h>
 
 extern QueueHandle_t serialWriteQueue;
 
@@ -12,12 +14,14 @@ extern QueueHandle_t serialWriteQueue;
 
     for (;;)
     {
-        mavlink_message_t* msg_to_send;
-        if (xQueueReceive(serialWriteQueue, &msg_to_send, portMAX_DELAY))
+        LinkMsg intent;
+        if (xQueueReceive(serialWriteQueue, &intent, portMAX_DELAY))
         {
+            mavlink_message_t msg_to_send;
+            mavlinkPack(intent, &msg_to_send);
+
             uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-            uint16_t len = mavlink_msg_to_send_buffer(buf, msg_to_send);
-            vPortFree(msg_to_send);
+            uint16_t len = mavlink_msg_to_send_buffer(buf, &msg_to_send);
             LINK_SERIAL.write(buf, len);
         }
     }
@@ -39,17 +43,8 @@ static mavlink_status_t status;
             uint8_t receivedByte = LINK_SERIAL.read();
 
             if (mavlink_parse_char(MAVLINK_COMM_0, receivedByte, &msg_to_read, &status)) {
-
-                mavlink_message_t* readed_msg = (mavlink_message_t*) pvPortMalloc(sizeof(mavlink_message_t));
-                if (readed_msg != NULL)
-                {
-                    memcpy(readed_msg, &msg_to_read, sizeof(mavlink_message_t));
-                    
-                    if (xQueueSend(serialReadQueue, &readed_msg, 0) != pdPASS) {
-                        vPortFree(readed_msg);
-                    }
-                }
-            }       
+                xQueueSend(serialReadQueue, &msg_to_read, 0);
+            }
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);

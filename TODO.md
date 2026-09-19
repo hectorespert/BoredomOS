@@ -611,135 +611,115 @@ configuration first and self-skip (`NoLinkError`) when its assumption does not
 hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
 next `HEARTBEAT`'s `system_status`).
 
-### Queue the message intent by value instead of a packed `mavlink_message_t`
+### Remove the console CLI and give USB a symmetric secondary MAVLink link
 
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `src/serial.cpp`, `src/main.cpp`, `include/Data.h`,
-`CLAUDE.md`
+**Status:** defined
+**Scope:** `src/cli.cpp` (deleted), `include/Cli.h` (deleted), `src/serial.cpp`,
+`src/mavlink.cpp`, `src/main.cpp`, `include/Link.h`, `platformio.ini`,
+`.github/workflows/main.yml`, `openspec/specs/console-cli/` (deleted),
+`openspec/specs/mavlink-link/`, `ARCHITECTURE.md`, `CLAUDE.md`, `test/test_hil/`
 
-Both serial queues carry a pointer to a `mavlink_message_t`, which is packed and
-measures 291 bytes whatever the message is: it reserves 255 bytes of payload and 13
-of signature every time, and the firmware signs nothing. A `HEARTBEAT` carries 9
-useful bytes, `SYSTEM_TIME` 12, `BATTERY_STATUS` 41. The amplification runs between
-7x and 32x, and it is paid out of the heap on every send.
+**Depends on the `queue-mavlink-messages-by-value` change landing first** — see
+below for why; it is what makes a second queue pair affordable at all.
 
-The alternative is to queue what the producer *means* rather than what the wire
-needs, and let the single consumer do the packing it already does:
+Today Serial1 is the one MAVLink link and USB carries a read-only text CLI
+(`ps`/`free`/`help`); they are mutually exclusive by build flag
+(`-D LINK_SERIAL=Serial`, the `bench` environment), never simultaneous. A change
+explored and then abandoned in this direction (`add-usb-dual-protocol`) tried to
+let one USB port carry both by sniffing bytes and switching modes permanently,
+madflight-style — CLI until the first valid MAVLink frame, then MAVLink until
+reset. That design was sound on its own terms but solves a narrower problem than
+what the bench actually needs, and its one-way switch is a real cost (the CLI
+becomes unreachable for the rest of a run the moment anything frames MAVLink at
+it).
 
-```c
-struct LinkMsg {
-    uint8_t kind;
-    union {
-        struct { uint64_t unix_usec; uint32_t boot_ms; }  system_time;
-        struct { uint16_t millivolts; int8_t remaining; } battery;
-        struct { int64_t ts1; uint8_t tsys, tcomp; }      timesync;
-        struct { uint8_t severity; char text[50]; }       statustext;
-    };
-};
-```
+The simpler shape: **delete the CLI outright**, and make USB a second, always-on,
+independent MAVLink endpoint — no sniffing, no mode state, no "the CLI is gone
+until reboot" surprise, because there is no CLI to protect. Serial1 remains the
+primary link, exactly as it is today. USB becomes the secondary link the bench
+uses, active in every build, not just a `bench` override. The diagnostic value
+the CLI provided is not lost: `add-mavlink-housekeeping-telemetry` already puts
+free heap, minimum-ever-free heap and every task's stack high-water mark on the
+wire as `NAMED_VALUE_INT`, armable by the ground — the same numbers `ps`/`free`
+printed, now available over MAVLink on either port.
 
-That is 64 bytes, and `STATUSTEXT` is what sets the size — its text field is 50
-characters. Without it the item would fit in 16 bytes. `HEARTBEAT` carries no
-payload at all: the `kind` is the whole message.
+**The two links are genuinely symmetric, not a lightweight mirror.** USB gets its
+own read task, its own write task, and its own queue pair — `usbReadQueue` and
+`usbWriteQueue` — built the same way `queue-mavlink-messages-by-value` rebuilds
+Serial1's: `usbWriteQueue` carries the by-value `LinkMsg` intent type that
+change introduces, `usbReadQueue` carries a full `mavlink_message_t` by value.
+One MAVLink module (`src/mavlink.cpp`, via the `mavlinkPack`/dispatch functions
+`queue-mavlink-messages-by-value` introduces) builds every outbound message and
+handles every inbound one for **both** ports — nothing about the protocol,
+the identity triple, or the message semantics is duplicated in `src/serial.cpp`
+or a USB-specific file. Each port keeps its own sequence numbering and answers a
+request on the same port it arrived on (no cross-port routing, no reply sent out
+the wrong link). Outbound parity is full: `HEARTBEAT`, `SYSTEM_TIME`,
+`BATTERY_STATUS`, `STATUSTEXT` and housekeeping, each independently armable per
+port. Inbound parity is full too: `SYSTEM_TIME`, `TIMESYNC`, and
+`MAV_CMD_SET_MESSAGE_INTERVAL` for housekeeping all work identically on USB.
 
-At 64 bytes the item goes through the queue **by value**, and the consequence is the
-point of the entry: `pvPortMalloc`, the `NULL` check, the `vPortFree` on a failed
-`xQueueSend` and the `vPortFree` after use all stop existing. Five places where the
-allocation protocol can be got wrong become zero, and the leak that `CLAUDE.md`
-describes as fatal within minutes stops being an available mistake rather than a
-watched one. The producer fills a local struct and sends it; the consumer receives a
-local copy and packs it into a `static mavlink_message_t` in `.bss` — the pattern
-`src/serial.cpp:29` already uses for the read path.
+**Why this depends on `queue-mavlink-messages-by-value`.** A literal second
+queue pair sized like today's Serial1 pair — heap pointers to a 291-byte
+`mavlink_message_t` — does not fit: two more queues at that cost would need on
+the order of 5 KB more than the FreeRTOS heap has ever had free. Once
+`queue-mavlink-messages-by-value` lands, that math changes: its own design.md
+projects roughly 6.7 KB of headroom afterward (to be re-read fresh, not quoted,
+per `CLAUDE.md`), against which a USB queue pair built the same way — by-value
+`LinkMsg` for outbound, by-value `mavlink_message_t` for inbound — costs on the
+order of 2.6-4 KB depending on the depths chosen for USB (which need not match
+Serial1's; USB is the secondary, bench-only link and a shallower depth is
+plausible). **That queue cost is not the only new cost**: two new tasks
+(USB's own read and write tasks) add their own stacks and control blocks to
+`.bss` on top of it — a further ~1-1.5 KB depending on the sizes chosen, using
+`TaskSerialRead`/`TaskSerialWrite`'s own stack sizes (96 and 192 words) as the
+starting estimate. Both figures must be re-derived against a real build when
+this is picked up, not carried forward from this entry.
 
-The ledger, against the accounting in the `use-static-allocation` change:
+**This is a real spec change, not an internal refactor.** Unlike
+`queue-mavlink-messages-by-value`, this alters on-wire behavior:
+`mavlink-link`'s current requirement that the firmware "SHALL NOT exchange
+MAVLink frames over the USB CDC port" is reversed outright, and `console-cli`
+as a capability ceases to exist — its spec file is deleted, not modified. This
+needs real spec deltas when proposed, and the `bench` environment and its
+`LINK_SERIAL`/`CLI_SERIAL` override points go with it, the same way
+`add-usb-dual-protocol` planned to retire `bench` (USB carries MAVLink in every
+build now, so the override that existed only to put it there for the HIL suite
+has nothing left to do). `.github/workflows/main.yml`'s `pio run -e uno_r4_minima
+-e bench -e libs` step needs its `-e bench` removed in the same commit.
 
-| | Today | Proposed |
-|---|---|---|
-| `serialWriteQueue` slots | 4 x 4 = 16 B, in `.bss` | 4 x 64 = 256 B, in `.bss` |
-| In flight | 304 B per message, from 6136 B of heap | 0 |
-| `.bss` | 0 | 291 B for the packing buffer |
-| Heap operations per message | 3 (`malloc`, `free` on failure, `free` after use) | 0 |
+To decide when this is picked up:
 
-**What changed since this entry was written.** `use-static-allocation` moved the task
-and queue structures into `.bss` and sized the heap to 6144 bytes against a worst case
-of 5808, so scarcity is no longer the argument — the transient demand fits, with 328
-bytes of margin, and a producer no longer competes with a task stack for the same
-bytes. Two arguments survive that do not depend on scarcity, and one is new:
+- **One shared dispatch, how many task instances.** The recommended shape is two
+  task instances (Serial1's existing `TaskMavlink`, plus a new instance for USB)
+  each calling the same shared build/dispatch functions from `src/mavlink.cpp`,
+  rather than one task juggling two queues — this is what keeps the two streams'
+  schedules, failure behavior and sequence numbers independent, matching what
+  `add-usb-dual-protocol`'s design.md already worked out for exactly this
+  reason. Naming, priority and stack size for the new task(s) are open.
+  `include/Priority.h` already only has four levels in use by six tasks; where
+  a USB-facing task lands among them needs its own reasoning, not a copy of
+  Serial1's.
+- **Queue depths for USB.** Not necessarily 8 and 5 like Serial1 — USB is the
+  secondary, bench-only link, and a shallower depth may be enough, which
+  directly reduces the RAM cost above.
+- **What `test/test_hil/` does with `check_cli.py`** (the CLI cases, no longer
+  applicable — delete) **and `check_silence.py`** (asserts USB carries no MAVLink,
+  the opposite of what this change makes true — delete or invert, matching what
+  `add-usb-dual-protocol`'s task list already planned for the same file).
+  Existing MAVLink cases need a way to target either port, or to run once per
+  port.
+- **`ARCHITECTURE.md`'s system diagram** (§2) currently shows `CLI` on the
+  `CONSOLE` port and a single `LINK` on Serial1; it needs redrawing with two
+  symmetric MAVLink endpoints and no CLI task at all.
 
-- **The protocol stops being an available mistake.** Five places where the allocation
-  can be got wrong become zero, rather than five that are watched.
-- **It removes the last `pvPortMalloc` from `src/`**, which makes possible a CI check
-  that cannot exist today: the grep that guards `xTaskCreate` and `xQueueCreate`
-  could be extended to the allocator. That is a mechanical guarantee replacing a
-  convention.
-- **The heap could then go to nearly zero**, returning about 6 KB to the `.bss`
-  headroom the linker polices — which is where every future subsystem has to fit.
-
-It also retires an invariant with its reason rather than by decree. `CLAUDE.md` says
-queues carry heap pointers and never values, and that is correct **because the item
-is 291 bytes**: by value it would need 4656 bytes of permanent storage. At 64 bytes
-the arithmetic inverts. If this is implemented, `CLAUDE.md` has to say so, or the
-next reader will follow a rule whose justification no longer holds.
-
-To decide:
-
-- **The depth.** 16 slots were never reachable. Producers emit about 2.5 messages a
-  second and the drain handles roughly 100, so 4 slots (256 B) or 8 (512 B) both have
-  wide margin; 4 leaves ~678 B free at boot against ~422 B for 8.
-- **Whether `STATUSTEXT` stays in the union.** It quadruples the item on its own. A
-  separate, shallower queue for it, or a bounded text pool, would take the common
-  item down to 16 bytes — at the cost of a second queue structure.
-- **Whether `serialReadQueue` changes too.** It has the same 291-byte item, but the
-  producer is a parser that already owns a `mavlink_message_t`, so the argument is
-  weaker there and the two can be decided separately.
-- Whether the packing buffer is a `.bss` static or lives on `TaskSerialWrite`'s
-  stack, which is 192 words and would have to grow by about 73.
-
-Related: the USB endpoint proposed in the `add-usb-dual-protocol` change takes a
-third route — no queue at all, packing into a stack buffer and dropping the frame
-when the port has no room, following madflight. When that lands the firmware will
-hold two outbound models at once, which is defensible (`UART` does not implement
-`availableForWrite()` and `SerialUSB` does) but is worth converging deliberately
-rather than by accretion.
-
-**What this entry unblocks.** Converging them means giving the USB endpoint its own
-write queue that the same producers fill, so one `HEARTBEAT` becomes one entry in each
-of two queues and each port drains its own at its own pace. That is still impossible while the
-item is a `mavlink_message_t`, though for a different reason than when this entry was
-written. The heap is no longer nearly empty — `use-static-allocation` left 6136 usable
-bytes — but the worst case already claims 5808 of them, and a second outbound queue
-would add its own depth plus its producers and consumer: another 8 blocks of 304, or
-2432 bytes, for a total of 8240 against 6136. It does not fit, and raising the heap to
-make it fit would take the bytes straight out of the `.bss` headroom that every future
-subsystem needs. At 64 bytes by value the second queue costs 256 bytes of `.bss` and
-nothing transient.
-
-Two arguments say the queue is not obviously the better model even once it fits, and
-both should be weighed rather than assumed:
-
-- **A queue here converts a visible drop into an invisible allocation failure.** The
-  appeal of queueing is not losing a message when the port is momentarily full, but
-  with this much free heap the queue absorbs two messages and then fails. Dropping a
-  frame is behaviour the USB endpoint's spec states outright; a failed allocation is
-  something nothing currently detects.
-- **It recouples the two links through the heap.** Today the USB path cannot consume
-  heap at all. With a shared-heap queue, a USB queue nobody drains — because nobody
-  plugged a cable in — starts costing the radio link its allocations. On a satellite,
-  the radio's reliability should not depend on what is attached to the bench port.
-
-Both arguments weaken sharply at 64 bytes an item: a depth-4 USB queue is 256 bytes
-reserved once, and duplicating a message costs nothing at send time, so a queue that
-nobody drains fails its `xQueueSend` and is ignored rather than exhausting anything.
-That is the state in which converging the two models is worth doing, and it is why
-this entry is the prerequisite rather than the two being independent.
-
-Sequencing, if both are implemented: this entry moves the builder call from the
-producer to the drain — the producer fills an intent, the consumer packs it — so it
-revisits the split that `add-usb-dual-protocol` introduces in `src/mavlink.cpp`. The
-shared builders themselves survive unchanged; only their call sites move. On the USB
-side the convergence replaces that change's telemetry scheduler with a queue drain and
-leaves everything else — mode detection, the `availableForWrite()` measurement, the
-deleted `bench`, the HIL cases — untouched.
+**A loose end this creates.** *[Debug and release builds, with MAVLink tracing on
+the console]*, still in this backlog, plans to reach a trace ring buffer "through
+the CLI somehow" — that plan depends on a CLI that this entry deletes. Whoever
+picks up the tracing entry needs a different way to surface the trace (most
+plausibly a dedicated `STATUSTEXT` stream or a new MAVLink message, now that
+both links are MAVLink-only) — noted here so it is not discovered as a surprise
+mid-implementation.
 
 ### The flight log is a private MessagePack format no tool can read
 
