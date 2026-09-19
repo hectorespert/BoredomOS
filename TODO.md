@@ -1561,6 +1561,39 @@ is the one capability with a live spec and a real suite. And the failure mode it
 is the one already demonstrated: every part of the false claim was checkable at any time
 by anyone, for months, and nothing was positioned to look.
 
+### Finish verifying what improve-clock-synchronisation could not
+
+**Status:** defined
+**Scope:** `test/test_hil/check_clock.py`, `test/test_libs/test_main.cpp`, `src/mavlink.cpp`
+
+`openspec/changes/archive/*-improve-clock-synchronisation/` shipped with seven of its 31
+tasks unticked, none of them for want of work: each is blocked on hardware this bench
+cannot present. They are recorded here because the change directory stops being read once
+it is archived, and unverified work that belongs to nobody is what this backlog is for.
+
+- **The `survived` clock source has never executed** (that change's tasks 1.2, 3.5, 5.5).
+  Observing it needs the boot report after a reset, which over USB is impossible for the
+  reason the entry below this one describes. The HIL case exists and self-skips:
+  `HIL_CLOCK_RESET=1` with `HIL_PORT` pointed at a USB-TTL adapter on D0/D1 closes it,
+  and it also asserts the `ds1307` → `ground` promotion, which is the only place in that
+  suite starting from a known origin. Until then the `system-clock` requirement *A clock
+  set from the ground outlives a reset* is intent rather than demonstrated behaviour.
+- **The no-clock configuration cannot be entered at all** (tasks 3.4, 5.4). The DS1307 is
+  not disconnectable on this assembly and `setup()` calls `systemTime.begin()`
+  unconditionally, reduced configuration included, so nothing can exercise origin `none`
+  or the `system-clock` requirement *An unknown clock is reported as unknown*. This is
+  the third time the same obstacle has blocked a task — `add-degraded-mode`'s 6.4 became
+  part of that change, and its 6.6 is still open above for the same reason. Worth deciding
+  once whether the board gets a way to present an absent DS1307, because three entries now
+  wait on it.
+- **The DS1307 reconciliation interval is a placeholder** (tasks 1.3, 3.6).
+  `kClockReseedIntervalMs` in `src/mavlink.cpp` is six hours, chosen conservatively and
+  marked as such in the code, because the drift it should be derived from was never
+  measured. `test_report_internal_versus_ds1307_drift` prints both clocks and is meant to
+  be run twice at least an hour apart; only the t0 reading was taken (`difference=0 s`,
+  which is what seeding them together gives). Each run is `pio test -e libs`, destructive
+  to the card. That figure also feeds the sub-clock entry below.
+
 ### The boot `STATUSTEXT` cannot be observed over USB after a reset
 
 **Status:** proposed
