@@ -76,25 +76,27 @@ are the only checks that run without hardware.
       the build succeeds and read the new `RAM budget` block
       `scripts/ram_budget.py` prints: 26056 B committed, 6712 B headroom,
       exactly matching design.md's projection
-- [ ] 4.2 **[board]** With that build flashed, exercise `sdWriteQueue` under
+- [x] 4.2 **[board]** With that build flashed, exercise `sdWriteQueue` under
       normal operation for several minutes (SD card present, logging at 1 Hz)
       and read `free` (still available — the CLI is not removed by this
       change) for the minimum-ever-free heap; if it is not comfortably above
       zero, raise `configTOTAL_HEAP_SIZE` in `platformio.ini` and repeat this
-      task with the new value — **not done: the board is stuck in the reduced
-      configuration** (confirmed via `ps` showing no `Logger`/`SdWrite` despite
-      an SD card being present), where neither task runs and `sdWriteQueue` is
-      never touched. Waited out the 5-minute stability window and forced a
-      reset; it stayed reduced, which means the *cumulative* fault counter is
-      also over threshold, not just the consecutive one — a pre-existing,
-      already-documented project limitation (`TODO.md`'s
-      `fold-periodic-telemetry-into-mavlink-task` follow-up entry: "no ground
-      command yet to clear the cumulative-reset counter"), not something this
-      session's crash-and-reflash cycle alone caused, though it likely
-      contributed. Exiting reduced mode from here needs either the 30-minute
-      automatic retry (not guaranteed to succeed if any further fault occurs
-      first) or the not-yet-implemented ground command. Left open rather than
-      forced.
+      task with the new value. The board had fallen into, and stayed in, the
+      reduced configuration (this session's stack-overflow crash's watchdog-
+      reset loop pushed the cumulative fault counter over threshold — waiting
+      out the 5-minute stability window and forcing a reset was not enough,
+      confirming it was the cumulative counter, not the consecutive one).
+      Recovered it with `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` (246) over the
+      `bench` build's USB MAVLink link — already implemented
+      (`add-degraded-mode`), it clears both counters via
+      `Recovery::reinitialise()` before resetting; confirmed via the
+      heartbeat's `system_status` flipping from `MAV_STATE_CRITICAL` to
+      `MAV_STATE_ACTIVE` and housekeeping listing all 8 tasks. Reflashed the
+      flight build and soaked for ~3.5 minutes under real 1 Hz SD logging:
+      **heap free 496/512, minimum-ever-free 448/512, unchanged before and
+      after the soak** — stable, no leak, comfortable margin. `TODO.md`'s
+      claim that no ground command exists for this was wrong; corrected in
+      this commit.
 - [x] 4.3 Record the final chosen `configTOTAL_HEAP_SIZE` (`0x200`, confirmed by
       a clean build in task 4.1 — dynamic confirmation is task 4.2, still open)
       and the resulting committed/headroom figures (26056 B / 6712 B) in

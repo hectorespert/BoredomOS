@@ -175,19 +175,27 @@ measure comfortably (146/384 and 169/384 words free respectively) under the
 `pio test -e bench` HIL run, which exercises the branches a boot-time smoke
 test does not.
 
-**Dynamic confirmation (task 4.2) could not be completed.** The board fell
-into, and stayed in, the reduced configuration during this session — first
-from the stack-overflow crash's watchdog-reset loop, and confirmed to persist
-past the 5-minute stability window and a forced reset, which means the
-*cumulative* fault counter is over threshold, not just the consecutive one.
-Neither `Logger` nor `SdWrite` runs in that configuration, so `sdWriteQueue`
-is never touched and its heap margin cannot be exercised from here — this is
-a pre-existing project limitation (`TODO.md` already documents having no
-ground command to clear the cumulative counter), not something this change
-introduces. The static fact stands regardless: `0x200` covers `sdWriteQueue`'s
-336 B worst case with 176 B to spare. Whoever next has the board in the
-normal configuration should confirm the minimum-ever-free heap stays
-comfortably above zero under real logging load.
+**Dynamic confirmation (task 4.2) is done.** The board fell into, and at first
+stayed in, the reduced configuration this session — from the stack-overflow
+crash's watchdog-reset loop, confirmed to persist past the 5-minute stability
+window and a forced reset, meaning the *cumulative* fault counter was over
+threshold, not just the consecutive one. `TODO.md` claimed no ground command
+exists to clear it; that claim was wrong, corrected in this commit.
+`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` (`add-degraded-mode`) already does exactly
+this — `Recovery::reinitialise()` clears both counters before resetting.
+Sent over the `bench` build's USB MAVLink link, confirmed by the heartbeat's
+`system_status` flipping from `MAV_STATE_CRITICAL` to `MAV_STATE_ACTIVE` and
+housekeeping listing all 8 tasks. With the flight build reflashed and
+`Logger`/`SdWrite` running against the real SD card, a ~3.5-minute soak under
+1 Hz logging read **496/512 B free, 448/512 B minimum-ever-free, unchanged
+before and after the wait** — stable, no leak, comfortable margin over
+`sdWriteQueue`'s 336 B worst case.
+
+**One incidental finding, out of this change's scope.** `Logger`'s own stack
+measured 6 of 96 words free during the soak — far tighter than any margin
+this change touches (`src/logger.cpp` is untouched here). Recorded as a new
+`TODO.md` backlog entry rather than fixed in this change, which has no reason
+to touch that file.
 
 **Why this is enough for the USB link this unblocks.** Not this change's job to
 build, but worth checking the sequencing decision it exists to serve: a future

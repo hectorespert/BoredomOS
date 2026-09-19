@@ -48,12 +48,29 @@ explained in that change's own `tasks.md`, not silently skipped:
   which is the same debt `add-degraded-mode` already left at its own task 8.4 —
   one board session could close both.
 
-One more thing this change's own board time surfaced, worth carrying forward: with
-no ground command yet to clear the cumulative-reset counter (`VBTBKR`), repeated
-`pio run -t upload` cycles during a single session can push the board into the
-reduced configuration by themselves — it happened during this change's own
-verification, at `cumulative=10`. Whoever next spends a long session reflashing
-should expect this, not be surprised by it.
+One more thing this change's own board time surfaced, worth carrying forward:
+repeated `pio run -t upload` cycles during a single session can push the board
+into the reduced configuration by themselves — it happened during this
+change's own verification, at `cumulative=10`. Whoever next spends a long
+session reflashing should expect this, not be surprised by it.
+
+**Correction (found board-verifying `queue-mavlink-messages-by-value`,
+2026-09-19): the claim above that no ground command clears the cumulative
+counter was wrong.** `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` (`add-degraded-mode`)
+already does it — its handler in `src/mavlink.cpp` calls
+`Recovery::reinitialise()`, which zeroes both the consecutive and cumulative
+counters, before resetting. Verified live: sent the command over a `bench`
+build's USB MAVLink link to a board stuck in the reduced configuration
+(cumulative over threshold from a stack-overflow crash's watchdog-reset loop),
+got `COMMAND_ACK`/`MAV_RESULT_ACCEPTED`, and the next boot came up in the
+normal configuration — confirmed by the heartbeat's `system_status` reading
+`MAV_STATE_ACTIVE` instead of `MAV_STATE_CRITICAL`, and by housekeeping
+listing all 8 tasks including `Logger` and `SdWrite`. The real limitation is
+narrower than originally written: reaching this command needs an active
+MAVLink connection, which the flight build only offers on `Serial1` — a board
+stuck in the reduced configuration during a bench session needs the `bench`
+build reflashed (or a UART adapter on D0/D1) to send it, rather than there
+being no command at all.
 
 ### Finish what add-degraded-mode left open
 
@@ -610,6 +627,35 @@ it has just never been run against a reduced board before. Unlike
 configuration first and self-skip (`NoLinkError`) when its assumption does not
 hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
 next `HEARTBEAT`'s `system_status`).
+
+### `TaskLogger`'s stack margin is critically tight
+
+**Status:** defined
+**Scope:** `src/logger.cpp`, `src/main.cpp`
+
+Found incidentally while board-verifying `queue-mavlink-messages-by-value`
+(2026-09-19), a change that does not touch this file: `ps` read `Logger`'s
+stack high-water mark at **6 of 96 words free** — under a plain 1 Hz sampling
+loop with nothing unusual happening, not a burst or an edge case. That figure
+held steady across a ~3.5-minute soak (didn't drop further), so it is not
+actively overflowing, but 6 words is not a margin this project would accept
+for a task discovered fresh — every other task's documented high-water marks
+leave far more headroom (e.g. `TaskSerialRead` at 45 of 96, `TaskMavlink` at
+169 of 384 after its own recent growth).
+
+`src/logger.cpp` has not been touched by any of the changes that grew other
+tasks' stacks recently, so this looks like a pre-existing condition that
+simply had never been read off the board and written down before. Worth
+doing before it is:
+
+- Read the high-water mark again after a longer soak and under whatever
+  produces `TaskLogger`'s largest stack frame (check `include/Data.h`'s
+  `Data` struct size and how it's built in `src/logger.cpp` — a local copy of
+  it, or of any nested struct, is the likely cost).
+- Decide the new stack size the same way other tasks' were derived here: not
+  a round increase, but sized to leave a comparable margin to the rest of the
+  fleet, then re-measured on the board rather than assumed.
+- Re-check `scripts/ram_budget.py`'s headroom after the change, however small.
 
 ### Remove the console CLI and give USB a symmetric secondary MAVLink link
 
