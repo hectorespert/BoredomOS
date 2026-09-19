@@ -1,0 +1,9 @@
+schema: spec-driven
+created: 2026-09-19
+
+# console-cli loses its last requirement here: the change deletes the console
+# rather than changing it, so the capability is retired and its spec directory
+# goes with it. Declared explicitly because archive refuses to delete a spec by
+# inference -- see this change's specs/console-cli/spec.md for the reason and
+# the migration.
+retire_capabilities: true

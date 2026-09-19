@@ -18,6 +18,53 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what replace-console-cli-with-usb-mavlink-link left open
+
+**Status:** defined
+**Scope:** `test/test_hil/check_dual_link.py`, a USB-TTL adapter on D0/D1, hands
+at the board
+
+`replace-console-cli-with-usb-mavlink-link` made USB a second MAVLink endpoint and
+landed with 34 of 38 tasks done. The four that remain all need hardware the
+implementing session did not have: a USB-TTL adapter (or the radio) on D0/D1 as
+well as the USB cable, and for one of them a human. Numbers below are that
+change's own `tasks.md`, in the archive.
+
+- **9.2 — both ports carrying telemetry simultaneously has never been seen.**
+  Everything verified on the board so far was over USB alone. That the UART half
+  still works is inferred from the code and from CI, not observed.
+- **9.3 — per-port sequence numbering is only inferred.** `_pack_chan` is what
+  keeps each port's `current_tx_seq` its own, and getting it wrong is silent:
+  both ground stations still receive every frame, they just each see gaps.
+  There is real partial evidence — the USB stream's `HEARTBEAT` sequence
+  advanced in steps of 2-3, which is one port's own traffic, where a shared
+  counter would have stepped 5-6, and the UART writer was packing all the while
+  into an unattached port. But that reads one stream and infers the other.
+- **9.4 — per-port housekeeping arming.** Arming message id 252 on one port must
+  not arm the other. Only testable with two ground stations attached.
+- **9.5 — a host that opens USB and stops reading must not reset the board.**
+  **This is the most important one**, and no script observes it.
+  `_SerialUSB::write()` loops without yielding when its buffer is full, so above
+  idle priority it would keep `vApplicationIdleHook()` from refreshing the
+  watchdog. `TaskLinkWrite` guards it with `availableForWrite()` and yields a
+  tick on the drop path. Neither defence has been exercised against a real
+  stalled host. Open the port, read nothing, watch the UART with MAVProxy:
+  telemetry must hold its cadence, the SD log must keep writing, and the board
+  must not reset. `test/test_hil/README.md` records it as a manual step.
+
+`test/test_hil/check_dual_link.py` already contains the four automatable cases
+and self-skips without `HIL_UART_PORT` set, so picking this up is attaching the
+adapter and running `pio test`, not writing tests. **They have never executed
+once** — three of them were corrected after review without ever having run, so
+expect to debug the cases themselves as well as the firmware.
+
+One more thing that session surfaced, worth knowing before spending board time:
+four reflashes took the cumulative reset counter from 3 to 6 of the 10 that latch
+the reduced configuration. It was cleared back to 1 with
+`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` over USB — which that change is what made
+possible without an adapter — but the hazard is real and a long session will hit
+it again.
+
 ### Finish what fold-periodic-telemetry-into-mavlink-task left open
 
 **Status:** defined
