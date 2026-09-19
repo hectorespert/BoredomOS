@@ -551,20 +551,28 @@ struct ScheduleEntry {
     {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        // Brings the internal RTC back to the battery-backed one so the two do
-        // not drift apart for a whole mission with nobody reconciling them.
-        // setUnixTime() refuses the demotion once a time from the ground has
-        // been accepted, so this stops itself at first ground contact rather
-        // than needing a flag here.
+        // Keeps the two clocks in agreement so they do not drift apart for a
+        // whole mission with nobody reconciling them. The direction follows the
+        // ladder: with a ground-set clock the internal one is the authority and is
+        // written out to the DS1307, so the next boot seeds from something current;
+        // otherwise the DS1307 is the better keeper and seeds the internal one.
+        //
+        // This is the only place that job happens. Doing it on every inbound
+        // SYSTEM_TIME instead made the reference GCS's 1 Hz clock updates cost an
+        // I2C round trip a second -- Copilot's review of this change.
         if ((now - lastReseedMs) >= kClockReseedIntervalMs) {
             lastReseedMs += kClockReseedIntervalMs;
-            SystemTime::Source beforeReseed = systemTime.source();
-            // Reports a change like any other: a re-seed can promote `survived`
-            // to `ds1307`, and the ground has no other way to learn that the
-            // clock it is reading now has a different provenance. Bounded by the
-            // interval, not by a peer, so it cannot flood. Copilot's review of
-            // this change noted the schedule was silent about it.
-            if (systemTime.reseedFromDs1307() && systemTime.source() != beforeReseed) {
+            SystemTime::Source beforeReconcile = systemTime.source();
+
+            bool reconciled = (beforeReconcile == SystemTime::Source::Ground)
+                                  ? systemTime.pushToDs1307()
+                                  : systemTime.reseedFromDs1307();
+
+            // Reports a change like any other: a re-seed can promote `survived` to
+            // `ds1307`, and the ground has no other way to learn that the clock it
+            // is reading now has a different provenance. Bounded by the interval,
+            // not by a peer, so it cannot flood.
+            if (reconciled && systemTime.source() != beforeReconcile) {
                 sendClockStatusText();
             }
         }

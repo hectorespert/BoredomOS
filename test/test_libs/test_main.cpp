@@ -146,6 +146,30 @@ void test_an_accepted_time_reaches_the_ds1307(void) {
     reopened.setUnixTime(original, SystemTime::Source::Ground);
 }
 
+// pushToDs1307() is the half of the periodic reconciliation that runs under a
+// ground-set clock, and in firmware it only fires every few hours, so this is its
+// only coverage. It exists because correcting a drifted DS1307 was moved off the
+// inbound-message path, where it cost an I2C round trip per SYSTEM_TIME.
+void test_push_to_ds1307_corrects_a_drifted_external_clock(void) {
+    TEST_ASSERT_TRUE(systemTime.begin());
+    time_t original = systemTime.getUnixTime();
+    TEST_ASSERT_TRUE(SystemTime::isPlausible(original));
+
+    // Ground is the authority, and the DS1307 is then dragged out of agreement
+    // behind the library's back -- which is what drift looks like from here.
+    TEST_ASSERT_TRUE(systemTime.setUnixTime(original, SystemTime::Source::Ground));
+    RTC_DS1307 ds1307;
+    TEST_ASSERT_TRUE(ds1307.begin());
+    ds1307.adjust(DateTime((uint32_t)(original - 7200)));
+    TEST_ASSERT_INT32_WITHIN(2, original - 7200, (time_t)ds1307.now().unixtime());
+
+    TEST_ASSERT_TRUE(systemTime.pushToDs1307());
+    TEST_ASSERT_INT32_WITHIN(2, systemTime.getUnixTime(), (time_t)ds1307.now().unixtime());
+
+    // Nothing left to correct, so it reports that it did nothing.
+    TEST_ASSERT_FALSE(systemTime.pushToDs1307());
+}
+
 // Reports R64CNT's observed range, so the 7-bit / 128-counts-per-second reading
 // the sub-second fraction depends on is evidenced rather than deduced from the
 // register's misleading name. A first attempt masked six bits, which made the
@@ -245,6 +269,7 @@ int runUnityTests(void) {
     RUN_TEST(test_set_unix_time_reports_whether_it_accepted);
     RUN_TEST(test_time_since_boot_survives_a_backwards_clock_set);
     RUN_TEST(test_an_accepted_time_reaches_the_ds1307);
+    RUN_TEST(test_push_to_ds1307_corrects_a_drifted_external_clock);
     RUN_TEST(test_report_r64cnt_range);
     RUN_TEST(test_report_internal_versus_ds1307_drift);
     RUN_TEST(test_sddata_write_and_rotate);

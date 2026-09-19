@@ -262,7 +262,8 @@ failure is exactly the `none` case; dropping it would be optimising for the benc
 ### A rejection emits nothing
 
 A `STATUSTEXT` per rejected time would let a peer generate unbounded outbound traffic by
-repeating an implausible value, saturating a write queue of depth 5 and starving the
+repeating an implausible value, saturating a write queue (depth 6, raised from 5 by this
+change for the boot and origin-change texts) and starving the
 periodic cadences that `specs/mavlink-link/spec.md` guarantees. The origin appears in the
 boot report and a later change of origin emits one text; both are bounded by events the
 firmware controls. A rejection is observable as the reported time not moving.

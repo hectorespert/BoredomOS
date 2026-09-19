@@ -78,10 +78,20 @@ public:
   // planned DataFlash log emits its TIME record on it.
   bool setUnixTime(time_t unix_time, Source from);
 
-  // Re-reads the DS1307 and brings the internal RTC back to it. Does nothing
-  // once a time from the ground has been accepted, since Ground outranks
-  // Ds1307 and setUnixTime() refuses the demotion.
+  // The two halves of the periodic reconciliation, which the caller picks between
+  // by looking at source(). Neither belongs on the inbound-message path: keeping
+  // the clocks in agreement is a job measured in hours.
+  //
+  // Re-reads the DS1307 and brings the internal RTC back to it. Does nothing once
+  // a time from the ground has been accepted, since Ground outranks Ds1307 and
+  // setUnixTime() refuses the demotion.
   bool reseedFromDs1307();
+
+  // The other direction, for when the ground is the authority: writes the internal
+  // clock out to the DS1307 so the next boot seeds from something current. This is
+  // what stops a DS1307 drifting unnoticed under a ground-set clock, which used to
+  // be handled -- expensively -- on every inbound SYSTEM_TIME.
+  bool pushToDs1307();
 
   // A time at or after 2022-01-01T00:00:00Z, and within what the 32-bit boot
   // epoch can hold. Serves twice: it validates what

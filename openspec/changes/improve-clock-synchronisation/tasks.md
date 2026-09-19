@@ -188,7 +188,7 @@ cheaper here than after the code exists (design.md — Migration Plan).
   `UartRead` 41/96. Heap free 496 B, minimum ever 440 B
   of the 512 B `configTOTAL_HEAP_SIZE`. `Mavlink` keeps 38 % of its stack; the tightest is
   `SdWrite`, which this change does not touch.
-- **Unity**: 12 cases, all passing, including the seven added here, two of them reporting
+- **Unity**: 13 cases, all passing, including the eight added here, two of them reporting
   cases rather than assertions about behaviour.
 - **`R64CNT` is a 7-bit counter at 128 Hz**, measured rather than deduced:
   `lowest=0 highest=127 transitions=260` over two seconds. The first implementation here
@@ -209,7 +209,13 @@ cheaper here than after the code exists (design.md — Migration Plan).
   text). One overstated its impact: it read the epoch-zero guard as stalling elapsed time
   permanently in the no-clock configuration, where the stall lasted one second; the guard
   was wrong anyway, since 0 was overloaded as both a failed read and a valid reading, and
-  is now a `bool` from the read itself.
+  is now a `bool` from the read itself. A second pass raised four more, all taken: the
+  reference GCS sends `SYSTEM_TIME` once a second, so repeating the second the clock
+  already holds is now a no-op and reconciling a drifted DS1307 moved to the periodic path
+  — bidirectional now, pushing the internal clock out when the ground is the authority and
+  pulling the DS1307 in otherwise. Two of that pass's five findings were stale, restating
+  the depth-5 queues and the local reconnection that the commit under review had already
+  fixed.
 - **`pio check`**: 6 LOW findings, 0 MEDIUM, 0 HIGH, **none of them attributable to this
   change** — they are the pre-existing `src/logger.cpp` casts and unused labels,
   `src/mavlink.cpp`'s `voltages_ext` and one in `lib/Battery`. The numeric casts added here

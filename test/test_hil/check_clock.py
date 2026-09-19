@@ -198,15 +198,32 @@ def test_the_clock_survives_a_commanded_restart(link):
     assert after != 0, "the clock came back as unknown"
     assert after >= before - 2, f"time went backwards across the restart: {before} -> {after}"
 
+    # This is the one point in the suite where the origin is known to be `ds1307`
+    # -- the board has just seeded from it -- so it is the only place the promotion
+    # to `ground` can be asserted rather than hoped for.
+    assert "ds1307" in text, f"origin after a restart was not ds1307: {text!r}"
+    link.mav.mav.system_time_send(int(time.time()) * 1_000_000, 0)
+    promoted = _statustext_matching(link, "Clock:")
+    assert promoted is not None, "a clock set from ds1307 emitted no origin report"
+    assert "ground" in promoted, f"origin not reported as ground: {promoted!r}"
 
-def test_a_clock_set_reports_its_new_origin(link):
-    """system-clock: the ground supersedes the battery-backed clock."""
+
+def test_the_ground_supersedes_the_battery_backed_clock(link):
+    """system-clock: the ground supersedes the battery-backed clock.
+
+    Asserts only the part that is deterministic here: the clock adopts what the
+    ground sent. The origin *report* is not checked in this case, because by the
+    time it runs an earlier case has already promoted the board to `ground` and
+    the text is emitted only on a change -- an "if a text arrived, check it"
+    assertion would pass without ever checking anything, which Copilot's review
+    pointed out. The report is asserted in the restart case above, which is the
+    only place in this suite that starts from a known `ds1307` state.
+    """
     host = int(time.time())
     link.mav.mav.system_time_send(host * 1_000_000, 0)
+    time.sleep(2.5)
 
-    text = _statustext_matching(link, "Clock:")
-    # Only emitted when the origin actually changes, so a board already on
-    # "ground" from an earlier case in the same run stays silent -- which is
-    # correct behaviour, not a failure.
-    if text is not None:
-        assert "ground" in text, f"origin not reported as ground: {text!r}"
+    after = _read_unix_time(link)
+    assert abs(after - int(time.time())) <= 2, (
+        f"the clock did not adopt the time the ground sent: {after}"
+    )

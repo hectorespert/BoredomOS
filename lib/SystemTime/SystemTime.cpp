@@ -174,6 +174,22 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
 
     time_t previous = getUnixTime();
 
+    // A ground station repeating the second the clock already holds costs nothing.
+    // This matters here specifically: MAVProxy's system_time module -- the
+    // reference GCS's way of setting the clock -- sends SYSTEM_TIME once a second,
+    // so without this the high-priority TaskMavlink would do a clock write and an
+    // I2C read every second forever. The source is still promoted, because a time
+    // from the ground is a time from the ground whether or not it moved anything.
+    //
+    // Correcting a DS1307 that has drifted under a ground-set clock is NOT lost by
+    // returning early: that is what TaskMavlink's periodic reconciliation does, and
+    // it is where a job measured in hours belongs. It was folding it into this path
+    // that made every inbound message pay for it. Found by Copilot's review.
+    if (previous == unix_time) {
+        _source = from;
+        return true;
+    }
+
     RTCTime updated(unix_time);
     if (!RTC.setTime(updated)) {
         return false;
@@ -211,4 +227,22 @@ bool SystemTime::reseedFromDs1307()
         return false;
     }
     return setUnixTime((time_t)_ds1307.now().unixtime(), Source::Ds1307);
+}
+
+bool SystemTime::pushToDs1307()
+{
+    if (!_ds1307Present) {
+        return false;
+    }
+
+    time_t internal = getUnixTime();
+    if (!isPlausible(internal)) {
+        return false;
+    }
+    if ((time_t)_ds1307.now().unixtime() == internal) {
+        return false;
+    }
+
+    _ds1307.adjust(DateTime((uint32_t)internal));
+    return true;
 }
