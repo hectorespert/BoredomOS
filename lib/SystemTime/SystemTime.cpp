@@ -186,7 +186,21 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     // it is where a job measured in hours belongs. It was folding it into this path
     // that made every inbound message pay for it. Found by Copilot's review.
     if (previous == unix_time) {
+        // A PROMOTION still reaches the DS1307 even on an equal second. Otherwise
+        // an internal clock already on the right second, with a drifted DS1307
+        // behind it, would leave the next boot seeding from the stale one -- and
+        // the promotion is the message that carries new information, so it is the
+        // one worth paying an I2C round trip for. A repeat from a source that
+        // already holds the clock is the free case, and it is the one a 1 Hz
+        // ground station generates. Copilot's third pass caught that collapsing
+        // both into one early return contradicted this capability's own
+        // requirement that an accepted time correct both clocks.
+        bool promoting = (from != _source);
         _source = from;
+        if (promoting && _ds1307Present && from != Source::Ds1307
+            && (time_t)_ds1307.now().unixtime() != unix_time) {
+            _ds1307.adjust(DateTime((uint32_t)unix_time));
+        }
         return true;
     }
 

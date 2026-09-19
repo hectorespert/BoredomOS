@@ -67,9 +67,13 @@ replaced by one from a lower-ranked origin.
 ### Requirement: A time offered by the ground is accepted only if plausible
 
 The firmware SHALL reject an offered time that falls before a fixed cut-off date, and
-SHALL leave its own clock and the battery-backed clock untouched when it does. An
-accepted time SHALL be written to both clocks, so that the clock which seeds the next
-boot is corrected too.
+SHALL leave its own clock and the battery-backed clock untouched when it does.
+
+An accepted time SHALL be written to both clocks, so that the clock which seeds the next
+boot is corrected too, whenever it differs from the time being held or comes from a
+higher-ranked origin than the one being held. An accepted time that matches what is held
+and adds no new origin SHALL be permitted to change neither, so that a ground station
+offering the same time repeatedly costs nothing.
 
 #### Scenario: An implausible time is offered
 

@@ -51,10 +51,13 @@ absent provenance made visible.
   decides whether a still-running internal RTC survived a reset with something worth
   keeping, which is what lets a ground-set time outlive a reset with nothing persisted
   to `VBTBKR`.
-- **`setUnixTime()` returns whether it accepted the time**, and is no longer able to
-  skip the DS1307 when the internal clock already agrees. The return value is what the
-  planned DataFlash log needs to emit its `TIME` record "on change", so it is part of
-  the public surface from the start.
+- **`setUnixTime()` returns whether it accepted the time**, and no longer takes the early
+  return that left a drifted DS1307 uncorrected for the whole mission. A time that differs,
+  or that promotes the origin, reaches both clocks; a ground station repeating the second
+  already held changes neither, because the reference GCS sends `SYSTEM_TIME` once a second
+  and that repeat should not cost an I2C round trip. The return value is what the planned
+  DataFlash log needs to emit its `TIME` record "on change", so it is part of the public
+  surface from the start.
 - **The clock's provenance is visible from the ground**: the boot `STATUSTEXT` names the
   source alongside the reset reason and boot phase it already carries, and a later
   change of source emits one. It also states, as a **separate** fact, whether a clock was
@@ -73,12 +76,16 @@ absent provenance made visible.
 - **`SYSTEM_TIME.time_unix_usec` carries `0` while the source is none**, the MAVLink
   convention for an unknown clock, rather than a small number a ground station would
   display as 1970. `time_boot_ms` continues to carry the useful figure.
-- **A low-rate re-seed of the internal RTC from the DS1307**, while no ground time has
-  been accepted this boot, so the two clocks do not drift apart for a whole mission
-  with nobody bringing them together. It emits nothing on the link, so it does not
-  touch any queue depth — and for the same reason it carries no spec requirement:
-  neither a ground station, an operator nor the build can observe whether it happened,
-  which makes the interval a design decision rather than behaviour.
+- **A low-rate, bidirectional reconciliation of the two clocks**, so they do not drift
+  apart for a whole mission with nobody bringing them together. The direction follows the
+  ladder: with a ground-set clock the internal one is the authority and is written out to
+  the DS1307, so the next boot seeds from something current; otherwise the DS1307 is the
+  better keeper and seeds the internal one. This is the only place that job happens —
+  doing it per inbound message is what made the reference GCS's 1 Hz updates expensive.
+  It emits nothing on the link beyond an origin change, so it carries no spec requirement
+  of its own: neither a ground station, an operator nor the build can observe whether a
+  given reconciliation happened, which makes the interval a design decision rather than
+  behaviour.
 - **MAVLink surface.** No new message id, no changed rate, no changed identity triple.
   Three field-level changes: `TIMESYNC.tc1`'s time base and capture instant,
   `SYSTEM_TIME.time_unix_usec`'s unknown-clock value, and the clock source plus the
@@ -131,14 +138,16 @@ not answer", which `add-degraded-mode` retired. §7's "the board runs on ticks s
 boot" also stops being the mechanism, since a board with no RTC will run on an internal
 RTC started at zero.
 
-**RAM.** No task, no queue and no library is added, so the headroom figure is not moved
-by a new kernel object. `LinkMsg`'s `timesync` variant grows by 8 bytes, from 16 to 24,
-against a union whose size is set by the 52-byte `statustext` variant — so
-`sizeof(LinkMsg)` is expected not to change at all, and neither is either link queue's
-storage array. `include/LinkMsg.h`'s `static_assert(sizeof(LinkMsg) <= 64)` is what
-proves it rather than this paragraph; a task confirms it and the headroom against a
-fresh build, per the read-fresh rule. The boot epoch and the source add one `time_t`
-and one byte of `.bss` inside `lib/SystemTime`.
+**RAM.** No task and no library is added. `LinkMsg`'s `timesync` variant grows by 8 bytes,
+from 16 to 24, against a union whose size is set by the 52-byte `statustext` variant, so
+`sizeof(LinkMsg)` does not change at all — measured with the target toolchain and confirmed
+by `include/LinkMsg.h`'s `static_assert(sizeof(LinkMsg) <= 64)`.
+
+What does move the figure is the **write queues going from depth 5 to 6**, one item per
+port for the boot and origin-change texts, whose derivation lives beside the storage in
+`src/main.cpp`: 2 x 64 = **128 B**. The clock's own state — a `uint32_t` epoch, the origin
+enum and two flags — accounts for the remaining 4 B after padding. Measured against a
+fresh link: headroom **2784 B**, down from a 2916 B baseline, against a floor of 1024.
 
 **`TODO.md`.** *Improve clock synchronisation* is deleted by this change — all five of
 its bullets are in scope, including the resynchronisation question, which is answered

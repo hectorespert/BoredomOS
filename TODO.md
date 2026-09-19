@@ -823,7 +823,7 @@ earlier draft of this entry planned, by extending the 32-bit tick counter with a
 accumulator sampled at 1 Hz. `improve-clock-synchronisation` already provides elapsed
 time as a subtraction against a boot epoch, with no accumulator to maintain and nothing
 to wrap, so this entry consumes `lib/SystemTime`'s accessor instead of building a second
-mechanism. Two consequences come with it: the resolution is the RTC's 1/64 s, not the
+mechanism. Two consequences come with it: the resolution is the RTC's 1/128 s, not the
 tick's 1 ms, which is immaterial for records at 1 Hz and below; and **that accessor
 currently has exactly one reader, which is also its only writer** (`TaskMavlink`). This
 entry adds `TaskLogger` and `TaskSdWrite` as readers, which is the condition its header
