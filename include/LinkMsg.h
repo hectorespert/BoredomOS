@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 // The outbound queue's item type: what a producer means, not what the wire
-// needs. mavlinkPack() (declared in include/Mavlink.h, defined in
+// needs. mavlinkPack() (declared in include/MavlinkPack.h, defined in
 // src/mavlink.cpp) is the only place that turns one of these into a
 // mavlink_message_t -- see design.md, "The outbound queue item becomes a
 // tagged union", queue-mavlink-messages-by-value.
