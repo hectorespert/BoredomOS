@@ -78,7 +78,13 @@ static void sendSystemTime(uint8_t port)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::SystemTime;
-    intent.system_time.unix_usec = systemTime.getUnixTimeUsec();
+    // Zero is the protocol's "not known", and what ArduPilot's send_system_time()
+    // leaves in the field when its RTC cannot supply a time. With no origin the
+    // internal RTC is counting from the epoch, so reporting its reading would
+    // put a date in 1970 on the wire that a ground station cannot tell from a
+    // clock genuinely set to 1970. time_boot_ms still carries the useful figure.
+    intent.system_time.unix_usec =
+        systemTime.source() == SystemTime::Source::None ? 0 : systemTime.getUnixTimeUsec();
     intent.system_time.boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
     xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
@@ -141,6 +147,39 @@ static void sendBootStatusText()
 
     for (uint8_t port = 0; port < kPortCount; ++port) {
         sendStatusText(port, text, MAV_SEVERITY_CRITICAL);
+    }
+}
+
+static const char* clockSourceText(SystemTime::Source source)
+{
+    switch (source) {
+        case SystemTime::Source::Ground: return "ground";
+        case SystemTime::Source::Ds1307: return "ds1307";
+        case SystemTime::Source::Survived: return "survived";
+        case SystemTime::Source::None: return "none";
+    }
+    return "unknown";
+}
+
+// A second text rather than more of the one above: that one is already 48 of its
+// 50 characters in its longest combination, so there is no room left in it.
+//
+// "found live" is reported separately from the origin, and is not derived from
+// it, because ds1307 outranks survived -- on a board whose DS1307 cannot be
+// disconnected the origin alone would never reveal that the internal RTC kept
+// running across a reset. Longest combination here is 25 characters
+// ("Clock: survived, found live").
+static void sendClockStatusText()
+{
+    char text[50];
+    text[0] = '\0';
+    strncat(text, "Clock: ", sizeof(text) - 1);
+    strncat(text, clockSourceText(systemTime.source()), sizeof(text) - 1 - strlen(text));
+    strncat(text, systemTime.foundClockRunning() ? ", found live" : ", found none",
+            sizeof(text) - 1 - strlen(text));
+
+    for (uint8_t port = 0; port < kPortCount; ++port) {
+        sendStatusText(port, text, MAV_SEVERITY_INFO);
     }
 }
 
@@ -371,7 +410,7 @@ void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
                 MAV_COMP_ID_AUTOPILOT1,
                 chan,
                 out,
-                systemTime.getUnixTimeNsec(),
+                intent.timesync.tc1,
                 intent.timesync.ts1,
                 intent.timesync.target_system,
                 intent.timesync.target_component
@@ -469,6 +508,7 @@ struct ScheduleEntry {
     (void)pvParameters;
 
     sendBootStatusText();
+    sendClockStatusText();
 
     TickType_t bootTick = xTaskGetTickCount();
     uint32_t startMs = (uint32_t)bootTick * portTICK_PERIOD_MS;
@@ -495,9 +535,47 @@ struct ScheduleEntry {
     };
     constexpr uint8_t kHousekeepingScheduleIndex = 3;
 
+    // Deliberately NOT an entry in the schedule above. That table is per port and
+    // every entry in it emits a message; this emits nothing and is not per port,
+    // so putting it there would imply a fifth independently-clocked producer and
+    // invalidate the write-queue depth justification in src/main.cpp beside
+    // uartWriteQueue. Same unsigned-delta comparison, for the same wrap reason.
+    //
+    // PROVISIONAL interval: task 1.3 of this change measures how far the
+    // LOCO-driven internal RTC actually drifts from the DS1307 and settles this
+    // number. Six hours is a conservative placeholder, not a measured value.
+    constexpr uint32_t kClockReseedIntervalMs = 6u * 60u * 60u * 1000u;
+    uint32_t lastReseedMs = startMs;
+
     for (;;)
     {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        // Keeps the two clocks in agreement so they do not drift apart for a
+        // whole mission with nobody reconciling them. The direction follows the
+        // ladder: with a ground-set clock the internal one is the authority and is
+        // written out to the DS1307, so the next boot seeds from something current;
+        // otherwise the DS1307 is the better keeper and seeds the internal one.
+        //
+        // This is the only place that job happens. Doing it on every inbound
+        // SYSTEM_TIME instead made the reference GCS's 1 Hz clock updates cost an
+        // I2C round trip a second -- Copilot's review of this change.
+        if ((now - lastReseedMs) >= kClockReseedIntervalMs) {
+            lastReseedMs += kClockReseedIntervalMs;
+            SystemTime::Source beforeReconcile = systemTime.source();
+
+            bool reconciled = (beforeReconcile == SystemTime::Source::Ground)
+                                  ? systemTime.pushToDs1307()
+                                  : systemTime.reseedFromDs1307();
+
+            // Reports a change like any other: a re-seed can promote `survived` to
+            // `ds1307`, and the ground has no other way to learn that the clock it
+            // is reading now has a different provenance. Bounded by the interval,
+            // not by a peer, so it cannot flood.
+            if (reconciled && systemTime.source() != beforeReconcile) {
+                sendClockStatusText();
+            }
+        }
 
         uint32_t waitMs = UINT32_MAX;
         for (uint8_t p = 0; p < kPortCount; ++p) {
@@ -606,7 +684,17 @@ struct ScheduleEntry {
 
                 case MAVLINK_MSG_ID_SYSTEM_TIME: {
                     time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(&msg) / USEC_PER_SEC;
-                    systemTime.setUnixTime(unix_time_from_gcs);
+                    SystemTime::Source before = systemTime.source();
+                    // Nothing is emitted when this is refused. The sender decides
+                    // how often it offers a time, so a text per rejection would
+                    // let a peer generate unbounded outbound traffic and starve
+                    // the periodic cadences specs/mavlink-link/spec.md
+                    // guarantees. A refusal is observable anyway: the reported
+                    // time does not move.
+                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground)
+                        && systemTime.source() != before) {
+                        sendClockStatusText();
+                    }
                     break;
                 }
 
@@ -617,6 +705,9 @@ struct ScheduleEntry {
                     if (timesync.tc1 == 0) {
                         LinkMsg intent;
                         intent.kind = LinkMsgKind::TimesyncReply;
+                        // Captured here, on receipt, not in mavlinkPack() after
+                        // the queue hop -- see include/LinkMsg.h.
+                        intent.timesync.tc1 = systemTime.sinceBootNsec();
                         intent.timesync.ts1 = timesync.ts1;
                         intent.timesync.target_system = timesync.target_system;
                         intent.timesync.target_component = timesync.target_component;

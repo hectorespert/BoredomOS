@@ -27,7 +27,13 @@ struct LinkMsg {
         // itself rather than carrying a snapshot of it.
         struct { uint64_t unix_usec; uint32_t boot_ms; } system_time;
         struct { uint16_t millivolts; int8_t remaining; } battery;
-        struct { int64_t ts1; uint8_t target_system; uint8_t target_component; } timesync;
+        // tc1 is captured by TaskMavlink when the request is received, not read
+        // by mavlinkPack() when the reply is formed: the ground computes its
+        // offset from tc1 against ts1 plus half the round trip, so reading the
+        // clock after a queue hop would put this board's scheduling latency
+        // inside the number as if it were clock offset. Both reference
+        // autopilots timestamp on receipt for the same reason.
+        struct { int64_t tc1; int64_t ts1; uint8_t target_system; uint8_t target_component; } timesync;
         struct { uint8_t severity; char text[50]; } statustext;
         struct { uint16_t command; uint8_t result; } command_ack;
         // name points at one of src/mavlink.cpp's static const char[] name
