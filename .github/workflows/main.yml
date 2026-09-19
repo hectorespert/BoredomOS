@@ -42,10 +42,21 @@ jobs:
     - name: Kernel objects are created statically
       # Every kernel-object creation in src/ is now the ...Static form, so any
       # reappearance of the dynamic ones is a regression. Says nothing about
-      # pvPortMalloc, which still backs the queued items.
+      # pvPortMalloc, which still backs sdWriteQueue's items -- checked below.
       run: |
         if grep -nE '\b(xTaskCreate|xQueueCreate)[[:space:]]*\(' src/ -r; then
           echo "::error::src/ must create tasks and queues with xTaskCreateStatic / xQueueCreateStatic"
+          exit 1
+        fi
+    - name: MAVLink queue items are carried by value
+      # serialReadQueue/serialWriteQueue stopped using the heap
+      # (queue-mavlink-messages-by-value); any pvPortMalloc reappearing in
+      # these two files is a regression back to the heap-pointer protocol.
+      # Scoped to these files, not all of src/: src/logger.cpp/src/sdwrite.cpp
+      # still legitimately allocate for sdWriteQueue, which this did not touch.
+      run: |
+        if grep -nE '\bpvPortMalloc\b' src/serial.cpp src/mavlink.cpp; then
+          echo "::error::src/serial.cpp and src/mavlink.cpp carry MAVLink queue items by value and must not allocate"
           exit 1
         fi
     - name: Run PlatformIO

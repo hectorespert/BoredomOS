@@ -4,6 +4,8 @@
 #include <Battery.h>
 #include <SystemTime.h>
 #include <Recovery.h>
+#include <LinkMsg.h>
+#include <MavlinkPack.h>
 #include <string.h>
 
 extern QueueHandle_t serialWriteQueue;
@@ -51,69 +53,28 @@ static uint32_t packCustomMode()
 }
 
 static void sendHeartbeat() {
-    mavlink_message_t* heartbeatMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (heartbeatMsg != NULL) {
-        uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
-        if (!reducedConfiguration) {
-            baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
-        }
-
-        mavlink_msg_heartbeat_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            heartbeatMsg,
-            MAV_TYPE_ROCKET,
-            MAV_AUTOPILOT_GENERIC,
-            baseMode,
-            packCustomMode(),
-            reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
-        );
-
-        if (xQueueSend(serialWriteQueue, &heartbeatMsg, 0) != pdPASS)
-        {
-            vPortFree(heartbeatMsg);
-        }
-    }
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::Heartbeat;
+    xQueueSend(serialWriteQueue, &intent, 0);
 }
 
 static void sendSystemTime()
 {
-    mavlink_message_t* systemTimeMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (systemTimeMsg != NULL) {
-        uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-        mavlink_msg_system_time_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            systemTimeMsg,
-            systemTime.getUnixTimeUsec(),
-            boot_ms
-        );
-
-        if (xQueueSend(serialWriteQueue, &systemTimeMsg, 0) != pdPASS)
-        {
-            vPortFree(systemTimeMsg);
-        }
-    }
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::SystemTime;
+    intent.system_time.unix_usec = systemTime.getUnixTimeUsec();
+    intent.system_time.boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    xQueueSend(serialWriteQueue, &intent, 0);
 }
 
 static void sendStatusText(const char* text, uint8_t severity)
 {
-    mavlink_message_t* statusMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (statusMsg != NULL) {
-        mavlink_msg_statustext_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            statusMsg,
-            severity,
-            text,
-            0,
-            0
-        );
-        if (xQueueSend(serialWriteQueue, &statusMsg, 0) != pdPASS) {
-            vPortFree(statusMsg);
-        }
-    }
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::StatusText;
+    intent.statustext.severity = severity;
+    strncpy(intent.statustext.text, text, sizeof(intent.statustext.text) - 1);
+    intent.statustext.text[sizeof(intent.statustext.text) - 1] = '\0';
+    xQueueSend(serialWriteQueue, &intent, 0);
 }
 
 static const char* resetReasonText(Recovery::ResetReason reason)
@@ -163,62 +124,22 @@ static void sendBootStatusText()
 
 static void sendCommandAck(uint16_t command, uint8_t result)
 {
-    mavlink_message_t* ackMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (ackMsg != NULL) {
-        mavlink_msg_command_ack_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            ackMsg,
-            command,
-            result,
-            0,
-            0,
-            0,
-            0
-        );
-        if (xQueueSend(serialWriteQueue, &ackMsg, 0) != pdPASS) {
-            vPortFree(ackMsg);
-        }
-    }
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::CommandAck;
+    intent.command_ack.command = command;
+    intent.command_ack.result = result;
+    xQueueSend(serialWriteQueue, &intent, 0);
 }
 
 extern Battery battery;
 
 static void sendBatteryStatus()
 {
-    mavlink_message_t* batteryMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (batteryMsg != NULL) {
-        uint16_t voltages[10];
-        voltages[0] = battery.millivolts();
-        for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
-
-        uint16_t voltages_ext[4] = {0, 0, 0, 0};
-
-        mavlink_msg_battery_status_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            batteryMsg,
-            0,
-            MAV_BATTERY_FUNCTION_ALL,
-            MAV_BATTERY_TYPE_LIPO,
-            INT16_MAX,
-            voltages,
-            -1,
-            -1,
-            -1,
-            battery.remaining(),
-            0,
-            MAV_BATTERY_CHARGE_STATE_UNDEFINED,
-            voltages_ext,
-            MAV_BATTERY_MODE_UNKNOWN,
-            0
-        );
-
-        if (xQueueSend(serialWriteQueue, &batteryMsg, 0) != pdPASS)
-        {
-            vPortFree(batteryMsg);
-        }
-    }
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::BatteryStatus;
+    intent.battery.millivolts = battery.millivolts();
+    intent.battery.remaining = battery.remaining();
+    xQueueSend(serialWriteQueue, &intent, 0);
 }
 
 // Housekeeping telemetry -- free heap, minimum-ever-free heap, and each live
@@ -317,34 +238,139 @@ static bool nextHousekeepingValue(const char **name, int32_t *value)
     return false;
 }
 
-// Follows sendHeartbeat/sendSystemTime's shape: pvPortMalloc, NULL check,
-// pack, xQueueSend onto serialWriteQueue, vPortFree on a failed send. Exactly
-// one value per call -- never a burst of several -- so this entry is
-// structurally identical to every other one from the queue's point of view
-// (design.md's "one ScheduleEntry function that sends all N values" was
-// rejected for exactly this reason).
+// Follows sendHeartbeat/sendSystemTime's shape: fill the intent, xQueueSend
+// onto serialWriteQueue, nothing to free either way. Exactly one value per
+// call -- never a burst of several -- so this entry is structurally
+// identical to every other one from the queue's point of view (design.md's
+// "one ScheduleEntry function that sends all N values" was rejected for
+// exactly this reason).
 static void sendHousekeeping()
 {
     const char *name;
     int32_t value;
     if (!nextHousekeepingValue(&name, &value)) return;
 
-    mavlink_message_t* housekeepingMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-    if (housekeepingMsg != NULL) {
-        uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::NamedValueInt;
+    intent.named_value_int.name = name;
+    intent.named_value_int.value = value;
+    xQueueSend(serialWriteQueue, &intent, 0);
+}
 
-        mavlink_msg_named_value_int_pack(
-            1,
-            MAV_COMP_ID_AUTOPILOT1,
-            housekeepingMsg,
-            boot_ms,
-            name,
-            value
-        );
+// The only function in the firmware outside this file that may call a
+// mavlink_msg_*_pack function -- src/serial.cpp's TaskSerialWrite calls this
+// to turn what a producer meant into a wire-ready message, keeping protocol
+// knowledge here rather than in the transport (design.md's Decisions,
+// queue-mavlink-messages-by-value).
+void mavlinkPack(const LinkMsg &intent, mavlink_message_t *out)
+{
+    switch (intent.kind) {
+        case LinkMsgKind::Heartbeat: {
+            uint8_t baseMode = MAV_MODE_FLAG_SAFETY_ARMED;
+            if (!reducedConfiguration) {
+                baseMode |= MAV_MODE_FLAG_AUTO_ENABLED;
+            }
+            mavlink_msg_heartbeat_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                MAV_TYPE_ROCKET,
+                MAV_AUTOPILOT_GENERIC,
+                baseMode,
+                packCustomMode(),
+                reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
+            );
+            break;
+        }
 
-        if (xQueueSend(serialWriteQueue, &housekeepingMsg, 0) != pdPASS)
-        {
-            vPortFree(housekeepingMsg);
+        case LinkMsgKind::SystemTime:
+            mavlink_msg_system_time_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                intent.system_time.unix_usec,
+                intent.system_time.boot_ms
+            );
+            break;
+
+        case LinkMsgKind::BatteryStatus: {
+            uint16_t voltages[10];
+            voltages[0] = intent.battery.millivolts;
+            for (int i = 1; i < 10; ++i) voltages[i] = UINT16_MAX;
+
+            uint16_t voltages_ext[4] = {0, 0, 0, 0};
+
+            mavlink_msg_battery_status_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                0,
+                MAV_BATTERY_FUNCTION_ALL,
+                MAV_BATTERY_TYPE_LIPO,
+                INT16_MAX,
+                voltages,
+                -1,
+                -1,
+                -1,
+                intent.battery.remaining,
+                0,
+                MAV_BATTERY_CHARGE_STATE_UNDEFINED,
+                voltages_ext,
+                MAV_BATTERY_MODE_UNKNOWN,
+                0
+            );
+            break;
+        }
+
+        case LinkMsgKind::TimesyncReply:
+            mavlink_msg_timesync_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                systemTime.getUnixTimeNsec(),
+                intent.timesync.ts1,
+                intent.timesync.target_system,
+                intent.timesync.target_component
+            );
+            break;
+
+        case LinkMsgKind::StatusText:
+            mavlink_msg_statustext_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                intent.statustext.severity,
+                intent.statustext.text,
+                0,
+                0
+            );
+            break;
+
+        case LinkMsgKind::CommandAck:
+            mavlink_msg_command_ack_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                intent.command_ack.command,
+                intent.command_ack.result,
+                0,
+                0,
+                0,
+                0
+            );
+            break;
+
+        case LinkMsgKind::NamedValueInt: {
+            uint32_t boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            mavlink_msg_named_value_int_pack(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                out,
+                boot_ms,
+                intent.named_value_int.name,
+                intent.named_value_int.value
+            );
+            break;
         }
     }
 }
@@ -421,11 +447,11 @@ struct ScheduleEntry {
             if (due < waitMs) waitMs = due;
         }
 
-        mavlink_message_t* msg;
+        mavlink_message_t msg;
         if (xQueueReceive(serialReadQueue, &msg, pdMS_TO_TICKS(waitMs)))
         {
 
-            switch (msg->msgid)
+            switch (msg.msgid)
             {
                 case MAVLINK_MSG_ID_HEARTBEAT:
                     break;
@@ -435,7 +461,7 @@ struct ScheduleEntry {
 
                 case MAVLINK_MSG_ID_COMMAND_LONG:
                     mavlink_command_long_t command;
-                    mavlink_msg_command_long_decode(msg, &command);
+                    mavlink_msg_command_long_decode(&msg, &command);
 
                     if (command.command == MAV_CMD_GET_HOME_POSITION) {
                         break;
@@ -511,43 +537,39 @@ struct ScheduleEntry {
                     break;
 
                 case MAVLINK_MSG_ID_SYSTEM_TIME: {
-                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(msg) / USEC_PER_SEC;
+                    time_t unix_time_from_gcs = mavlink_msg_system_time_get_time_unix_usec(&msg) / USEC_PER_SEC;
                     systemTime.setUnixTime(unix_time_from_gcs);
                     break;
                 }
 
                 case MAVLINK_MSG_ID_TIMESYNC: {
                     mavlink_timesync_t timesync;
-                    mavlink_msg_timesync_decode(msg, &timesync);
+                    mavlink_msg_timesync_decode(&msg, &timesync);
 
                     if (timesync.tc1 == 0) {
-                        mavlink_message_t* timeSyncMsg = (mavlink_message_t*)pvPortMalloc(sizeof(mavlink_message_t));
-                        if (timeSyncMsg != NULL) {
-                            mavlink_msg_timesync_pack(
-                                1,
-                                MAV_COMP_ID_AUTOPILOT1,
-                                timeSyncMsg,
-                                systemTime.getUnixTimeNsec(),
-                                timesync.ts1,
-                                timesync.target_system,
-                                timesync.target_component
-                            );
-
-                            if (xQueueSend(serialWriteQueue, &timeSyncMsg, 0) != pdPASS) {
-                                vPortFree(timeSyncMsg);
-                            }
-                        }
+                        LinkMsg intent;
+                        intent.kind = LinkMsgKind::TimesyncReply;
+                        intent.timesync.ts1 = timesync.ts1;
+                        intent.timesync.target_system = timesync.target_system;
+                        intent.timesync.target_component = timesync.target_component;
+                        xQueueSend(serialWriteQueue, &intent, 0);
                     }
 
                     break;
                 }
-        
+
                 default:
-                    sendStatusText("Mensaje recibido con ID desconocido: " + msg->msgid, MAV_SEVERITY_WARNING);
+                    // Pre-existing defect fixed incidentally while converting
+                    // this call site (queue-mavlink-messages-by-value, task
+                    // 2.3): the previous text did pointer arithmetic on a
+                    // string literal ("..." + msg->msgid) instead of
+                    // concatenation, producing a truncated or out-of-bounds
+                    // substring for any msgid at or past the literal's
+                    // length. A fixed string avoids that without adding a
+                    // formatting helper this path does not otherwise need.
+                    sendStatusText("Unhandled message received", MAV_SEVERITY_WARNING);
                     break;
             }
-
-            vPortFree(msg);
         }
 
         now = xTaskGetTickCount() * portTICK_PERIOD_MS;

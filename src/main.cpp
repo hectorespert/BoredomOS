@@ -5,6 +5,7 @@
 #include <Link.h>
 #include <Cli.h>
 #include <MAVLink.h>
+#include <LinkMsg.h>
 #include <Data.h>
 #include <Battery.h>
 #include <SystemTime.h>
@@ -60,10 +61,29 @@ QueueHandle_t serialWriteQueue = NULL;
 StackType_t serialReadStack[96];
 StaticTask_t serialReadTcb;
 
-StackType_t serialWriteStack[192];
+// 384, not 192: queue-mavlink-messages-by-value added a local
+// mavlink_message_t (291 B) that TaskSerialWrite fills via mavlinkPack()
+// before packing to wire bytes, on top of the existing
+// uint8_t buf[MAVLINK_MAX_PACKET_LEN] (280 B) and the received LinkMsg
+// (64 B). 192 words (768 B) overflowed on the board within seconds of boot
+// (the boot STATUSTEXT is the first message TaskSerialWrite ever packs) --
+// confirmed by the slow 2s-on/2s-off LED pattern src/hooks.cpp's stack
+// overflow hook produces. 384 is a provisional doubling, not a measured
+// figure; task 7.2 replaces this with the real high-water mark once `ps` is
+// reachable.
+StackType_t serialWriteStack[384];
 StaticTask_t serialWriteTcb;
 
-StackType_t mavlinkStack[256];
+// 384, not 256: queue-mavlink-messages-by-value added a local
+// mavlink_message_t (291 B) to TaskMavlink's receive loop, alive for the
+// whole loop body -- including every send*() call in the schedule pass below
+// it, each of which has its own LinkMsg local on top. Measured on the board
+// right after this change: 41 of 256 words free, down from the ~127
+// add-mavlink-housekeeping-telemetry recorded -- thinner than acceptable
+// margin, and before exercising the COMMAND_LONG branches at all. Grown
+// provisional to 384, matching TaskSerialWrite's own bump; task 7.2 replaces
+// this with a measured figure once the full HIL suite has run.
+StackType_t mavlinkStack[384];
 StaticTask_t mavlinkTcb;
 
 StackType_t loggerStack[96];
@@ -84,14 +104,17 @@ StaticTask_t sdWriteTcb;
 StackType_t cliStack[128];
 StaticTask_t cliTcb;
 
-// Queue structures and item storage. Each queue carries pointers, so the storage is
-// depth x sizeof(pointer); what backs the items themselves is the FreeRTOS heap,
-// sized in platformio.ini against the worst case computed in the change design.
+// Queue structures and item storage. sdWriteQueue still carries a heap pointer,
+// so its storage is depth x sizeof(pointer) and the FreeRTOS heap backs the
+// items themselves, sized in platformio.ini against the worst case computed in
+// that queue's own design. serialReadQueue and serialWriteQueue carry their
+// items by value instead (queue-mavlink-messages-by-value), so their storage
+// is depth x sizeof(item) directly and neither touches the heap at all.
 StaticQueue_t sdWriteQueueBuffer;
 uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
 
 StaticQueue_t serialReadQueueBuffer;
-uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t*)];
+uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t)];
 
 // Depth 5, not 4: a fourth independently-clocked TaskMavlink schedule entry
 // (housekeeping, openspec/changes/add-mavlink-housekeeping-telemetry) can be
@@ -102,7 +125,7 @@ uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t*)];
 // queue's backing. This depth and the housekeeping cycle length both follow
 // the task count in this file -- a new task needs both re-checked.
 StaticQueue_t serialWriteQueueBuffer;
-uint8_t serialWriteQueueStorage[5 * sizeof(mavlink_message_t*)];
+uint8_t serialWriteQueueStorage[5 * sizeof(LinkMsg)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
@@ -321,10 +344,10 @@ void setup()
   sdWriteQueue = xQueueCreateStatic(4, sizeof(Data*), sdWriteQueueStorage, &sdWriteQueueBuffer);
   configASSERT(sdWriteQueue != NULL);
 
-  serialReadQueue = xQueueCreateStatic(8, sizeof(mavlink_message_t*), serialReadQueueStorage, &serialReadQueueBuffer);
+  serialReadQueue = xQueueCreateStatic(8, sizeof(mavlink_message_t), serialReadQueueStorage, &serialReadQueueBuffer);
   configASSERT(serialReadQueue != NULL);
 
-  serialWriteQueue = xQueueCreateStatic(5, sizeof(mavlink_message_t*), serialWriteQueueStorage, &serialWriteQueueBuffer);
+  serialWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), serialWriteQueueStorage, &serialWriteQueueBuffer);
   configASSERT(serialWriteQueue != NULL);
 
   Recovery::setPhase(Recovery::BootPhase::QueuesDone);
@@ -349,10 +372,10 @@ void setup()
   taskSerialReadHandler = xTaskCreateStatic(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, serialReadStack, &serialReadTcb);
   configASSERT(taskSerialReadHandler != NULL);
 
-  taskSerialWriteHandler = xTaskCreateStatic(TaskSerialWrite, "SerialWrite", 192, NULL, PRIORITY_HIGH, serialWriteStack, &serialWriteTcb);
+  taskSerialWriteHandler = xTaskCreateStatic(TaskSerialWrite, "SerialWrite", 384, NULL, PRIORITY_HIGH, serialWriteStack, &serialWriteTcb);
   configASSERT(taskSerialWriteHandler != NULL);
 
-  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 256, NULL, PRIORITY_HIGH, mavlinkStack, &mavlinkTcb);
+  taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 384, NULL, PRIORITY_HIGH, mavlinkStack, &mavlinkTcb);
   configASSERT(taskMavlinkHandler != NULL);
 
   // Starts in every configuration, reduced included: it touches nothing the
