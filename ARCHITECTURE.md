@@ -444,21 +444,57 @@ defaulting to 4 files of 1 GiB.
 
 ### 5.3 Time
 
-`lib/SystemTime` keeps two clocks in agreement: the RA4M1's internal `RTC`, which is
-fast to read but loses time on power loss, and an external **DS1307** on I2C, which
-is battery-backed but coarse.
+`lib/SystemTime` owns both clocks. The RA4M1's internal `RTC` is not one of two peers:
+it is the **register that holds and advances the time**, and everything else seeds it.
+The external **DS1307** on I2C is battery-backed and crystal-driven; the internal RTC
+runs off `LOCO`, an on-chip RC oscillator, so it is the worse keeper of the two and the
+DS1307 exists to seed it.
 
-- `begin()` seeds the internal clock from the DS1307 and fails — hard, via
-  `configASSERT` in `setup()` — if either does not answer.
-- `getUnixTime()` reads the internal clock. `getUnixTimeUsec()` and
-  `getUnixTimeNsec()` scale it up for the MAVLink fields that want microseconds and
-  nanoseconds.
-- `setUnixTime()` writes both clocks and short-circuits when the value is already
-  correct, so repeated time messages from the ground do not hammer the I2C bus.
+- `begin()` starts the internal RTC **unconditionally**, then chooses where the time
+  came from. Nothing here halts: a missing clock degrades, per §7.
+- `getUnixTime()` reads whole seconds. `getUnixTimeUsec()` and `getUnixTimeNsec()` add a
+  sub-second part read from the RTC's own `R64CNT` register — 1/128 s, phase-locked to the
+  second it accompanies because the same divider chain produces both. That register's name
+  says "64-Hz counter" and means something else: its bits are named for the frequency each
+  one toggles at, so a whole second spans its seven bits as 128 counts.
+  The read takes the second either side of the fraction and retries while it moved, or a
+  carry between the two reads would report a time a second in the past.
+- `setUnixTime()` reports whether it accepted the value. It refuses an implausible one
+  (before 2022-01-01) and refuses a demotion, writes both clocks, and shifts the boot
+  epoch by the same delta.
+
+**Provenance is ranked, and the internal RTC is not on the ladder.** Lower is better,
+after ArduPilot's `AP_RTC::source_type`, including its ordering — the ground outranks the
+hardware clock:
+
+| Source | Means |
+|---|---|
+| `ground` | set from the ground this boot |
+| `ds1307` | seeded from the DS1307 by `begin()` |
+| `survived` | the internal RTC was already running, with a plausible time, when this boot began |
+| `none` | nothing seeded it; the internal RTC is counting from the epoch |
+
+The plausibility floor does double duty: it validates what arrives from the ground, and
+it is how `begin()` tells a `survived` clock from one that was never set, which is what
+lets a ground-set time outlive a reset with nothing persisted to `VBTBKR`.
+
+**Time since boot is a subtraction, not a counter.** `begin()` latches the wall clock
+into a `uint32_t` boot epoch — `uint32_t` and not `time_t`, which is 8 bytes here and
+would not store in one word — and elapsed time is `wall − epoch`. There is no
+accumulator to maintain and nothing to wrap. `setUnixTime()` shifts the epoch by the
+same delta it applies to the clock, so elapsed time is continuous across a clock set;
+that separation is what lets this firmware accept a **backwards** correction, which an
+autopilot coupling the two cannot. Only `TaskMavlink` reads elapsed time today, and it
+is also its only writer — before a second task reads it, the clock-and-epoch update must
+be made indivisible.
 
 The clock is settable from the ground: inbound `SYSTEM_TIME` and `TIMESYNC` in
-`TaskMavlink` are what drive `setUnixTime()`. Every SD record carries the resulting
-`unixtime`, which is the reference the `.mpk` files are read against later.
+`TaskMavlink` are what drive `setUnixTime()`, and `TIMESYNC` is answered with elapsed
+time since boot in nanoseconds, captured when the request arrives rather than when the
+reply is packed. With no origin, `SYSTEM_TIME` carries `0` for the UNIX field — the
+protocol's "not known" — rather than a date in 1970. Every SD record carries the
+resulting `unixtime` in whole seconds, which is the reference the `.mpk` files are read
+against later.
 
 ## 6. Hardware map and resource ownership
 
@@ -533,9 +569,11 @@ configured with `configMAX_PRIORITIES` of 5 and a 1000 Hz tick.
 **`configASSERT` halts only where recovery is impossible, not where hardware is
 missing.** The question `setup()` asks is not "is this important" but "does the
 firmware need it to be reachable" — and the answer is: the link, and nothing
-else. Absent RTC or SD card degrade instead of halting: the board runs on ticks
-since boot and accepts a time set from the ground without the DS1307, and skips
-the housekeeping log without the card, reporting the absence either way rather
+else. Absent RTC or SD card degrade instead of halting: without the DS1307 the
+internal RTC still runs, counting from the epoch, so the board operates on time
+measured from boot and accepts a time set from the ground — reporting `0` rather
+than a date in 1970 for as long as nothing has set it (§5.3) — and skips the
+housekeeping log without the card, reporting the absence either way rather
 than staying silent about it. `configASSERT` remains on each queue creation and
 each task creation — with `configSUPPORT_STATIC_ALLOCATION` these cannot fail
 for want of memory, so a `NULL` handle there is a programming error, not a

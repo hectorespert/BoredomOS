@@ -125,8 +125,14 @@ being no command at all.
 **Scope:** `src/hooks.cpp`, `lib/SystemTime`, `platformio.ini`, `test/test_hil/`
 
 `openspec/changes/archive/2026-09-13-add-degraded-mode/` shipped 35 of its 44 tasks,
-board-verified against the recovered board. Nine remain, each already scoped in that
-change's own `tasks.md` (numbers below refer to it):
+board-verified against the recovered board. Seven remain, each already scoped in that
+change's own `tasks.md` (numbers below refer to it). **6.1 and 6.4 are no longer here**:
+6.1's short-circuit fix belongs to
+`openspec/changes/improve-clock-synchronisation/`, which cannot read the RTC's
+sub-second counter without it, and 6.4 moved there as a task. It is still unclosed for
+the same reason it always was — the DS1307 cannot be disconnected on this assembly, which
+is now known to be a standing property rather than one session's bad luck, and which
+blocks 6.6 below as well.
 
 - **3.2 / 3.3 — the fault hooks are still unsafe (review finding 9).**
   `vApplicationStackOverflowHook` in `src/hooks.cpp` writes the new phase marker
@@ -142,12 +148,6 @@ change's own `tasks.md` (numbers below refer to it):
   rollover (`lib/SdData/SdData.cpp`'s rotation can delete a file up to 1 GiB inside one
   call), then `platformio.ini`'s `-D WDT_TIMEOUT_MS` raised to match, bounded by the
   5.592 s hardware ceiling `design.md` in the archived change derives.
-- **6.1 / 6.4 — the no-RTC path is implemented in `src/main.cpp` but not in `lib/`.**
-  `lib/SystemTime.cpp:11`'s `if (_ds1307.begin() && RTC.begin())` short-circuits, so the
-  internal RTC never begins when the DS1307 is absent, and `setUnixTime()` still calls
-  `_ds1307.adjust()` unconditionally. Needs the internal RTC begun regardless, and the
-  DS1307 write skipped when absent — then 6.4 (board, no RTC attached) can be
-  re-attempted; it was blocked on this both times it was tried.
 - **6.6 — the reduced configuration was never tested with both the SD card and the
   DS1307 absent together.** Blocked on hardware access, not code: the DS1307 was not
   disconnectable during that session. Needs hands at the board with both removed while
@@ -805,18 +805,30 @@ Separating them buys two things a wide record cannot:
   cache never becomes state shared between two priorities — `TaskLogger` at `LOW`
   still would not touch it.
 - **`TIME` makes a clock set visible.** It is emitted at boot, on every ring
-  rotation, and whenever `setUnixTime()` accepts a time from the ground. `Src` records
-  the provenance — `0` internal RTC never synchronised (degraded mode), `1` seeded
-  from the DS1307, `2` set from the ground. Today a mid-flight clock set produces a
+  rotation, and whenever `setUnixTime()` accepts a time from the ground — which is
+  exactly what that function's `bool` return reports, so no new hook is needed for the
+  "on change" part. `Src` **takes its values from `SystemTime::Source`** rather than
+  defining its own: `improve-clock-synchronisation` established that ladder, and it has
+  a fourth value this entry predates — `survived`, the internal RTC still running with a
+  plausible time after a reset, which a log read after a watchdog needs to tell from a
+  freshly seeded one. Do not re-enumerate them here. Today a mid-flight clock set produces a
   discontinuity in `unixtime` with nothing marking it, and a degraded-mode timestamp
   is indistinguishable from a real one. Emitting it on rotation is what lets each ring
   file be read on its own, for the same reason the `FMT` records are re-emitted there.
 
 `TimeUS` is microseconds since boot in `uint64`, which is the DataFlash convention and
 what makes MAVExplorer pick the time axis without configuration. It also retires
-*[`uptime` overflows after ~49.7 days]* instead of inheriting it: the 32-bit tick
-counter is extended in software by an accumulator sampled at 1 Hz, far faster than its
-wrap period.
+*[`uptime` overflows after ~49.7 days]* instead of inheriting it — but **not** the way an
+earlier draft of this entry planned, by extending the 32-bit tick counter with an
+accumulator sampled at 1 Hz. `improve-clock-synchronisation` already provides elapsed
+time as a subtraction against a boot epoch, with no accumulator to maintain and nothing
+to wrap, so this entry consumes `lib/SystemTime`'s accessor instead of building a second
+mechanism. Two consequences come with it: the resolution is the RTC's 1/64 s, not the
+tick's 1 ms, which is immaterial for records at 1 Hz and below; and **that accessor
+currently has exactly one reader, which is also its only writer** (`TaskMavlink`). This
+entry adds `TaskLogger` and `TaskSdWrite` as readers, which is the condition its header
+comment names: the clock-and-epoch update in `setUnixTime()` must be made indivisible —
+scheduler suspended across the pair, not a mutex — as part of this work, not after it.
 
 **What this costs elsewhere.** Two producers post to `sdWriteQueue` instead of one —
 `TaskLogger` for `SYS`, `TaskMavlink` for both `PWR` (from its own schedule) and
@@ -968,48 +980,6 @@ Found by Copilot reviewing the pull request that split `test/` into `test_libs` 
 moved.
 
 
-### Improve clock synchronisation
-
-**Status:** proposed
-**Scope:** `lib/SystemTime`, `src/mavlink.cpp`
-
-`lib/SystemTime` keeps the R4 internal RTC and the external DS1307 in time, but the
-synchronisation has several limitations today that show up as soon as the satellite
-has been powered for a while or the GCS tries to measure the offset.
-
-Current limitations, in order of impact:
-
-- **One second resolution.** `getUnixTimeUsec()` and `getUnixTimeNsec()` are
-  `getUnixTime()` multiplied by 10^6 and 10^9, so the sub-second part is always
-  zero. That goes into the `TIMESYNC` reply and into the `SYSTEM_TIME` emitted every
-  second from `TaskMavlink`'s schedule (`fold-periodic-telemetry-into-mavlink-task`
-  folded this in from `TaskHeartbeat`): the GCS receives a timestamp quantised to the second
-  and its offset estimate inherits that error of up to ±1 s. Combining the RTC
-  (seconds) with `xTaskGetTickCount()` or `micros()` for the fraction is what gives
-  real resolution.
-- **`TIMESYNC` time base not pinned down.** The reply at `src/mavlink.cpp:201` uses
-  `getUnixTimeNsec()`, wall clock time. Whether that is what the reference GCS
-  expects, or a monotonic time since boot, should be decided and documented, because
-  if they do not match the offset computed on the ground means nothing.
-- **The DS1307 is not corrected if the internal RTC is already in time.**
-  `setUnixTime()` takes the early `return` after comparing only against the internal
-  clock, so a DS1307 that has drifted is never readjusted from the ground — and it
-  is precisely the one that seeds the time on the next boot.
-- **There is no periodic resynchronisation.** `begin()` copies DS1307 → internal RTC
-  once at boot and that is that. The two clocks drift apart for the whole mission
-  with nobody bringing them back together.
-- **What arrives from the GCS is not validated.** `MAVLINK_MSG_ID_SYSTEM_TIME` is
-  accepted as is: a corrupt or zero value leaves the satellite in 1970 and
-  contaminates the `unixtime` of every SD record, which is the reference the `.mpk`
-  files are later read against.
-
-To decide before implementing: which clock wins when they disagree, how often they
-resynchronise with each other, and what date range is considered acceptable in an
-incoming `SYSTEM_TIME`.
-
-Touching `lib/SystemTime` means running `pio test`: `test/test_main.cpp` validates
-against the real DS1307, so this cannot be checked without the board.
-
 ### Decide whether `SYSTEM_TIME` deserves 1 Hz
 
 **Status:** proposed
@@ -1045,8 +1015,9 @@ is deliberately not folded into
 being invisible from the ground; once that change lands, the rate is one number in its
 schedule table.
 
-Related: *Improve clock synchronisation* above covers the quality of the timestamp,
-not how often it is sent. The two are independent.
+Related: `openspec/changes/improve-clock-synchronisation/` covers the quality of the
+timestamp — resolution, provenance and time base — not how often it is sent. The two are
+independent, so that change landing does not answer this question.
 
 ### Fix the pointer arithmetic in the unknown-message `STATUSTEXT`
 
@@ -1589,6 +1560,64 @@ prerequisite for `verify.md`'s coverage section to mean anything for `mavlink-li
 is the one capability with a live spec and a real suite. And the failure mode it prevents
 is the one already demonstrated: every part of the false claim was checkable at any time
 by anyone, for months, and nothing was positioned to look.
+
+### The boot `STATUSTEXT` cannot be observed over USB after a reset
+
+**Status:** proposed
+**Scope:** `src/mavlink.cpp`, `test/test_hil/`
+
+`sendBootStatusText()` and the clock report beside it are emitted once, from the top of
+`TaskMavlink`. Over the USB CDC port that makes them unobservable across any reset: the
+port drops when the board resets (measured — the host's handle fails with `Errno 6,
+Device not configured` within 100 ms of the reboot command being acknowledged), and by the
+time it has re-enumerated and a ground station has reopened it, the texts have already
+been written into a port with no host attached, where they are discarded. The firmware is
+right not to wait — *[No task waits for the link port to become ready]* is a requirement —
+so the text is simply gone.
+
+It does not matter for the reset reason, because that also rides `custom_mode` in every
+heartbeat, continuously, which is exactly why `add-degraded-mode` put it there. It does
+matter for anything whose only channel is the boot text. Over the **UART** link there is
+no such window, since a USB-TTL adapter stays enumerated on the host while the board
+resets, which is why this went unnoticed.
+
+Found while trying to close `improve-clock-synchronisation`'s reset-survival measurement,
+which needs the boot report and therefore cannot be closed over USB. That change accepted
+the limitation rather than working around it (its tasks 1.2 and 5.5 are marked as needing
+an adapter on D0/D1), so the `survived` clock source ships unexecuted until either an
+adapter is attached or this is fixed.
+
+To decide: whether to re-emit the boot texts a bounded number of times early after boot
+(cheap, no new surface, but ad hoc), to answer them on request (needs a command that does
+not exist), or to accept that boot-time facts need the UART and say so in
+`test/test_hil/README.md`.
+
+### Select the RA4M1 sub-clock for the internal RTC, if the crystal is populated
+
+**Status:** proposed
+**Scope:** `platformio.ini`, `ARCHITECTURE.md`
+
+The Arduino core leaves `RTC_CLOCK_SOURCE` at `RTC_CLOCK_SOURCE_LOCO` — an on-chip RC
+oscillator — behind an `#ifndef` (`libraries/RTC/src/RTC.cpp`), and every variant's BSP
+config declares `BSP_CLOCK_CFG_SUBCLOCK_POPULATED (1)`. `-D RTC_CLOCK_SOURCE=RTC_CLOCK_SOURCE_SUBCLK`
+in `build_flags` would therefore select the 32.768 kHz crystal instead, making the internal
+RTC a far better keeper than it is today and changing which clock deserves to win when the
+two disagree (`ARCHITECTURE.md` §5.3).
+
+**One half is measured, one is not.** `improve-clock-synchronisation` task 1.4 confirmed
+that project `build_flags` **do** reach `RTC.cpp`'s compilation unit — its line carries
+`-DWDT_TIMEOUT_MS=1398` and `-DconfigTOTAL_HEAP_SIZE=0x200` — so the override would be
+honoured. What is **not** established is whether the UNO R4 Minima physically populates
+the crystal. The BSP declaring it is not the schematic having it, and selecting `SUBCLK`
+without the part gives a **stopped** clock, which is a worse failure than a drifting one.
+Answer that from the schematic before touching the flag.
+
+The drift figure that would justify it is also still missing:
+`improve-clock-synchronisation` left a Unity case
+(`test_report_internal_versus_ds1307_drift`) that prints both clocks, meant to be run
+twice at least an hour apart, and that measurement was not taken. Until it is, the 6-hour
+DS1307 re-seed interval in `TaskMavlink` is a conservative placeholder, marked as such in
+the code, not a measured value.
 
 
 ## Done

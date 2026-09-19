@@ -25,7 +25,11 @@ SystemTime systemTime = SystemTime();
 
 // Set once in setup() and read by src/mavlink.cpp for the heartbeat and the boot
 // STATUSTEXT. Not task state: these describe what setup() found, once, at boot.
-bool systemTimeAvailable = false;
+//
+// There is no systemTimeAvailable here any more. It was written once and read
+// nowhere, which is what an absent notion of clock provenance looked like; what
+// setup() found about the clock now lives in SystemTime itself, as a source
+// src/mavlink.cpp asks for, with four values instead of a boolean's two.
 bool sdCardAvailable = false;
 bool reducedConfiguration = false;
 
@@ -365,7 +369,10 @@ void setup()
   LINK_UART.begin(LINK_BAUD);
   Recovery::setPhase(Recovery::BootPhase::LinkDone);
 
-  systemTimeAvailable = systemTime.begin();
+  // Return value intentionally unused: what was found is systemTime.source(),
+  // which src/mavlink.cpp reports at boot. A missing clock degrades rather than
+  // halting, per specs/fault-recovery/spec.md.
+  (void)systemTime.begin();
   Recovery::setPhase(Recovery::BootPhase::ClockDone);
 
   sdCardAvailable = SD.begin(9);
