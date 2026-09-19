@@ -30,7 +30,19 @@ struct InboundMsg {
 struct LinkPort {
     int    (*available)();
     int    (*read)();
-    size_t (*write)(const uint8_t *buffer, size_t size);
+
+    // uint8_t *, deliberately not const uint8_t *. UART declares
+    // write(uint8_t *, size_t) as NON-const, which hides rather than overrides
+    // Print's virtual const version -- so a const pointer cannot bind to it and
+    // resolves to Print::write(const uint8_t *, size_t), the per-byte fallback
+    // this whole indirection exists to avoid (include/Link.h). Verified in the
+    // disassembly, not assumed: with a const parameter the wrapper tail-called
+    // arduino::Print::write; with this one it tail-calls
+    // UART::write(unsigned char*, unsigned int). _SerialUSB's override IS
+    // const, so it takes a mutable pointer happily either way. The caller's
+    // buffer is a plain local array, so nothing is lost by not marking it
+    // const.
+    size_t (*write)(uint8_t *buffer, size_t size);
 
     // How many bytes the port will accept right now without blocking. The USB
     // CDC implementation busy-waits without yielding when its buffer is full

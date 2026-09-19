@@ -2,6 +2,13 @@
 #ifndef BOREDOMOS_LINK_H
 #define BOREDOMOS_LINK_H
 
+// For MAVLINK_COMM_0/1, which the channel macros below expand to. A macro does
+// not need its expansion defined until it is used, so leaving this out happened
+// to build -- every translation unit that expands LINK_CHAN_* already included
+// MAVLink.h first. That is a property of today's include order, not of this
+// header, and it would break silently the first time it stopped holding.
+#include <MAVLink.h>
+
 // The two ports carrying MAVLink, and the UART's speed. Both are named once
 // here and nowhere else, so a build can move the UART link without touching
 // protocol code or a task body -- see specs/mavlink-link/spec.md, "Each

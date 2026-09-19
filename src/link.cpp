@@ -19,7 +19,7 @@ extern QueueHandle_t linkReadQueue;
 // silently cost.
 static int    uartAvailable()                              { return LINK_UART.available(); }
 static int    uartRead()                                   { return LINK_UART.read(); }
-static size_t uartWrite(const uint8_t *b, size_t n)        { return LINK_UART.write(b, n); }
+static size_t uartWrite(uint8_t *b, size_t n)              { return LINK_UART.write(b, n); }
 
 // A UART's write busy-waits for as long as the baud rate takes and then
 // returns, so there is nothing to guard against: it always accepts the frame.
@@ -29,7 +29,7 @@ static int    uartAvailableForWrite()                      { return INT_MAX; }
 
 static int    usbAvailable()                               { return LINK_USB.available(); }
 static int    usbRead()                                    { return LINK_USB.read(); }
-static size_t usbWrite(const uint8_t *b, size_t n)         { return LINK_USB.write(b, n); }
+static size_t usbWrite(uint8_t *b, size_t n)               { return LINK_USB.write(b, n); }
 static int    usbAvailableForWrite()                       { return LINK_USB.availableForWrite(); }
 
 // Filled by linkPortsInit() before the scheduler starts, then read-only.
@@ -107,6 +107,14 @@ static constexpr int kMaxBytesPerPass = 128;
             // the outbound queue fills, so this is the existing failure mode
             // rather than a new one (design.md, Decision 6).
             if (port.availableForWrite() < (int)len) {
+                // Yield before going back for the next item. Dropping is
+                // already the degraded path, so a tick costs nothing there --
+                // and without it this loop's only bound is the producer's rate,
+                // which is an argument about TaskMavlink rather than a property
+                // of this task. vTaskDelay keeps the guarantee local: a stalled
+                // host cannot keep a HIGH-priority writer runnable and starve
+                // Logger, SdWrite and the idle hook that refreshes the watchdog.
+                vTaskDelay(1);
                 continue;
             }
 
