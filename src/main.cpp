@@ -134,9 +134,10 @@ StaticTask_t sdWriteTcb;
 // Queue structures and item storage. sdWriteQueue still carries a heap pointer,
 // so its storage is depth x sizeof(pointer) and the FreeRTOS heap backs the
 // items themselves, sized in platformio.ini against the worst case computed in
-// that queue's own design. serialReadQueue and serialWriteQueue carry their
-// items by value instead (queue-mavlink-messages-by-value), so their storage
-// is depth x sizeof(item) directly and neither touches the heap at all.
+// that queue's own design. linkReadQueue and the two per-port write queues
+// carry their items by value instead (queue-mavlink-messages-by-value), so
+// their storage is depth x sizeof(item) directly and none of them touches the
+// heap at all.
 StaticQueue_t sdWriteQueueBuffer;
 uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
 
@@ -149,8 +150,9 @@ uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 // battery status and a TIMESYNC reply (ARCHITECTURE.md's queue table) -- and
 // a pass where all four coincide is not excluded by anything in the
 // schedule. Re-derived, not assumed, per CLAUDE.md's rule on changing a
-// queue's backing. This depth and the housekeeping cycle length both follow
-// the task count in this file -- a new task needs both re-checked.
+// queue's backing. Each port gets its own queue at this depth. This depth and
+// the housekeeping cycle length both follow the task count in this file -- a
+// new task needs both re-checked.
 StaticQueue_t uartWriteQueueBuffer;
 uint8_t uartWriteQueueStorage[5 * sizeof(LinkMsg)];
 

@@ -80,6 +80,7 @@ def test_both_ports_emit_the_same_cadences(link):
     try:
         seen_a = _collect(a, 12.0)
         seen_b = _collect(b, 12.0)
+        reduced = any(m.system_status == 6 for m in seen_a.get("HEARTBEAT", []))
     finally:
         a.close()
         b.close()
@@ -91,6 +92,17 @@ def test_both_ports_emit_the_same_cadences(link):
             f"{name} saw {len(seen['HEARTBEAT'])} HEARTBEATs in 12 s, expected ~12 "
             "(1 Hz)"
         )
+        # The full set, not just the 1 Hz pair: a firmware that emitted
+        # BATTERY_STATUS on one port only would otherwise pass this case, which
+        # is exactly the asymmetry it exists to reject. Skipped when the board
+        # is in the reduced configuration, where the schedule withholds it by
+        # design (specs/mavlink-link/spec.md).
+        if not reduced:
+            assert "BATTERY_STATUS" in seen, f"no BATTERY_STATUS on {name} in 12 s"
+            assert len(seen["BATTERY_STATUS"]) >= 4, (
+                f"{name} saw {len(seen['BATTERY_STATUS'])} BATTERY_STATUS in 12 s, "
+                "expected ~6 (0.5 Hz)"
+            )
 
 
 def test_each_port_has_its_own_sequence(link):
@@ -111,13 +123,21 @@ def test_each_port_has_its_own_sequence(link):
 
     for name, seq in (("USB", seq_a), ("UART", seq_b)):
         assert len(seq) >= 4, f"{name}: only {len(seq)} HEARTBEATs, need 4 to compare"
-        # HEARTBEAT is one of four entries on each port's schedule, so its own
-        # seq advances by more than 1 between sightings -- but the step must be
-        # small and constant. A shared counter makes it roughly double.
+        # Each port's own schedule emits 2.5 frames a second -- HEARTBEAT and
+        # SYSTEM_TIME at 1 Hz, BATTERY_STATUS at 0.5 Hz -- so between two
+        # consecutive HEARTBEATs on one port exactly 2 or 3 frames leave it.
+        # With a shared current_tx_seq both ports' traffic advances the same
+        # counter and the step becomes 5 or 6.
+        #
+        # The bound has to sit below that or the case cannot fail for the
+        # reason it exists: an earlier version used <= 6, which the shared
+        # counter passes. 4 leaves one frame of slack (an unsolicited
+        # STATUSTEXT, say) while still rejecting 5.
         steps = [(y - x) % 256 for x, y in zip(seq, seq[1:])]
-        assert max(steps) <= 6, (
-            f"{name} HEARTBEAT sequence steps {steps}: too large for a per-port "
-            "counter, which is what a shared current_tx_seq looks like"
+        assert max(steps) <= 4, (
+            f"{name} HEARTBEAT sequence steps {steps}: a per-port counter steps "
+            "2-3, a counter shared with the other port steps 5-6. This is what a "
+            "missed mavlink_msg_*_pack_chan conversion looks like."
         )
 
 
@@ -129,8 +149,11 @@ def test_reply_goes_out_the_port_it_arrived_on(link):
         _collect(a, 1.0)
         _collect(b, 1.0)
 
-        # Ask on USB only.
-        a.mav.timesync_send(0, int(time.time() * 1e9), 1, 1)
+        # Ask on USB only. timesync_send takes (tc1, ts1) in this dialect --
+        # the same two-argument form check_timesync.py uses. Passing the
+        # target system and component positionally raises TypeError before any
+        # assertion runs.
+        a.mav.timesync_send(0, int(time.time() * 1e9))
 
         got_a = _collect(a, 5.0, want=["TIMESYNC"])
         got_b = _collect(b, 5.0, want=["TIMESYNC"])

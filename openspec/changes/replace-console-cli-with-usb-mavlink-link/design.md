@@ -45,7 +45,7 @@ constraints, not the motivation:
                                  +--> [ linkReadQueue ] ----+
                                  |    8 x { chan, mavlink_message_t }
   USB     --> UsbRead(&port1) ---+              |
-              96 w, HIGH                        v
+              128 w, HIGH                       v
                                         +---------------+
                                         |    Mavlink    | 384 w, HIGH
                                         | one instance, |
@@ -81,7 +81,7 @@ depth; accepted for the same reason as the trade-off above.
 | Task | Stack | Priority | Why |
 |---|---|---|---|
 | `UartRead` | 96 w | `HIGHEST` | No flow control on D0/D1: undrained bytes are **lost** |
-| `UsbRead` | 96 w | `HIGH` | CDC NAKs when full, so it can only be **delayed** |
+| `UsbRead` | 128 w | `HIGH` | CDC NAKs when full, so it can only be **delayed**; 96 measured too thin (see tasks 9.6) |
 | `UartWrite` | 384 w | `HIGH` | Busy-waits, bounded by baud (`ARCHITECTURE.md` §3) |
 | `UsbWrite` | 384 w | `HIGH` | Safe at `HIGH` only with Decision 6's guard |
 | `Mavlink` | 384 w | `HIGH` | One instance, both channels |
@@ -193,10 +193,19 @@ against an inbound stream of a few frames per second.
 ### 9. `MAVLINK_COMM_NUM_BUFFERS` goes from 1 to 2
 
 `platformio.ini:76-84` already anticipated this change and instructed it to raise
-the value and carry the cost. Measured with `nm` on the current image:
-`m_mavlink_buffer` is 291 B (one channel) and `m_mavlink_status` appears twice at
-36 B, so a second channel costs 291 + 72 = **363 B**, not the ~315 B that comment
-estimated from one status copy. The comment is corrected in the same commit.
+the value and carry the cost. Measured with `nm` on both images:
+
+```
+  one channel   m_mavlink_buffer 291  +  m_mavlink_status 24 x2  =  339 B
+  two channels  m_mavlink_buffer 582  +  m_mavlink_status 48 x2  =  678 B
+  delta                                                          = +339 B
+```
+
+**+339 B.** Three wrong figures preceded this one and all three are corrected
+here: the comment's own ~315 B estimate, an earlier draft of this design that
+said 363 B (which is the *total before*, not the delta), and `proposal.md`'s
++303 B. Copilot's review caught that they could not all be true; the number
+above is the one the linker reports.
 
 ### 10. Task naming
 
@@ -273,11 +282,13 @@ the double-tap RESET DFU path, which is what recovered it before.
 
 ## Open Questions
 
-- **The four stack sizes.** 96 w and 384 w are carried forward because the new
-  instances do exactly what the existing ones do, and Decision 7 keeps the stack
-  profile unchanged. Only the board can confirm it. This is deferrable because a
-  wrong answer changes a constant, not the specs, the approach or the task
-  breakdown.
+- ~~**The four stack sizes.**~~ **Answered on the board** (tasks 9.6/9.7), so
+  this is no longer open. `UartWrite`, `UsbWrite` and `Mavlink` held at 384 w.
+  `UsbRead` needed **128** rather than the 96 carried forward, because
+  `_SerialUSB::available()`/`read()` reach TinyUSB through deeper call frames
+  than the UART's. `TaskLogger` — not one of the four, and not predicted —
+  needed **160**, because this change grew `sizeof(Data)` and it builds one on
+  its stack.
 - **Whether `UsbWrite` wants `HIGH` or something lower once measured.** Decision 6
   makes `HIGH` safe; whether the secondary link deserves parity with the primary
   under sustained load on both ports is an observation to make on the bench, not a

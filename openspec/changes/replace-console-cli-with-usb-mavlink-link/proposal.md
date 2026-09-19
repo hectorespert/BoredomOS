@@ -81,10 +81,10 @@ committed 27336 B of 32768, **headroom 5432 B**, floor 1024):
   + linkReadQueue item gains the chan tag  ~+104        +8 (2336 vs 2328;
                                                       sizeof(InboundMsg)
                                                       is 292, not ~304)
-  + MAVLINK_COMM_NUM_BUFFERS 1 -> 2         +363      +303 (m_mavlink_buffer
+  + MAVLINK_COMM_NUM_BUFFERS 1 -> 2         +363      +339 (m_mavlink_buffer
                                                       291->582, and the two
                                                       m_mavlink_status copies
-                                                      36->48 each)
+                                                      24->48 each)
   - TaskCli deleted (128 w stack + TCB)     -612
                                           -------    ----------------
                                            ~2640      +2132 B actual
@@ -97,14 +97,16 @@ reported committed 27336 B / headroom 5432 B; after it, **committed 29852 B of
 board (`UsbRead` 96 -> 128 w, `TaskLogger` 96 -> 160 w; see tasks 9.6 and 9.7).
 The structural part came to +2132 B, about 500 B under the estimate: the inbound item's alignment
 padding came to 8 B rather than the ~104 B assumed, and the second MAVLink
-channel to 303 B rather than 363 B.
+channel to 339 B rather than 363 B.
 
 `platformio.ini:76-84` already anticipated this change and told it to carry
-"~315 bytes" for the channel. That estimate counted one `m_mavlink_status` copy
-where the linker emits two, and assumed both would scale linearly; the measured
-303 B is close to it by coincidence rather than by the same arithmetic. The
-comment and the `-D MAVLINK_COMM_NUM_BUFFERS` value are both updated in this
-change.
+"~315 bytes" for the channel. The measured delta is **339 B** — 291 B of
+`m_mavlink_buffer` plus 24 B in each of the two `m_mavlink_status` copies the
+linker emits. The comment's estimate was closer than two figures this change
+itself produced before Copilot's review flagged them as mutually inconsistent
+(+303 B here, +363 B in `design.md`, where 363 is the total before rather than
+the delta). All three now read 339. The comment and the
+`-D MAVLINK_COMM_NUM_BUFFERS` value are both updated.
 
 **The FreeRTOS heap is re-derived, not merely checked**, and doing so found a
 pre-existing error. `include/Data.h` goes from five per-task stack fields to

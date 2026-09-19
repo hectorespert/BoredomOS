@@ -4,8 +4,10 @@
 
 // Seven per-task marks, not five: replace-console-cli-with-usb-mavlink-link
 // split the link tasks per port and deleted the CLI (which was never recorded
-// here). This takes sizeof(Data) from 56 B to 64 B, which re-derives
-// sdWriteQueue's heap backing -- see ARCHITECTURE.md section 4.
+// here). Measured with a compile-time probe rather than counted by hand:
+// sizeof(Tasks) is 28 B and sizeof(Data) goes from 36 B to 44 B. That
+// re-derives sdWriteQueue's heap backing -- see ARCHITECTURE.md section 4,
+// whose table claimed 56 B and had been wrong before this change too.
 //
 // It also makes a third record shape on a card that may already hold two, and
 // the second with seven fields, so the field names rather than the count are

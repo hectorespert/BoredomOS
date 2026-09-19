@@ -22,7 +22,10 @@ consequence of one and the numbering references them.
   correct the comment at `platformio.ini:76-84`, which estimates the cost at
   ~315 B — verify with `nm -S .pio/build/uno_r4_minima/firmware.elf | grep
   m_mavlink` that `m_mavlink_buffer` is now 582 B and record the true delta
-  (Decision 9).
+  (Decision 9). **Measured: +339 B** (buffer 291 -> 582, plus two
+  `m_mavlink_status` copies going 24 -> 48 each). Three different wrong figures
+  preceded this one across `proposal.md`, `design.md` and `platformio.ini`;
+  Copilot's review caught the inconsistency and all three now read 339.
 
 ## 2. The port abstraction
 
@@ -115,8 +118,9 @@ consequence of one and the numbering references them.
   cited it by title, at this change id. **Done when this change was proposed**, not
   during implementation: `CLAUDE.md` requires the entry to go in the same commit
   that creates the change, so leaving it for the apply phase would have described
-  the same work twice in the meantime. The comment's ~315 B estimate was corrected
-  to the measured 363 B at the same time.
+  the same work twice in the meantime. The comment's ~315 B estimate was replaced
+  at the same time — first with 363 B, which was wrong, and finally with the
+  measured 339 B (see 1.3).
 
 ## 8. What CI can close
 
@@ -228,8 +232,12 @@ consequence of one and the numbering references them.
 
 - [x] 10.1 Delete `test/test_hil/check_cli.py` — verify `run.py --list` no longer
   offers its two cases and the suite count drops accordingly.
-- [x] 10.2 Invert `check_silence.py` so it asserts USB **does** carry MAVLink —
-  verify it fails against a pre-change firmware and passes against this one.
+- [x] 10.2 Replace `check_silence.py`, which asserted USB carries no MAVLink,
+  with `check_usb_link.py`, which asserts it does. **Deleted and added, not
+  edited in place** — the earlier wording here said "inverted", which described
+  a file operation that did not happen (Copilot review). `check_usb_link.py`
+  carries two cases: `test_usb_carries_mavlink` and `test_usb_carries_no_text`.
+  Both pass on the board.
 - [x] 10.3 Make the suite target USB by default with an override selecting D0/D1.
   **Deviation from the task as written**: no `HIL_PORT=uart` was added, because
   `hil.py`'s `find_port()` already prefers the board's own Arduino CDC device and

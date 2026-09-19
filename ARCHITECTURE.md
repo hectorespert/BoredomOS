@@ -37,10 +37,10 @@ flowchart LR
 
         UR["UartRead<br/>HIGHEST · 96 w"]
         UW["UartWrite<br/>HIGH · 384 w"]
-        BR["UsbRead<br/>HIGH · 96 w"]
+        BR["UsbRead<br/>HIGH · 128 w"]
         BW["UsbWrite<br/>HIGH · 384 w"]
         MV["Mavlink<br/>HIGH · 384 w"]
-        LG["TaskLogger<br/>LOW · 96 w"]
+        LG["TaskLogger<br/>LOW · 160 w"]
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
 
         RQ[["linkReadQueue<br/>8 × {chan, mavlink_message_t}"]]
