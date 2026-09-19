@@ -46,11 +46,13 @@ def test_timesync_answers_in_time_since_boot(link):
     assert reply is not None, "TIMESYNC was not answered"
 
     host_wall_ns = int(time.time() * 1e9)
-    # A year of uptime is ~3.2e16 ns, still an order of magnitude under the
-    # current UNIX epoch in ns, so this discriminates the two bases without
-    # assuming how long the board has been running.
-    one_year_ns = 365 * 24 * 60 * 60 * 10**9
-    assert reply.tc1 < one_year_ns, (
+    # Host-relative, so no uptime limit is implied. A wall-clock answer is within
+    # a hair of host_wall_ns; time since boot would have to reach half the UNIX
+    # epoch -- around 28 years -- to trip this, which is not a mission limit any
+    # more than the hardware's own lifetime is. An earlier version of this check
+    # used a fixed one-year constant, which Copilot's review pointed out was
+    # exactly the uptime assumption the comment claimed not to make.
+    assert reply.tc1 < host_wall_ns // 2, (
         f"tc1 looks like wall clock, not time since boot: {reply.tc1} "
         f"(host wall clock is {host_wall_ns})"
     )

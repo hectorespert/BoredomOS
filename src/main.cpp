@@ -148,20 +148,31 @@ uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
 StaticQueue_t linkReadQueueBuffer;
 uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 
-// Depth 5, not 4: a fourth independently-clocked TaskMavlink schedule entry
-// (housekeeping, openspec/changes/add-mavlink-housekeeping-telemetry) can be
-// due on the same pass as the three that justified depth 4 -- heartbeat,
-// battery status and a TIMESYNC reply (ARCHITECTURE.md's queue table) -- and
-// a pass where all four coincide is not excluded by anything in the
-// schedule. Re-derived, not assumed, per CLAUDE.md's rule on changing a
-// queue's backing. Each port gets its own queue at this depth. This depth and
-// the housekeeping cycle length both follow the task count in this file -- a
-// new task needs both re-checked.
+// Depth 6, re-derived for improve-clock-synchronisation rather than carried
+// over. The five that came before: heartbeat, SYSTEM_TIME, battery status and
+// housekeeping -- four independently-clocked TaskMavlink schedule entries that
+// nothing in the schedule stops from coinciding on one pass -- plus a TIMESYNC
+// reply, which an inbound request can make due at any moment.
+//
+// The sixth is the clock report. TaskMavlink now posts TWO texts back to back at
+// boot (the reset reason and the clock's origin) before its schedule has fired
+// anything, and one more later whenever the origin changes. At depth 5 a clock
+// report landing on a pass where all four periodic entries are due, with a
+// TIMESYNC request arriving, made the sixth item a silent drop -- a lost
+// STATUSTEXT at best, a lost telemetry frame at worst, which would break
+// specs/mavlink-link/spec.md's cadence guarantee. Found by Copilot's review of
+// that change.
+//
+// Costs 2 * sizeof(LinkMsg) = 128 B of .bss across the two ports, against the
+// headroom scripts/ram_budget.py prints. Re-derived, not assumed, per CLAUDE.md's
+// rule on changing a queue's backing. Each port gets its own queue at this depth.
+// This depth and the housekeeping cycle length both follow the task count in this
+// file -- a new task needs both re-checked.
 StaticQueue_t uartWriteQueueBuffer;
-uint8_t uartWriteQueueStorage[5 * sizeof(LinkMsg)];
+uint8_t uartWriteQueueStorage[6 * sizeof(LinkMsg)];
 
 StaticQueue_t usbWriteQueueBuffer;
-uint8_t usbWriteQueueStorage[5 * sizeof(LinkMsg)];
+uint8_t usbWriteQueueStorage[6 * sizeof(LinkMsg)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
@@ -384,10 +395,10 @@ void setup()
   linkReadQueue = xQueueCreateStatic(8, sizeof(InboundMsg), linkReadQueueStorage, &linkReadQueueBuffer);
   configASSERT(linkReadQueue != NULL);
 
-  uartWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
+  uartWriteQueue = xQueueCreateStatic(6, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
   configASSERT(uartWriteQueue != NULL);
 
-  usbWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
+  usbWriteQueue = xQueueCreateStatic(6, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
   configASSERT(usbWriteQueue != NULL);
 
   // Binds each descriptor to its concrete port and its write queue. Must run

@@ -174,8 +174,10 @@ cheaper here than after the code exists (design.md — Migration Plan).
 
 ### Measured on the board, with the change in place
 
-- **RAM**: committed 29856 B of 32768 (91.1 %), **headroom 2912 B** — 4 bytes against the
-  2916 B baseline. Re-read from a fresh link after the `R64CNT` fix below; unchanged. `sizeof(LinkMsg)` is unchanged at 64 B, which the 4-byte delta confirms
+- **RAM**: committed 29984 B of 32768 (91.5 %), **headroom 2784 B** against the 2916 B
+  baseline. 4 of those bytes are the clock's own state; the other 128 are the two per-port
+  write queues going from depth 5 to 6, which Copilot's review showed was needed — the
+  figure matches that derivation exactly, and the floor is 1024. `sizeof(LinkMsg)` is unchanged at 64 B, which the 4-byte delta confirms
   on its own: had the union grown, the two link queues' storage would have cost 80 B more.
 - **HIL**: 33 cases, 25 passed, 8 skipped (four need an adapter, two need the reduced
   configuration set up by hand, one needs a RESET press, one is the gated restart case).
@@ -186,7 +188,8 @@ cheaper here than after the code exists (design.md — Migration Plan).
   `UartRead` 41/96. Heap free 496 B, minimum ever 440 B
   of the 512 B `configTOTAL_HEAP_SIZE`. `Mavlink` keeps 38 % of its stack; the tightest is
   `SdWrite`, which this change does not touch.
-- **Unity**: 12 cases, all passing, including the six added here and two reporting cases.
+- **Unity**: 12 cases, all passing, including the seven added here, two of them reporting
+  cases rather than assertions about behaviour.
 - **`R64CNT` is a 7-bit counter at 128 Hz**, measured rather than deduced:
   `lowest=0 highest=127 transitions=260` over two seconds. The first implementation here
   masked six bits and scaled by 15625 µs, taking the register's "64-Hz Counter" name at
@@ -200,6 +203,13 @@ cheaper here than after the code exists (design.md — Migration Plan).
   Zero is expected at this point — `begin()` had just seeded the internal clock from the
   DS1307 — so this reading is the t0 anchor, not the drift. The second reading, at least
   an hour later, is what produces a figure.
+- **Copilot's review**: 7 findings plus several in its per-file table, all addressed — two
+  were regressions this change had introduced (every accepted `SYSTEM_TIME` rewriting the
+  DS1307 over I2C, and the write queues being one item too shallow for the new status
+  text). One overstated its impact: it read the epoch-zero guard as stalling elapsed time
+  permanently in the no-clock configuration, where the stall lasted one second; the guard
+  was wrong anyway, since 0 was overloaded as both a failed read and a valid reading, and
+  is now a `bool` from the read itself.
 - **`pio check`**: 6 LOW findings, 0 MEDIUM, 0 HIGH, **none of them attributable to this
   change** — they are the pre-existing `src/logger.cpp` casts and unused labels,
   `src/mavlink.cpp`'s `voltages_ext` and one in `lib/Battery`. The numeric casts added here
@@ -241,7 +251,7 @@ cheaper here than after the code exists (design.md — Migration Plan).
   `pio test -e libs` twice — the first run failed on the `R64CNT` mask and the second
   passed 12/12 after the fix; `pio test` (HIL) re-run afterwards, which both reflashed the
   flight firmware and re-validated 25 of 33 cases against the corrected build. **The board
-  is left running the flight firmware.** Nine rows remain open and each says why in its own
+  is left running the flight firmware.** Seven rows remain open and each says why in its own
   line: 1.2 and 5.5 need a USB-TTL adapter on D0/D1; 3.4 and 5.4 cannot be closed on this
   assembly at all; 1.3 needs its second reading an hour after the first; 3.5 and 3.6 are
   each half-closed, waiting on 5.5 and 1.3 respectively.

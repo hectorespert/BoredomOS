@@ -558,7 +558,15 @@ struct ScheduleEntry {
         // than needing a flag here.
         if ((now - lastReseedMs) >= kClockReseedIntervalMs) {
             lastReseedMs += kClockReseedIntervalMs;
-            systemTime.reseedFromDs1307();
+            SystemTime::Source beforeReseed = systemTime.source();
+            // Reports a change like any other: a re-seed can promote `survived`
+            // to `ds1307`, and the ground has no other way to learn that the
+            // clock it is reading now has a different provenance. Bounded by the
+            // interval, not by a peer, so it cannot flood. Copilot's review of
+            // this change noted the schedule was silent about it.
+            if (systemTime.reseedFromDs1307() && systemTime.source() != beforeReseed) {
+                sendClockStatusText();
+            }
         }
 
         uint32_t waitMs = UINT32_MAX;

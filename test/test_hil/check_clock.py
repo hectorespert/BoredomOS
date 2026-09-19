@@ -135,6 +135,14 @@ def test_the_clock_survives_a_commanded_restart(link):
             "disruptive case: set HIL_CLOCK_RESET=1 to let it reboot the board"
         )
 
+    if link.is_usb_cdc:
+        raise NoLinkError(
+            "the boot report cannot be observed over USB CDC: the port drops when "
+            "the board resets and the firmware, which does not wait for a host, "
+            "writes the text into a port nobody is holding. Point HIL_PORT at a "
+            "USB-TTL adapter on D0/D1 to run this"
+        )
+
     from pymavlink import mavutil
 
     host = int(time.time())
@@ -153,7 +161,11 @@ def test_the_clock_survives_a_commanded_restart(link):
     ack = link.mav.recv_match(type="COMMAND_ACK", blocking=True, timeout=5.0)
     assert ack is not None, "the reboot command was not acknowledged"
 
-    # The CDC port re-enumerates, so reconnect rather than reusing the handle.
+    # Reconnect rather than reusing the handle, and hand the new connection back
+    # to the SHARED link object: run.py passes one Link to every case and closes it
+    # after the loop, so leaving the reconnection local here would leave every
+    # later case talking to a dead handle. Copilot's review of this change caught
+    # that.
     time.sleep(3.0)
     from hil import Link
 
@@ -162,10 +174,15 @@ def test_the_clock_survives_a_commanded_restart(link):
     except NoLinkError as exc:
         raise NoLinkError(f"the board did not come back after the reboot: {exc}") from exc
 
+    link.mav = fresh.mav
+    link.port = fresh.port
+    link.baud = fresh.baud
+    link._sample = None  # pylint: disable=protected-access
+
     text = None
     started = time.time()
     while time.time() - started < 20.0:
-        msg = fresh.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=2.0)
+        msg = link.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=2.0)
         if msg:
             body = msg.text.decode() if isinstance(msg.text, bytes) else msg.text
             if body.startswith("Clock:"):
@@ -177,7 +194,7 @@ def test_the_clock_survives_a_commanded_restart(link):
         f"the internal RTC did not keep running across the restart: {text!r}"
     )
 
-    after = _read_unix_time(fresh)
+    after = _read_unix_time(link)
     assert after != 0, "the clock came back as unknown"
     assert after >= before - 2, f"time went backwards across the restart: {before} -> {after}"
 

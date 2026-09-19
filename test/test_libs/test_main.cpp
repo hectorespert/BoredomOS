@@ -151,6 +151,11 @@ void test_an_accepted_time_reaches_the_ds1307(void) {
 // register's misleading name. A first attempt masked six bits, which made the
 // fraction wrap twice a second; this is what would have shown that immediately.
 void test_report_r64cnt_range(void) {
+    // R64CNT only advances once the RTC has been opened, and setUp() rebuilds the
+    // object without calling begin(). Relying on an earlier case having opened it
+    // makes this one order-dependent, so it opens it itself.
+    TEST_ASSERT_TRUE(systemTime.begin());
+
     uint8_t lowest = 0xFF;
     uint8_t highest = 0;
     uint32_t transitions = 0;

@@ -44,8 +44,8 @@ flowchart LR
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
 
         RQ[["linkReadQueue<br/>8 × {chan, mavlink_message_t}"]]
-        UWQ[["uartWriteQueue<br/>5 × LinkMsg"]]
-        BWQ[["usbWriteQueue<br/>5 × LinkMsg"]]
+        UWQ[["uartWriteQueue<br/>6 × LinkMsg"]]
+        BWQ[["usbWriteQueue<br/>6 × LinkMsg"]]
         DQ[["sdWriteQueue<br/>4 × Data*"]]
 
         BAT["Battery<br/>(lib)"]
@@ -258,7 +258,9 @@ transport (`src/link.cpp`) now does the final packing step.
 
 Their storage is `depth x sizeof(item)`, entirely in `.bss`, and none of them
 touches the FreeRTOS heap: `linkReadQueueStorage` is 8 x 292 = 2336 B, and each of
-`uartWriteQueueStorage` and `usbWriteQueueStorage` is 5 x 64 = 320 B. There is no producer/consumer margin
+`uartWriteQueueStorage` and `usbWriteQueueStorage` is 6 x 64 = 384 B — depth 6 since
+`improve-clock-synchronisation` added a second boot text and an event-driven one, whose
+derivation is in `src/main.cpp` beside the storage. There is no producer/consumer margin
 to add on top — with a by-value queue, an item "held before send" or "held after
 receive" is simply a local on that task's own stack, not a shared block, so the
 depth alone is what the storage needs.
@@ -488,8 +490,10 @@ autopilot coupling the two cannot. Only `TaskMavlink` reads elapsed time today, 
 is also its only writer — before a second task reads it, the clock-and-epoch update must
 be made indivisible.
 
-The clock is settable from the ground: inbound `SYSTEM_TIME` and `TIMESYNC` in
-`TaskMavlink` are what drive `setUnixTime()`, and `TIMESYNC` is answered with elapsed
+The clock is settable from the ground by inbound `SYSTEM_TIME` in `TaskMavlink`, which is
+the only message that drives `setUnixTime()` — `TIMESYNC` is answered, never acted on, and
+the claim here that it set the clock too was wrong before this section was rewritten. It is
+answered with elapsed
 time since boot in nanoseconds, captured when the request arrives rather than when the
 reply is packed. With no origin, `SYSTEM_TIME` carries `0` for the UNIX field — the
 protocol's "not known" — rather than a date in 1970. Every SD record carries the

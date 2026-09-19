@@ -41,7 +41,11 @@ SystemTime::SystemTime()
 
 bool SystemTime::isPlausible(time_t unix_time)
 {
-    return unix_time >= kOldestAcceptable;
+    // Upper bound as well as the floor: time_t is 8 bytes here and the boot epoch
+    // is stored in 32 bits, so a value past 2106 would be accepted and then
+    // silently truncated on the way in. Copilot's review of this change caught
+    // that the range was open at the top.
+    return unix_time >= kOldestAcceptable && (uint64_t)unix_time <= 0xFFFFFFFFull;
 }
 
 bool SystemTime::begin()
@@ -88,13 +92,20 @@ bool SystemTime::begin()
     return _source != Source::None;
 }
 
-time_t SystemTime::getUnixTime()
+bool SystemTime::readSeconds(time_t &out)
 {
     RTCTime currentTime;
-    if (RTC.getTime(currentTime)) {
-        return currentTime.getUnixTime();
+    if (!RTC.getTime(currentTime)) {
+        return false;
     }
-    return 0;
+    out = currentTime.getUnixTime();
+    return true;
+}
+
+time_t SystemTime::getUnixTime()
+{
+    time_t seconds = 0;
+    return readSeconds(seconds) ? seconds : 0;
 }
 
 uint64_t SystemTime::getUnixTimeUsec()
@@ -106,13 +117,21 @@ uint64_t SystemTime::getUnixTimeUsec()
     // that window. Bounded, not a spin: the second moves once per 128 counts,
     // so a second attempt already succeeds in practice and the cap only guards
     // against a clock that is not advancing sanely.
+    // A failed read is reported as 0, but a SUCCESSFUL read of 0 is a real
+    // reading: with no origin the internal RTC starts at the epoch and counts
+    // from there, so it genuinely reads 0 for the first second of that
+    // configuration. Keying off the value would make elapsed time stall for that
+    // second, so the two are told apart by readSeconds()'s result instead.
     for (uint8_t attempt = 0; attempt < 4; ++attempt) {
-        time_t before = getUnixTime();
-        if (before == 0) {
+        time_t before = 0;
+        if (!readSeconds(before)) {
             return 0;
         }
         uint32_t fraction = (uint32_t)(R_RTC->R64CNT & kR64CntMask);
-        time_t after = getUnixTime();
+        time_t after = 0;
+        if (!readSeconds(after)) {
+            return 0;
+        }
         if (before == after) {
             return (uint64_t)before * USEC_PER_SEC
                    + (fraction * kUsecPerR64TickNum) / kUsecPerR64TickDen;
@@ -169,8 +188,16 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     _bootEpoch = (uint32_t)((int64_t)_bootEpoch + ((int64_t)unix_time - (int64_t)previous));
 
     // Skipped when the value came from the DS1307 -- writing it straight back
-    // would be an I2C round trip to store what is already there.
-    if (_ds1307Present && from != Source::Ds1307) {
+    // would be an I2C round trip to store what is already there -- and skipped
+    // when the DS1307 already holds this second. Removing the old early return
+    // was necessary (it was what stopped a drifted DS1307 from ever being
+    // corrected), but removing it wholesale would let a peer sending plausible
+    // times faster than 1 Hz make TaskMavlink block on an I2C WRITE each time.
+    // A read to compare is the cheaper half of that round trip and keeps the
+    // correction: an unchanged clock costs a read, a drifted one still gets
+    // written. Found by Copilot's review of this change.
+    if (_ds1307Present && from != Source::Ds1307
+        && (time_t)_ds1307.now().unixtime() != unix_time) {
         _ds1307.adjust(DateTime((uint32_t)unix_time));
     }
 

@@ -83,13 +83,19 @@ public:
   // Ds1307 and setUnixTime() refuses the demotion.
   bool reseedFromDs1307();
 
-  // A time at or after 2022-01-01T00:00:00Z. Serves twice: it validates what
+  // A time at or after 2022-01-01T00:00:00Z, and within what the 32-bit boot
+  // epoch can hold. Serves twice: it validates what
   // arrives from the ground, and it is how begin() decides whether a
   // still-running internal RTC survived a reset holding something worth
   // keeping. An internal RTC that was never set reads as 1970 and fails it.
   static bool isPlausible(time_t unix_time);
 
 private:
+  // Reads whole seconds and reports whether the read worked, which getUnixTime()
+  // cannot: it returns 0 for a failure, and 0 is also a valid reading on a board
+  // whose clock started at the epoch. The fraction path needs to tell those apart.
+  bool readSeconds(time_t &out);
+
   RTC_DS1307 _ds1307;
 
   // Wall-clock seconds at boot. uint32_t, NOT time_t: time_t is 8 bytes on this
