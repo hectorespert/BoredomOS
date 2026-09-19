@@ -55,12 +55,12 @@ jobs:
       # Scoped to these files, not all of src/: src/logger.cpp/src/sdwrite.cpp
       # still legitimately allocate for sdWriteQueue, which this did not touch.
       run: |
-        if grep -nE '\bpvPortMalloc\b' src/serial.cpp src/mavlink.cpp; then
-          echo "::error::src/serial.cpp and src/mavlink.cpp carry MAVLink queue items by value and must not allocate"
+        if grep -nE '\bpvPortMalloc\b' src/link.cpp src/mavlink.cpp; then
+          echo "::error::src/link.cpp and src/mavlink.cpp carry MAVLink queue items by value and must not allocate"
           exit 1
         fi
     - name: Run PlatformIO
       # All three environments, not just the default. The RAM budget is only
       # policed in the configurations that are actually built, and
       # scripts/ram_budget.py runs after each link.
-      run: pio run -e uno_r4_minima -e bench -e libs
+      run: pio run -e uno_r4_minima -e libs

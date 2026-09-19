@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Firmware for a CubeSat (hardware based on https://www.thingiverse.com/thing:4096437). Arduino UNO R4 Minima (Renesas RA) + FreeRTOS, built with PlatformIO. The board presents itself to a ground station over USB serial as a MAVLink vehicle; MAVProxy is the reference GCS:
 
 ```bash
-mavproxy.py --master=/dev/ttyACM0,115200 --load-module system_time
+mavproxy.py --master=/dev/ttyACM0 --load-module system_time
 ```
 
 **Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing anything.** It is the single source of truth for the design: the task and queue model, the three pipelines, which file owns which resource, and the constraints that explain why the code looks the way it does. This file does not repeat it.
@@ -58,26 +58,26 @@ what in `tasks.md` goes dark.
 ## Commands
 
 ```bash
-pio run                  # build the flight environment (CI builds all three)
+pio run                  # build the flight environment (CI builds both)
 pio run -t upload        # flash the board
-pio device monitor       # USB console at 115200 — the text CLI, see below
 pio test                 # HIL: flashes this firmware, then checks it from the host
-pio test -e bench        # same, with the link on USB so no adapter is needed
 pio test -e libs         # Unity library tests — DESTRUCTIVE, see below
 ```
 
-The USB console answers four read-only commands, one line in, one reply out: `ps`
-(every task the scheduler knows about — id, name, priority, state, unused stack
-in words — then free heap), `ps <name>` (the same row for one task), `free`
-(heap total, free now, minimum ever free), and `help` / `?`. No command changes
-firmware state. `src/cli.cpp` is the port's only writer while tasks run; see
-`ARCHITECTURE.md` section 6 for the one exception.
+There is no text console. `replace-console-cli-with-usb-mavlink-link` deleted
+`src/cli.cpp` and made USB a second MAVLink endpoint, so `pio device monitor`
+now shows binary frames. The figures `ps` and `free` used to print — free heap,
+minimum-ever-free heap and each live task's stack high-water mark — reach the
+ground as the `NAMED_VALUE_INT` housekeeping stream, which a GCS arms with
+`MAV_CMD_SET_MESSAGE_INTERVAL` on message id 252 and which is off after every
+reset. `src/link.cpp` owns both ports; see `ARCHITECTURE.md` section 6 for the
+one exception.
 
 There is no host/native test environment. `test/` holds two suites, and **`pio test`
 means the HIL one**: it flashes this firmware and then interrogates it from the host,
 leaving the board running what it would fly.
 
-- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. Nine cases across four `check_*.py` modules, all of them about the `mavlink-link` capability. Which scenario each case covers is **not recorded** — see *Record which scenario each HIL case covers* in [TODO.md](TODO.md). Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`) and the link reachable: with the flight build that means a USB-TTL adapter on D0/D1, so use `pio test -e bench` to put the link on USB instead. `run.py --list` and `--filter` run a single case by name.
+- **`test/test_hil/`** — host-side Python driving the flashed firmware over the MAVLink link, via `test/test_hil/run.py`. 25 cases across seven `check_*.py` modules, most of them about the `mavlink-link` capability. Which scenario each case covers is **not recorded** — see *Record which scenario each HIL case covers* in [TODO.md](TODO.md). Needs `pymavlink` (`pip install -r test/test_hil/requirements.txt`). The default target is USB, which the flight build always answers, so no adapter is needed. `HIL_PORT` takes a **device path**, not a port name, so point it at an adapter (`HIL_PORT=/dev/ttyUSB0`) to drive D0/D1 instead; `check_dual_link.py` takes `HIL_UART_PORT` for the cases that need both ports at once and self-skips without it. `run.py --list` and `--filter` run a single case by name.
 - **`test/test_libs/`** — the Unity suite. `test_main.cpp` asserts against real battery voltage, RTC and SD hardware, so it never runs in CI. It runs on a dev machine with the board attached — `pio device list` shows a `UNO R4 Minima - CDC Port` — taking about 25 s for the 5 cases. All cases live in that one file, dispatched from a hand-written `runUnityTests()`; to run a single case, comment out the other `RUN_TEST(...)` lines. `pio test -f` filters test *directories*, so it picks a suite, not a case.
 - **`test/test_hil/`** — host-side Python that interrogates the flashed firmware over the MAVLink link. `platformio.ini` excludes it with `test_ignore = test_hil`, since PlatformIO would try to compile it as C++. Run these by hand; see its `README.md`.
 
@@ -85,9 +85,9 @@ leaving the board running what it would fly.
 
 Adding any `test_*` subdirectory is what makes PlatformIO stop treating `test/` itself as a suite: it falls back to the root only when there are none. Keep every suite in its own directory, or one of them stops running with no warning.
 
-**`pio test -e libs` is the destructive one**: it replaces the firmware with the Unity binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational. That is why it is opt-in and HIL is the default — `pio test` and `pio test -e bench` flash real firmware and leave the board running, and neither touches the card. After `-e bench` the link is on USB rather than D0/D1, so `pio run -t upload` restores the flight configuration.
+**`pio test -e libs` is the destructive one**: it replaces the firmware with the Unity binary, and `cleanSdFiles()` deletes `data*.mpk` and `index.bin` from the card on every case. Ask before running it, and follow with `pio run -t upload` to leave the board operational. That is why it is opt-in and HIL is the default — `pio test` flashes real firmware and leaves the board running, and does not touch the card.
 
-Three environments, one board: `uno_r4_minima` is what flies and is the default for every command; `bench` is the same firmware with the link on USB; `libs` exists only to run the Unity suite. `default_envs` keeps a bare `pio run`, `pio check` or `pio test` on the first of them.
+Two environments, one board: `uno_r4_minima` is what flies and is the default for every command, and `libs` exists only to run the Unity suite. `bench` is gone — USB carries MAVLink in every build now, so the override that existed to put it there has nothing left to do. `default_envs` keeps a bare `pio run`, `pio check` or `pio test` on the first of them.
 
 A change that touches `lib/` or a task body is not verified by building it. Run the tests on the board, or say plainly that you did not.
 
@@ -96,10 +96,10 @@ A change that touches `lib/` or a task body is not verified by building it. Run 
 These are the invariants that are easiest to break silently. `ARCHITECTURE.md` explains why each one exists.
 
 - **Adding a subsystem is four edits:** the task body in a new `src/*.cpp` reaching shared objects via `extern`, a `[[noreturn]] extern` declaration in `src/main.cpp`, its static storage (`StackType_t xStack[N]` and a `StaticTask_t`) beside it, and an `xTaskCreateStatic` in `setup()`. Tasks and queues are created nowhere else, and never with the dynamic `xTaskCreate` / `xQueueCreate` — CI greps `src/` for both and fails. Note `portable/FSP/port.c` contains its own `xTaskCreate` of 1024 words: it is unreachable only because no build here defines `AUTOSTART_FREERTOS` or `EARLY_AUTOSTART_FREERTOS`, and with the current heap it could not succeed. Do not define either.
-- **`sdWriteQueue` carries a heap pointer; `serialReadQueue`/`serialWriteQueue` carry values.** This used to be one rule for every queue — it held only because a `mavlink_message_t` is 291 bytes, too large to reserve permanently at any useful depth. `queue-mavlink-messages-by-value` shrank the MAVLink queues' items (a full `mavlink_message_t` by value for reads, the 64-byte `LinkMsg` tagged union from `include/LinkMsg.h` for writes) below the point where by-value storage costs less than the heap-pointer machinery, so they no longer follow this rule — see `ARCHITECTURE.md` §4 for the reasoning behind each. `sdWriteQueue` still does: its producer (`src/logger.cpp`) `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`; the consumer (`src/sdwrite.cpp`) frees after use. A leak there is still fatal within minutes: the heap is `0x200` and backs only this queue's items. Changing its depth means re-deriving what backs it — depth plus one block per producer that can hold an unsent item and one per consumer holding an unreleased one, not depth alone. `src/serial.cpp` and `src/mavlink.cpp` no longer call `pvPortMalloc` at all, and CI greps those two files specifically to keep it that way.
+- **`sdWriteQueue` carries a heap pointer; the link queues carry values.** This used to be one rule for every queue — it held only because a `mavlink_message_t` is 291 bytes, too large to reserve permanently at any useful depth. `queue-mavlink-messages-by-value` shrank the MAVLink queues' items (a full `mavlink_message_t` by value for reads, the 64-byte `LinkMsg` tagged union from `include/LinkMsg.h` for writes) below the point where by-value storage costs less than the heap-pointer machinery, so they no longer follow this rule — see `ARCHITECTURE.md` §4 for the reasoning behind each. `sdWriteQueue` still does: its producer (`src/logger.cpp`) `pvPortMalloc`s, checks the result for `NULL`, and `vPortFree`s if `xQueueSend` does not return `pdPASS`; the consumer (`src/sdwrite.cpp`) frees after use. A leak there is still fatal within minutes: the heap is `0x200` and backs only this queue's items. Changing its depth means re-deriving what backs it — depth plus one block per producer that can hold an unsent item and one per consumer holding an unreleased one, not depth alone. `src/link.cpp` and `src/mavlink.cpp` do not call `pvPortMalloc` at all, and CI greps those two files specifically to keep it that way.
 - **Stack sizes in `xTaskCreateStatic` are words, not bytes**, and are tuned tight (96–256). The count must match the length of the `StackType_t` array passed alongside it. After changing a task body, check that task's high-water mark in the SD log before assuming it still fits.
 - **Priorities come from `include/Priority.h`**, never raw numbers.
-- **Only the owning file touches its resource:** `src/serial.cpp` the UART, `src/sdwrite.cpp` the card, `lib/SystemTime` the clocks, `lib/Battery` the ADC. Everything else goes through a queue or the library wrapper. This is what makes the absence of mutexes safe — do not break it by reaching for a peripheral directly.
+- **Only the owning file touches its resource:** `src/link.cpp` both MAVLink ports, `src/sdwrite.cpp` the card, `lib/SystemTime` the clocks, `lib/Battery` the ADC. Everything else goes through a queue or the library wrapper. This is what makes the absence of mutexes safe — do not break it by reaching for a peripheral directly.
 - **Every outbound MAVLink message uses the same identity triple:** system id `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - **Wiring is hardcoded** (SD `CS` on 9, battery on `A0`, DS1307 on I2C). If a change adds a pin, document it in `ARCHITECTURE.md`.
 - **`configASSERT` in `setup()` halts only where recovery is impossible.** A missing RTC or SD card degrades instead: the board runs on ticks since boot and accepts a time set from the ground without the DS1307, and skips the housekeeping log without the card, reporting the absence either way — see `openspec/specs/fault-recovery/spec.md`. Queue and task creation still assert: with `configSUPPORT_STATIC_ALLOCATION` these cannot fail for want of memory, so a `NULL` handle there is a programming error, not a hardware fault. `VBTBKR[0..3]` belongs to the bootloader's double-tap magic and must never be written by this firmware; `include/Recovery.h` owns everything from `[4]` on.

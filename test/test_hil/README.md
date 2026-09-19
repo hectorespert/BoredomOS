@@ -34,13 +34,23 @@ The port is found automatically: `HIL_PORT` if set, then an Arduino CDC device,
 then a lone USB serial adapter. Baud defaults to 57600, matching `LINK_BAUD` in
 `include/Link.h`; a CDC port ignores it, so the same default works either way.
 
-**The link has to be reachable from this machine.** With the default build it is on
-`Serial1` (D0/D1), which means a USB-TTL adapter or the radio. To use USB instead,
-flash the bench build:
+**A link has to be reachable from this machine, and since
+replace-console-cli-with-usb-mavlink-link there are two.** The flight build
+carries MAVLink on the D0/D1 UART *and* on USB CDC, in every build, so the
+board's own cable is enough and no adapter is needed for most of the suite.
+There is no `bench` environment any more and nothing to reflash.
+
+Point `HIL_PORT` at a **device path** to target the UART instead — an adapter or
+the radio on D0/D1:
 
 ```bash
-PLATFORMIO_BUILD_FLAGS="-D LINK_SERIAL=Serial -D LINK_BAUD=115200" pio run -t upload
+HIL_PORT=/dev/ttyUSB0 python run.py
 ```
+
+`check_dual_link.py` is the exception: its cases need *both* ports at once, so
+they read the board's CDC port themselves and take `HIL_UART_PORT` for the
+other. Without an adapter they self-skip, and a green run has not exercised
+them.
 
 ## Output
 
@@ -51,11 +61,13 @@ would count and colour these natively if the suite were wired in as a
 A run where nothing could be checked reports every case as `IGNORE` and exits **0**.
 Absent hardware is not a red build; a real failure is.
 
-Every case is gated behind a working link, including `test_usb_console_is_silent`,
-which strictly speaking only needs the USB port. That is deliberate: with no link
-reachable, "the USB console is silent" cannot tell a correctly moved link from a dead
-board, and a green result there would be a false pass. The meaningful claim is frames
-on the link *and* silence on USB, so the check only runs when the first half holds.
+Every case is gated behind a working link. `check_usb_link.py` strictly speaking
+only needs the USB port, and it is still gated: with no link reachable, "USB
+carries MAVLink" cannot tell a working board from a dead one, and a green result
+there would be a false pass.
+
+It replaced `check_silence.py`, which asserted the opposite — that USB carried no
+frames — and was correct until USB became a link.
 
 ## Adding a case
 
@@ -67,9 +79,9 @@ the rate checks cost one wait between them rather than one each.
 ## Under `pio test`
 
 `pio test` runs this suite: it builds `src/`, flashes it, and then runs `run.py`
-against the board. `pio test -e bench` does the same with the link moved to USB, so
-no adapter is needed. The Unity suite is opt-in as `pio test -e libs`, because that
-one replaces the firmware and erases the card.
+against the board, over USB, with no adapter attached. The Unity suite is opt-in
+as `pio test -e libs`, because that one replaces the firmware and erases the
+card.
 
 Two details make it work, and neither is obvious:
 
@@ -80,6 +92,25 @@ Two details make it work, and neither is obvious:
 - **`find_port()` waits.** Under `pio test` the checks start seconds after the
   upload, and a USB CDC port takes a moment to re-enumerate after the board resets.
   Without the wait every case is skipped for no real reason.
+
+## Steps no script here can run
+
+Two things this suite cannot observe, recorded so they are not mistaken for
+covered. Both belong to `replace-console-cli-with-usb-mavlink-link`.
+
+- **A host that opens USB and stops reading must not reset the board.**
+  `_SerialUSB::write()` loops without yielding when its buffer is full, so a
+  stalled host above idle priority would keep `vApplicationIdleHook()` from
+  refreshing the watchdog. `TaskLinkWrite` guards this with
+  `availableForWrite()`. To check it: open `/dev/ttyACM0`, read nothing, and
+  watch the UART link with MAVProxy — telemetry must keep its cadence, the SD
+  log must keep writing, and the board must not reset. Automating it means
+  holding a port open and *not* draining it for long enough to matter, which is
+  the opposite of what every helper here does.
+- **The 8-value housekeeping cycle in the normal configuration**, which
+  `add-mavlink-housekeeping-telemetry` also left open and which is now a 9-value
+  cycle. A board in the reduced configuration exercises a shorter set, so a pass
+  there proves less than it appears to.
 
 ## One thing not to do
 

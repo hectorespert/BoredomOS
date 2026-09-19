@@ -31,15 +31,21 @@ NAMED_VALUE_INT = "NAMED_VALUE_INT"
 
 # The published set, in the cursor's own order (src/mavlink.cpp's
 # kHousekeepingTasks table): 2 heap values, then every task that exists in
-# the running configuration. "SerialWrite" truncates to "SerialWrit" in the
-# 10-byte NAMED_VALUE_INT name field -- see that table's comment.
+# the running configuration.
+#
+# replace-console-cli-with-usb-mavlink-link renamed SerialRead/SerialWrite to
+# UartRead/UartWrite, added UsbRead/UsbWrite and deleted Cli, taking the normal
+# cycle from 8 values to 9. Every name now fits inside NAMED_VALUE_INT's
+# 10-byte field, so none is truncated -- "SerialWrite" used to arrive as
+# "SerialWrit" and no longer has an equivalent here.
 NORMAL_NAMES = [
     "HeapFree", "HeapMin",
-    "SerialRead", "SerialWrit", "Mavlink", "Cli", "Logger", "SdWrite",
+    "UartRead", "UartWrite", "UsbRead", "UsbWrite", "Mavlink",
+    "Logger", "SdWrite",
 ]
 REDUCED_NAMES = [
     "HeapFree", "HeapMin",
-    "SerialRead", "SerialWrit", "Mavlink", "Cli",
+    "UartRead", "UartWrite", "UsbRead", "UsbWrite", "Mavlink",
 ]
 
 

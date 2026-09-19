@@ -3,7 +3,7 @@
 #include <Arduino_FreeRTOS.h>
 #include <Priority.h>
 #include <Link.h>
-#include <Cli.h>
+#include <LinkPort.h>
 #include <MAVLink.h>
 #include <LinkMsg.h>
 #include <Data.h>
@@ -36,9 +36,13 @@ bool reducedConfiguration = false;
 Recovery::BootPhase previousBootPhase = Recovery::BootPhase::Start;
 Recovery::ResetReason previousResetReason = Recovery::ResetReason::PowerOn;
 
-TaskHandle_t taskSerialWriteHandler = NULL;
+TaskHandle_t taskUartWriteHandler = NULL;
 
-TaskHandle_t taskSerialReadHandler = NULL;
+TaskHandle_t taskUartReadHandler = NULL;
+
+TaskHandle_t taskUsbWriteHandler = NULL;
+
+TaskHandle_t taskUsbReadHandler = NULL;
 
 TaskHandle_t taskLoggerHandler = NULL;
 
@@ -46,11 +50,14 @@ TaskHandle_t taskSdWriteHandler = NULL;
 
 TaskHandle_t taskMavlinkHandler = NULL;
 
-TaskHandle_t taskCliHandler = NULL;
+// One inbound queue shared by both readers, tagged with the port each item
+// arrived on; one outbound queue per port, because the two writers must drain
+// independently (design.md, Decision 1).
+QueueHandle_t linkReadQueue = NULL;
 
-QueueHandle_t serialReadQueue = NULL;
+QueueHandle_t uartWriteQueue = NULL;
 
-QueueHandle_t serialWriteQueue = NULL;
+QueueHandle_t usbWriteQueue = NULL;
 
 // Static storage for every task the scheduler will run. The word counts are the ones
 // xTaskCreateStatic is given below, and together with the queue storage further down
@@ -58,21 +65,42 @@ QueueHandle_t serialWriteQueue = NULL;
 // build that does not fit fails here rather than on the board. Every array is declared
 // unconditionally, whether or not the reduced configuration starts that task, so the
 // RAM commitment does not change with the boot decision -- see design.md and task 5.3.
-StackType_t serialReadStack[96];
-StaticTask_t serialReadTcb;
+// Measured at 30 of 96 words free (31%) after a 5-minute soak -- the thinnest
+// of the link tasks, and below the 35-46 band recorded before this change,
+// though that band was read from short runs rather than a soak. Left at 96:
+// still inside the fleet's range (TaskSdWrite runs at 21%) and this change did
+// not touch the reader's own locals.
+StackType_t uartReadStack[96];
+StaticTask_t uartReadTcb;
+
+// 128, not the UART reader's 96, despite running the identical body: measured
+// on the board at 27 of 96 words free against UartRead's 40, because
+// _SerialUSB::available()/read() reach TinyUSB through deeper call frames than
+// UART's do. 128 restores a margin comparable to the rest of the fleet (59 of
+// 128, 46%). The parsed message is in the LinkPort descriptor rather than on
+// either reader's stack, so neither carries a mavlink_message_t (design.md,
+// Decision 7).
+StackType_t usbReadStack[128];
+StaticTask_t usbReadTcb;
 
 // 384, not 192: queue-mavlink-messages-by-value added a local
-// mavlink_message_t (291 B) that TaskSerialWrite fills via mavlinkPack()
+// mavlink_message_t (291 B) that TaskLinkWrite fills via mavlinkPack()
 // before packing to wire bytes, on top of the existing
 // uint8_t buf[MAVLINK_MAX_PACKET_LEN] (280 B) and the received LinkMsg
 // (64 B). 192 words (768 B) overflowed on the board within seconds of boot
-// (the boot STATUSTEXT is the first message TaskSerialWrite ever packs) --
+// (the boot STATUSTEXT is the first message TaskLinkWrite ever packs) --
 // confirmed by the slow 2s-on/2s-off LED pattern src/hooks.cpp's stack
-// overflow hook produces. 384 is a provisional doubling, not a measured
-// figure; task 7.2 replaces this with the real high-water mark once `ps` is
-// reachable.
-StackType_t serialWriteStack[384];
-StaticTask_t serialWriteTcb;
+// overflow hook produces. 384 measured at 145 of 384 free (38%) after a
+// 5-minute soak (replace-console-cli-with-usb-mavlink-link).
+StackType_t uartWriteStack[384];
+StaticTask_t uartWriteTcb;
+
+// Same body and the same locals as the UART writer -- a mavlink_message_t
+// (291 B), a MAVLINK_MAX_PACKET_LEN buffer (280 B) and a LinkMsg (64 B), all
+// still on the stack (design.md, Decision 7 deferred moving them). Measured at
+// 146 of 384 free (38%), level with the UART writer as expected.
+StackType_t usbWriteStack[384];
+StaticTask_t usbWriteTcb;
 
 // 384, not 256: queue-mavlink-messages-by-value added a local
 // mavlink_message_t (291 B) to TaskMavlink's receive loop, alive for the
@@ -80,41 +108,41 @@ StaticTask_t serialWriteTcb;
 // it, each of which has its own LinkMsg local on top. Measured on the board
 // right after this change: 41 of 256 words free, down from the ~127
 // add-mavlink-housekeeping-telemetry recorded -- thinner than acceptable
-// margin, and before exercising the COMMAND_LONG branches at all. Grown
-// provisional to 384, matching TaskSerialWrite's own bump; task 7.2 replaces
-// this with a measured figure once the full HIL suite has run.
+// margin, and before exercising the COMMAND_LONG branches at all. Grown to
+// 384, and measured there at 155 free (40%) after a 5-minute soak carrying
+// both ports' schedules (replace-console-cli-with-usb-mavlink-link).
 StackType_t mavlinkStack[384];
 StaticTask_t mavlinkTcb;
 
-StackType_t loggerStack[96];
+// 160, not 96. TaskLogger builds a Data on its stack, and
+// replace-console-cli-with-usb-mavlink-link took sizeof(Data) from 36 B to 44 B
+// by splitting the link tasks per port -- which showed up on the board as this
+// task's high-water mark falling from 6 of 96 words free to 4, the two words
+// the struct gained. 4 words is 16 bytes from a silent overflow, so the change
+// that consumed them restores the margin rather than logging the regression and
+// moving on: 160 measured at 68 free (42%) after a 5-minute soak.
+//
+// This does not close TODO.md's "TaskLogger's stack margin is critically tight",
+// which asks why a 1 Hz sampling loop needs 92 words at all. It only undoes the
+// damage this change did to it.
+StackType_t loggerStack[160];
 StaticTask_t loggerTcb;
 
 StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
 
-// Measured on the board (task 4.1): ps's own row for this task never dropped
-// below 113 words free of the provisional 192 while exercising every command.
-// 128 keeps a comparable margin to the other light tasks (SerialRead's own
-// watermark runs 35-46 of 96) at less than the provisional cost. Re-measured
-// after src/cli.cpp's write path was rewritten to yield instead of spin on a
-// stalled host (design.md's "A blocking write stalls the task", Copilot
-// review): the rewrite costs its own stack, down to 38 of 128 free under the
-// same flood -- more than before, but still comfortably inside 128, so the
-// size was kept rather than grown again.
-StackType_t cliStack[128];
-StaticTask_t cliTcb;
-
 // Queue structures and item storage. sdWriteQueue still carries a heap pointer,
 // so its storage is depth x sizeof(pointer) and the FreeRTOS heap backs the
 // items themselves, sized in platformio.ini against the worst case computed in
-// that queue's own design. serialReadQueue and serialWriteQueue carry their
-// items by value instead (queue-mavlink-messages-by-value), so their storage
-// is depth x sizeof(item) directly and neither touches the heap at all.
+// that queue's own design. linkReadQueue and the two per-port write queues
+// carry their items by value instead (queue-mavlink-messages-by-value), so
+// their storage is depth x sizeof(item) directly and none of them touches the
+// heap at all.
 StaticQueue_t sdWriteQueueBuffer;
 uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
 
-StaticQueue_t serialReadQueueBuffer;
-uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t)];
+StaticQueue_t linkReadQueueBuffer;
+uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 
 // Depth 5, not 4: a fourth independently-clocked TaskMavlink schedule entry
 // (housekeeping, openspec/changes/add-mavlink-housekeeping-telemetry) can be
@@ -122,16 +150,27 @@ uint8_t serialReadQueueStorage[8 * sizeof(mavlink_message_t)];
 // battery status and a TIMESYNC reply (ARCHITECTURE.md's queue table) -- and
 // a pass where all four coincide is not excluded by anything in the
 // schedule. Re-derived, not assumed, per CLAUDE.md's rule on changing a
-// queue's backing. This depth and the housekeeping cycle length both follow
-// the task count in this file -- a new task needs both re-checked.
-StaticQueue_t serialWriteQueueBuffer;
-uint8_t serialWriteQueueStorage[5 * sizeof(LinkMsg)];
+// queue's backing. Each port gets its own queue at this depth. This depth and
+// the housekeeping cycle length both follow the task count in this file -- a
+// new task needs both re-checked.
+StaticQueue_t uartWriteQueueBuffer;
+uint8_t uartWriteQueueStorage[5 * sizeof(LinkMsg)];
+
+StaticQueue_t usbWriteQueueBuffer;
+uint8_t usbWriteQueueStorage[5 * sizeof(LinkMsg)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
-[[noreturn]] extern void TaskSerialWrite(void *pvParameters);
+// One body per direction, two instances of each: the LinkPort passed through
+// pvParameters is what tells an instance which port it serves. This is the
+// first thing in this firmware to use pvParameters at all -- see design.md,
+// Decision 4, and the amendment it makes to ARCHITECTURE.md section 3.
+[[noreturn]] extern void TaskLinkWrite(void *pvParameters);
 
-[[noreturn]] extern void TaskSerialRead(void *pvParameters);
+[[noreturn]] extern void TaskLinkRead(void *pvParameters);
+
+extern LinkPort linkPorts[2];
+extern void linkPortsInit(QueueHandle_t uartWriteQueue, QueueHandle_t usbWriteQueue);
 
 [[noreturn]] extern void TaskLogger(void *pvParameters);
 
@@ -140,8 +179,6 @@ QueueHandle_t sdWriteQueue = NULL;
 [[noreturn]] extern void TaskSensors(void *pvParameters);
 
 [[noreturn]] extern void TaskMavlink(void *pvParameters);
-
-[[noreturn]] extern void TaskCli(void *pvParameters);
 
 namespace {
 
@@ -316,24 +353,17 @@ void setup()
 
   Recovery::setPhase(Recovery::BootPhase::Start);
 
-  // The console (Serial) is already open: the core's main() calls
-  // Serial.begin(115200) before setup(). Opening it again here would
-  // initialise the same port twice whenever LINK_SERIAL is overridden onto it.
+  // Both links come up before the clock or the card (review.md finding 13):
+  // the heartbeat and the boot STATUSTEXT need them, and a hang at an earlier
+  // milestone would otherwise be a permanent, undiagnosable reset loop on
+  // every boot, reduced included.
   //
-  // The link comes up before the clock or the card (review.md finding 13):
-  // both the heartbeat and the boot STATUSTEXT need it, and a hang at an
-  // earlier milestone would otherwise be a permanent, undiagnosable reset loop
-  // on every boot, reduced included.
-  LINK_SERIAL.begin(LINK_BAUD);
+  // LINK_USB is not begun here. It is Serial, which the core's own main()
+  // already opened with Serial.begin(115200) before setup() ran; opening it a
+  // second time would initialise the same port twice. LINK_BAUD applies to the
+  // UART alone -- a CDC port has no line rate.
+  LINK_UART.begin(LINK_BAUD);
   Recovery::setPhase(Recovery::BootPhase::LinkDone);
-
-  // Same reasoning as LINK_SERIAL above: begin()ing Serial a second time here
-  // is harmless (the flight build has CLI_SERIAL == Serial), but on bench,
-  // where CLI_SERIAL is overridden to Serial1, nothing else ever opens that
-  // UART -- TaskCli assumes its port already answers, which is only true for
-  // Serial (Copilot review, platformio.ini:117). 115200 matches the console's
-  // fixed rate; CLI_SERIAL has no separate baud override, unlike LINK_SERIAL.
-  CLI_SERIAL.begin(115200);
 
   systemTimeAvailable = systemTime.begin();
   Recovery::setPhase(Recovery::BootPhase::ClockDone);
@@ -344,11 +374,19 @@ void setup()
   sdWriteQueue = xQueueCreateStatic(4, sizeof(Data*), sdWriteQueueStorage, &sdWriteQueueBuffer);
   configASSERT(sdWriteQueue != NULL);
 
-  serialReadQueue = xQueueCreateStatic(8, sizeof(mavlink_message_t), serialReadQueueStorage, &serialReadQueueBuffer);
-  configASSERT(serialReadQueue != NULL);
+  linkReadQueue = xQueueCreateStatic(8, sizeof(InboundMsg), linkReadQueueStorage, &linkReadQueueBuffer);
+  configASSERT(linkReadQueue != NULL);
 
-  serialWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), serialWriteQueueStorage, &serialWriteQueueBuffer);
-  configASSERT(serialWriteQueue != NULL);
+  uartWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
+  configASSERT(uartWriteQueue != NULL);
+
+  usbWriteQueue = xQueueCreateStatic(5, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
+  configASSERT(usbWriteQueue != NULL);
+
+  // Binds each descriptor to its concrete port and its write queue. Must run
+  // before any link task is created: a task body dereferences its LinkPort on
+  // the first line.
+  linkPortsInit(uartWriteQueue, usbWriteQueue);
 
   Recovery::setPhase(Recovery::BootPhase::QueuesDone);
 
@@ -358,35 +396,45 @@ void setup()
   // Every handle set here has a matching entry in src/mavlink.cpp's
   // housekeeping task table, published over MAVLink as a NAMED_VALUE_INT
   // round-robin. Adding a task here means adding it there too, and
-  // re-checking serialWriteQueue's depth above -- both follow the task
+  // re-checking each write queue's depth above -- both follow the task
   // count (see that table's comment).
   //
-  // The link reader, the link writer and Mavlink -- which carries the protocol
-  // handler, the heartbeat and the system-time/battery telemetry schedule --
-  // start in every configuration, reduced included -- see the "reachable and
-  // commandable" requirement in specs/fault-recovery/spec.md. Mavlink's own
-  // schedule withholds BATTERY_STATUS when reduced (src/mavlink.cpp); it is no
-  // longer a decision made here. Housekeeping (the logger and the SD writer)
-  // does not start when reduced, and additionally does not start with no card,
-  // regardless of configuration.
-  taskSerialReadHandler = xTaskCreateStatic(TaskSerialRead, "SerialRead", 96, NULL, PRIORITY_HIGHEST, serialReadStack, &serialReadTcb);
-  configASSERT(taskSerialReadHandler != NULL);
+  // All four link tasks and Mavlink -- which carries the protocol handler, the
+  // heartbeat and the system-time/battery telemetry schedule for both ports --
+  // start in every configuration, reduced included, so the board stays
+  // reachable and commandable on either port: see that requirement in
+  // specs/fault-recovery/spec.md. Mavlink's own schedule withholds
+  // BATTERY_STATUS when reduced (src/mavlink.cpp); it is not a decision made
+  // here. Housekeeping (the logger and the SD writer) does not start when
+  // reduced, and additionally does not start with no card, regardless of
+  // configuration.
+  //
+  // HIGHEST for the UART reader and HIGH for the USB one, and the difference
+  // is the hardware's rather than a preference: D0/D1 has no flow control
+  // wired, so bytes not drained in time are lost outright, while USB CDC NAKs
+  // when its buffer fills and can only be delayed (design.md, Decision 2).
+  taskUartReadHandler = xTaskCreateStatic(TaskLinkRead, "UartRead", 96, &linkPorts[0], PRIORITY_HIGHEST, uartReadStack, &uartReadTcb);
+  configASSERT(taskUartReadHandler != NULL);
 
-  taskSerialWriteHandler = xTaskCreateStatic(TaskSerialWrite, "SerialWrite", 384, NULL, PRIORITY_HIGH, serialWriteStack, &serialWriteTcb);
-  configASSERT(taskSerialWriteHandler != NULL);
+  taskUsbReadHandler = xTaskCreateStatic(TaskLinkRead, "UsbRead", 128, &linkPorts[1], PRIORITY_HIGH, usbReadStack, &usbReadTcb);
+  configASSERT(taskUsbReadHandler != NULL);
+
+  taskUartWriteHandler = xTaskCreateStatic(TaskLinkWrite, "UartWrite", 384, &linkPorts[0], PRIORITY_HIGH, uartWriteStack, &uartWriteTcb);
+  configASSERT(taskUartWriteHandler != NULL);
+
+  // HIGH is safe here only because TaskLinkWrite checks availableForWrite()
+  // before writing: _SerialUSB::write() spins without yielding when its buffer
+  // is full, which above idle priority would stop the watchdog being refreshed
+  // (design.md, Decision 6).
+  taskUsbWriteHandler = xTaskCreateStatic(TaskLinkWrite, "UsbWrite", 384, &linkPorts[1], PRIORITY_HIGH, usbWriteStack, &usbWriteTcb);
+  configASSERT(taskUsbWriteHandler != NULL);
 
   taskMavlinkHandler = xTaskCreateStatic(TaskMavlink, "Mavlink", 384, NULL, PRIORITY_HIGH, mavlinkStack, &mavlinkTcb);
   configASSERT(taskMavlinkHandler != NULL);
 
-  // Starts in every configuration, reduced included: it touches nothing the
-  // reduced configuration withholds (no SD card, no RTC, no battery sense),
-  // and it is most useful exactly when something else has already gone wrong.
-  taskCliHandler = xTaskCreateStatic(TaskCli, "Cli", 128, NULL, PRIORITY_LOWEST, cliStack, &cliTcb);
-  configASSERT(taskCliHandler != NULL);
-
   if (!reducedConfiguration) {
     if (sdCardAvailable) {
-      taskLoggerHandler = xTaskCreateStatic(TaskLogger, "Logger", 96, NULL, PRIORITY_LOW, loggerStack, &loggerTcb);
+      taskLoggerHandler = xTaskCreateStatic(TaskLogger, "Logger", 160, NULL, PRIORITY_LOW, loggerStack, &loggerTcb);
       configASSERT(taskLoggerHandler != NULL);
 
       taskSdWriteHandler = xTaskCreateStatic(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, sdWriteStack, &sdWriteTcb);

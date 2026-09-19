@@ -10,8 +10,10 @@ extern QueueHandle_t sdWriteQueue;
 extern TaskHandle_t taskLoggerHandler;
 extern TaskHandle_t taskSdWriteHandler;
 extern TaskHandle_t taskMavlinkHandler;
-extern TaskHandle_t taskSerialWriteHandler;
-extern TaskHandle_t taskSerialReadHandler;
+extern TaskHandle_t taskUartWriteHandler;
+extern TaskHandle_t taskUartReadHandler;
+extern TaskHandle_t taskUsbWriteHandler;
+extern TaskHandle_t taskUsbReadHandler;
 
 [[noreturn]] void TaskLogger(void *pvParameters)
 {
@@ -29,8 +31,10 @@ extern TaskHandle_t taskSerialReadHandler;
                     loggerAvailableStack: uxTaskGetStackHighWaterMark(taskLoggerHandler),
                     sdWriteAvailableStack: uxTaskGetStackHighWaterMark(taskSdWriteHandler),
                     mavlinkAvailableStack: uxTaskGetStackHighWaterMark(taskMavlinkHandler),
-                    serialReadAvailableStack: uxTaskGetStackHighWaterMark(taskSerialReadHandler),
-                    serialWriteAvailableStack: uxTaskGetStackHighWaterMark(taskSerialWriteHandler),
+                    uartReadAvailableStack: uxTaskGetStackHighWaterMark(taskUartReadHandler),
+                    uartWriteAvailableStack: uxTaskGetStackHighWaterMark(taskUartWriteHandler),
+                    usbReadAvailableStack: uxTaskGetStackHighWaterMark(taskUsbReadHandler),
+                    usbWriteAvailableStack: uxTaskGetStackHighWaterMark(taskUsbWriteHandler),
                 }
             }
         };

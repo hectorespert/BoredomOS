@@ -18,6 +18,53 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what replace-console-cli-with-usb-mavlink-link left open
+
+**Status:** defined
+**Scope:** `test/test_hil/check_dual_link.py`, a USB-TTL adapter on D0/D1, hands
+at the board
+
+`replace-console-cli-with-usb-mavlink-link` made USB a second MAVLink endpoint and
+landed with 34 of 38 tasks done. The four that remain all need hardware the
+implementing session did not have: a USB-TTL adapter (or the radio) on D0/D1 as
+well as the USB cable, and for one of them a human. Numbers below are that
+change's own `tasks.md`, in the archive.
+
+- **9.2 — both ports carrying telemetry simultaneously has never been seen.**
+  Everything verified on the board so far was over USB alone. That the UART half
+  still works is inferred from the code and from CI, not observed.
+- **9.3 — per-port sequence numbering is only inferred.** `_pack_chan` is what
+  keeps each port's `current_tx_seq` its own, and getting it wrong is silent:
+  both ground stations still receive every frame, they just each see gaps.
+  There is real partial evidence — the USB stream's `HEARTBEAT` sequence
+  advanced in steps of 2-3, which is one port's own traffic, where a shared
+  counter would have stepped 5-6, and the UART writer was packing all the while
+  into an unattached port. But that reads one stream and infers the other.
+- **9.4 — per-port housekeeping arming.** Arming message id 252 on one port must
+  not arm the other. Only testable with two ground stations attached.
+- **9.5 — a host that opens USB and stops reading must not reset the board.**
+  **This is the most important one**, and no script observes it.
+  `_SerialUSB::write()` loops without yielding when its buffer is full, so above
+  idle priority it would keep `vApplicationIdleHook()` from refreshing the
+  watchdog. `TaskLinkWrite` guards it with `availableForWrite()` and yields a
+  tick on the drop path. Neither defence has been exercised against a real
+  stalled host. Open the port, read nothing, watch the UART with MAVProxy:
+  telemetry must hold its cadence, the SD log must keep writing, and the board
+  must not reset. `test/test_hil/README.md` records it as a manual step.
+
+`test/test_hil/check_dual_link.py` already contains the four automatable cases
+and self-skips without `HIL_UART_PORT` set, so picking this up is attaching the
+adapter and running `pio test`, not writing tests. **They have never executed
+once** — three of them were corrected after review without ever having run, so
+expect to debug the cases themselves as well as the firmware.
+
+One more thing that session surfaced, worth knowing before spending board time:
+four reflashes took the cumulative reset counter from 3 to 6 of the 10 that latch
+the reduced configuration. It was cleared back to 1 with
+`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` over USB — which that change is what made
+possible without an adapter — but the hazard is real and a long session will hit
+it again.
+
 ### Finish what fold-periodic-telemetry-into-mavlink-task left open
 
 **Status:** defined
@@ -656,116 +703,6 @@ doing before it is:
   a round increase, but sized to leave a comparable margin to the rest of the
   fleet, then re-measured on the board rather than assumed.
 - Re-check `scripts/ram_budget.py`'s headroom after the change, however small.
-
-### Remove the console CLI and give USB a symmetric secondary MAVLink link
-
-**Status:** defined
-**Scope:** `src/cli.cpp` (deleted), `include/Cli.h` (deleted), `src/serial.cpp`,
-`src/mavlink.cpp`, `src/main.cpp`, `include/Link.h`, `platformio.ini`,
-`.github/workflows/main.yml`, `openspec/specs/console-cli/` (deleted),
-`openspec/specs/mavlink-link/`, `ARCHITECTURE.md`, `CLAUDE.md`, `test/test_hil/`
-
-**Depends on the `queue-mavlink-messages-by-value` change landing first** — see
-below for why; it is what makes a second queue pair affordable at all.
-
-Today Serial1 is the one MAVLink link and USB carries a read-only text CLI
-(`ps`/`free`/`help`); they are mutually exclusive by build flag
-(`-D LINK_SERIAL=Serial`, the `bench` environment), never simultaneous. A change
-explored and then abandoned in this direction (`add-usb-dual-protocol`) tried to
-let one USB port carry both by sniffing bytes and switching modes permanently,
-madflight-style — CLI until the first valid MAVLink frame, then MAVLink until
-reset. That design was sound on its own terms but solves a narrower problem than
-what the bench actually needs, and its one-way switch is a real cost (the CLI
-becomes unreachable for the rest of a run the moment anything frames MAVLink at
-it).
-
-The simpler shape: **delete the CLI outright**, and make USB a second, always-on,
-independent MAVLink endpoint — no sniffing, no mode state, no "the CLI is gone
-until reboot" surprise, because there is no CLI to protect. Serial1 remains the
-primary link, exactly as it is today. USB becomes the secondary link the bench
-uses, active in every build, not just a `bench` override. The diagnostic value
-the CLI provided is not lost: `add-mavlink-housekeeping-telemetry` already puts
-free heap, minimum-ever-free heap and every task's stack high-water mark on the
-wire as `NAMED_VALUE_INT`, armable by the ground — the same numbers `ps`/`free`
-printed, now available over MAVLink on either port.
-
-**The two links are genuinely symmetric, not a lightweight mirror.** USB gets its
-own read task, its own write task, and its own queue pair — `usbReadQueue` and
-`usbWriteQueue` — built the same way `queue-mavlink-messages-by-value` rebuilds
-Serial1's: `usbWriteQueue` carries the by-value `LinkMsg` intent type that
-change introduces, `usbReadQueue` carries a full `mavlink_message_t` by value.
-One MAVLink module (`src/mavlink.cpp`, via the `mavlinkPack`/dispatch functions
-`queue-mavlink-messages-by-value` introduces) builds every outbound message and
-handles every inbound one for **both** ports — nothing about the protocol,
-the identity triple, or the message semantics is duplicated in `src/serial.cpp`
-or a USB-specific file. Each port keeps its own sequence numbering and answers a
-request on the same port it arrived on (no cross-port routing, no reply sent out
-the wrong link). Outbound parity is full: `HEARTBEAT`, `SYSTEM_TIME`,
-`BATTERY_STATUS`, `STATUSTEXT` and housekeeping, each independently armable per
-port. Inbound parity is full too: `SYSTEM_TIME`, `TIMESYNC`, and
-`MAV_CMD_SET_MESSAGE_INTERVAL` for housekeeping all work identically on USB.
-
-**Why this depends on `queue-mavlink-messages-by-value`.** A literal second
-queue pair sized like today's Serial1 pair — heap pointers to a 291-byte
-`mavlink_message_t` — does not fit: two more queues at that cost would need on
-the order of 5 KB more than the FreeRTOS heap has ever had free. Once
-`queue-mavlink-messages-by-value` lands, that math changes: its own design.md
-projects roughly 6.7 KB of headroom afterward (to be re-read fresh, not quoted,
-per `CLAUDE.md`), against which a USB queue pair built the same way — by-value
-`LinkMsg` for outbound, by-value `mavlink_message_t` for inbound — costs on the
-order of 2.6-4 KB depending on the depths chosen for USB (which need not match
-Serial1's; USB is the secondary, bench-only link and a shallower depth is
-plausible). **That queue cost is not the only new cost**: two new tasks
-(USB's own read and write tasks) add their own stacks and control blocks to
-`.bss` on top of it — a further ~1-1.5 KB depending on the sizes chosen, using
-`TaskSerialRead`/`TaskSerialWrite`'s own stack sizes (96 and 192 words) as the
-starting estimate. Both figures must be re-derived against a real build when
-this is picked up, not carried forward from this entry.
-
-**This is a real spec change, not an internal refactor.** Unlike
-`queue-mavlink-messages-by-value`, this alters on-wire behavior:
-`mavlink-link`'s current requirement that the firmware "SHALL NOT exchange
-MAVLink frames over the USB CDC port" is reversed outright, and `console-cli`
-as a capability ceases to exist — its spec file is deleted, not modified. This
-needs real spec deltas when proposed, and the `bench` environment and its
-`LINK_SERIAL`/`CLI_SERIAL` override points go with it, the same way
-`add-usb-dual-protocol` planned to retire `bench` (USB carries MAVLink in every
-build now, so the override that existed only to put it there for the HIL suite
-has nothing left to do). `.github/workflows/main.yml`'s `pio run -e uno_r4_minima
--e bench -e libs` step needs its `-e bench` removed in the same commit.
-
-To decide when this is picked up:
-
-- **One shared dispatch, how many task instances.** The recommended shape is two
-  task instances (Serial1's existing `TaskMavlink`, plus a new instance for USB)
-  each calling the same shared build/dispatch functions from `src/mavlink.cpp`,
-  rather than one task juggling two queues — this is what keeps the two streams'
-  schedules, failure behavior and sequence numbers independent, matching what
-  `add-usb-dual-protocol`'s design.md already worked out for exactly this
-  reason. Naming, priority and stack size for the new task(s) are open.
-  `include/Priority.h` already only has four levels in use by six tasks; where
-  a USB-facing task lands among them needs its own reasoning, not a copy of
-  Serial1's.
-- **Queue depths for USB.** Not necessarily 8 and 5 like Serial1 — USB is the
-  secondary, bench-only link, and a shallower depth may be enough, which
-  directly reduces the RAM cost above.
-- **What `test/test_hil/` does with `check_cli.py`** (the CLI cases, no longer
-  applicable — delete) **and `check_silence.py`** (asserts USB carries no MAVLink,
-  the opposite of what this change makes true — delete or invert, matching what
-  `add-usb-dual-protocol`'s task list already planned for the same file).
-  Existing MAVLink cases need a way to target either port, or to run once per
-  port.
-- **`ARCHITECTURE.md`'s system diagram** (§2) currently shows `CLI` on the
-  `CONSOLE` port and a single `LINK` on Serial1; it needs redrawing with two
-  symmetric MAVLink endpoints and no CLI task at all.
-
-**A loose end this creates.** *[Debug and release builds, with MAVLink tracing on
-the console]*, still in this backlog, plans to reach a trace ring buffer "through
-the CLI somehow" — that plan depends on a CLI that this entry deletes. Whoever
-picks up the tracing entry needs a different way to surface the trace (most
-plausibly a dedicated `STATUSTEXT` stream or a new MAVLink message, now that
-both links are MAVLink-only) — noted here so it is not discovered as a surprise
-mid-implementation.
 
 ### The flight log is a private MessagePack format no tool can read
 
