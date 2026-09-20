@@ -6,6 +6,7 @@
 #include <Recovery.h>
 #include <LinkMsg.h>
 #include <LinkPort.h>
+#include <SdRecord.h>
 #include <Link.h>
 #include <MavlinkPack.h>
 #include <string.h>
@@ -193,6 +194,41 @@ static void sendCommandAck(uint8_t port, uint16_t command, uint8_t result)
 }
 
 extern Battery battery;
+
+extern QueueHandle_t sdWriteQueue;
+
+// The flight log's battery record. It comes from THIS task and not from TaskLogger
+// because this is the task that already reads lib/Battery: reading it from a second
+// task of a different priority would make Battery's unguarded 125 ms cache shared
+// state, which is the rule that keeps this firmware free of mutexes.
+//
+// Separating it from the 1 Hz record is also what makes an absent battery record
+// absent rather than zero -- the log's own requirement. Nothing is allocated here:
+// sdWriteQueue carries its items by value, which is what lets this file post to it
+// at all, since CI forbids run-time allocation in this file by name.
+static void logBattery()
+{
+    SdRecord record;
+    record.kind = SdRecordKind::Pwr;
+    record.pwr.timeUs = systemTime.sinceBootUsec();
+    record.pwr.millivolts = battery.millivolts();
+    record.pwr.remaining = battery.remaining();
+    xQueueSend(sdWriteQueue, &record, 0);
+}
+
+// The flight log's wall-clock record, emitted when a clock set is ACCEPTED so that a
+// mid-mission correction is visible in the log instead of appearing as an
+// unexplained jump in timestamps. The origin comes from SystemTime::Source rather
+// than a second enumeration.
+static void logClock()
+{
+    SdRecord record;
+    record.kind = SdRecordKind::Time;
+    record.time.timeUs = systemTime.sinceBootUsec();
+    record.time.unixtime = (uint32_t)systemTime.getUnixTime();
+    record.time.source = (uint8_t)systemTime.source();
+    xQueueSend(sdWriteQueue, &record, 0);
+}
 
 static void sendBatteryStatus(uint8_t port)
 {
@@ -547,6 +583,19 @@ struct ScheduleEntry {
     constexpr uint32_t kClockReseedIntervalMs = 6u * 60u * 60u * 1000u;
     uint32_t lastReseedMs = startMs;
 
+    // The flight log's battery record, on the same 2 s cadence the battery is read
+    // at for BATTERY_STATUS. Kept OUT of the schedule table above for exactly the
+    // reason the reconciliation above is: that table is per port and every entry in
+    // it emits a MAVLink message, whereas this emits none and must happen once per
+    // period rather than once per port. Putting it there would write two records
+    // every 2 s and imply a fifth per-port producer into the write queues.
+    //
+    // Disabled in the reduced configuration, matching the BATTERY_STATUS entry: with
+    // no card there is nothing to write to, and with the battery entry disabled there
+    // is no reading being taken to record.
+    constexpr uint32_t kBatteryLogIntervalMs = 2000u;
+    uint32_t lastBatteryLogMs = startMs - kBatteryLogIntervalMs;
+
     for (;;)
     {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -574,7 +623,13 @@ struct ScheduleEntry {
             // not by a peer, so it cannot flood.
             if (reconciled && systemTime.source() != beforeReconcile) {
                 sendClockStatusText();
+                logClock();
             }
+        }
+
+        if (!reducedConfiguration && (now - lastBatteryLogMs) >= kBatteryLogIntervalMs) {
+            lastBatteryLogMs += kBatteryLogIntervalMs;
+            logBattery();
         }
 
         uint32_t waitMs = UINT32_MAX;
@@ -691,9 +746,17 @@ struct ScheduleEntry {
                     // the periodic cadences specs/mavlink-link/spec.md
                     // guarantees. A refusal is observable anyway: the reported
                     // time does not move.
-                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground)
-                        && systemTime.source() != before) {
-                        sendClockStatusText();
+                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground)) {
+                        // The log records every ACCEPTED set, whether or not the
+                        // origin changed: what matters to whoever reads the file is
+                        // that the wall clock moved, and setUnixTime()'s own bool is
+                        // exactly that report -- no new hook is needed. The status
+                        // text stays gated on a change of origin, which is what the
+                        // ground has no other way to learn.
+                        logClock();
+                        if (systemTime.source() != before) {
+                            sendClockStatusText();
+                        }
                     }
                     break;
                 }

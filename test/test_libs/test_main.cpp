@@ -1,9 +1,9 @@
 #include <unity.h>
 #include <Arduino.h>
+#include <Arduino_FreeRTOS.h>
 #include <Battery.h>
 #include <SystemTime.h>
 #include <SD.h>
-#include <ArduinoJson.h>
 #include <SdData.h>
 
 #define TEST_FILE_COUNT 4
@@ -15,7 +15,7 @@ SdData sdData(TEST_FILE_COUNT, TEST_FILE_SIZE_MB);
 
 void cleanSdFiles() {
     for (int i = 0; i < TEST_FILE_COUNT; ++i) {
-        String fname = "data" + String(i) + ".mpk";
+        String fname = "data" + String(i) + ".BIN";
         if (SD.exists(fname.c_str())) {
             SD.remove(fname.c_str());
         }
@@ -239,17 +239,22 @@ void test_report_internal_versus_ds1307_drift(void) {
 }
 
 void test_sddata_write_and_rotate(void) {
-    StaticJsonDocument<128> doc;
+    // SdData is format-agnostic now: it takes bytes, and src/sdwrite.cpp is what
+    // knows they are DataFlash records. This exercises the ring, not the format,
+    // so an arbitrary fixed-size payload is the honest thing to write here.
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
     for (int i = 0; i < TEST_FILE_COUNT + 2; ++i) {
         for (int j = 0; j < 100; ++j) {
-          doc["test"] = j;
-          sdData.write(doc);
+          sdData.write(payload, sizeof(payload));
         }
     }
 
     int fileCount = 0;
     for (int i = 0; i < TEST_FILE_COUNT; ++i) {
-        String fname = "data" + String(i) + ".mpk";
+        String fname = "data" + String(i) + ".BIN";
         if (SD.exists(fname.c_str())) {
             fileCount++;
         }
@@ -274,6 +279,24 @@ int runUnityTests(void) {
     RUN_TEST(test_report_internal_versus_ds1307_drift);
     RUN_TEST(test_sddata_write_and_rotate);
     return UNITY_END();
+}
+
+// The linker needs this; nothing here can ever call it.
+//
+// This environment sets test_build_src = no, so src/hooks.cpp -- which defines the
+// real hook -- is not in the test binary. It became necessary when lib/SystemTime
+// started calling vTaskSuspendAll() to make setUnixTime()'s clock-and-epoch update
+// indivisible: that pulls FreeRTOS's tasks.c into the link, and tasks.c references
+// this hook because configCHECK_FOR_STACK_OVERFLOW is 2.
+//
+// A stub is honest rather than a shortcut. This suite never starts a scheduler --
+// setup() calls runUnityTests() directly and creates no task -- so
+// vTaskSwitchContext, the only caller, never runs. Do NOT read a passing run as
+// evidence that overflow detection works: that lives in src/, which this environment
+// deliberately excludes.
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    (void)xTask;
+    (void)pcTaskName;
 }
 
 /**

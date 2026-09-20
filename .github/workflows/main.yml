@@ -41,22 +41,27 @@ jobs:
       run: pio check
     - name: Kernel objects are created statically
       # Every kernel-object creation in src/ is now the ...Static form, so any
-      # reappearance of the dynamic ones is a regression. Says nothing about
-      # pvPortMalloc, which still backs sdWriteQueue's items -- checked below.
+      # reappearance of the dynamic ones is a regression.
       run: |
         if grep -nE '\b(xTaskCreate|xQueueCreate)[[:space:]]*\(' src/ -r; then
           echo "::error::src/ must create tasks and queues with xTaskCreateStatic / xQueueCreateStatic"
           exit 1
         fi
-    - name: MAVLink queue items are carried by value
-      # serialReadQueue/serialWriteQueue stopped using the heap
-      # (queue-mavlink-messages-by-value); any pvPortMalloc reappearing in
-      # these two files is a regression back to the heap-pointer protocol.
-      # Scoped to these files, not all of src/: src/logger.cpp/src/sdwrite.cpp
-      # still legitimately allocate for sdWriteQueue, which this did not touch.
+    - name: Every queue item is carried by value
+      # Widened from src/link.cpp and src/mavlink.cpp to all of src/ when the
+      # DataFlash log took the heap pointer out of sdWriteQueue: src/logger.cpp and
+      # src/sdwrite.cpp were the last two files that legitimately allocated, and
+      # they no longer do. NOTHING in the firmware calls this now, which is what
+      # lets the linker drop the FreeRTOS heap array entirely -- so a reappearance
+      # here does not merely break a convention, it silently reintroduces a heap
+      # that has no space reserved for it and whose first allocation fails.
+      #
+      # Note this is a TEXTUAL check: the token must not appear in src/ even in a
+      # comment, which is why the files that discuss the rule describe it instead
+      # of naming it.
       run: |
-        if grep -nE '\bpvPortMalloc\b' src/link.cpp src/mavlink.cpp; then
-          echo "::error::src/link.cpp and src/mavlink.cpp carry MAVLink queue items by value and must not allocate"
+        if grep -rnE '\bpvPortMalloc\b' src/; then
+          echo "::error::src/ carries queue items by value and must not allocate at run time"
           exit 1
         fi
     - name: Run PlatformIO

@@ -60,13 +60,14 @@ public:
   // no accumulator and cannot wrap. Monotonic across a clock set, because
   // setUnixTime() shifts the epoch by the same delta it applies to the clock.
   //
-  // CONCURRENCY: the clock write and the epoch update in setUnixTime() are two
-  // stores and cannot be made one, so a reader landing between them would get a
-  // wrong answer. That is safe only while the single reader of these two
-  // accessors is also their single writer -- TaskMavlink. Before a SECOND task
-  // reads them (the planned DataFlash log is exactly that), the pair update
-  // must be made indivisible by suspending the scheduler across it, not by
-  // adding a mutex.
+  // CONCURRENCY: safe to call from any task. The clock write and the epoch update
+  // in setUnixTime() are two stores and cannot be made one, so a reader landing
+  // between them would get an elapsed time wrong by the size of the correction.
+  // They are therefore performed with the scheduler suspended, which makes the
+  // pair indivisible without a mutex -- see setUnixTime() in the .cpp for why the
+  // DS1307's I2C write stays outside that region. This used to hold only while the
+  // single reader was also the single writer (TaskMavlink); the DataFlash log added
+  // TaskLogger and TaskSdWrite as readers, which is what required closing it.
   uint64_t sinceBootUsec();
   int64_t sinceBootNsec();
 
