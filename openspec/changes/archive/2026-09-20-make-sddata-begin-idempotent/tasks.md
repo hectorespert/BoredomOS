@@ -148,7 +148,13 @@ asked for before it is run, then followed by `pio run -t upload`.
   passing that CLAUDE.md's stack-margin bullet already says the high-water marks can be
   read "live off the `NAMED_VALUE_INT` housekeeping stream, which needs only the link",
   which is what made this change's `[hands]` marker on 4.3 wrong.
-- [ ] 5.3 At archive time, carry anything left unticked into `TODO.md` as an entry naming
+- [x] 5.3 At archive time, carry anything left unticked into `TODO.md` as an entry naming
   this change, per the project's archive rule. In particular, if 4.2 has not been done,
   the `onOpen` coverage gap is **not** closed and the entry must say so — the Unity case
   from 2.2 proves the wiring only.
+  **Done.** *[Finish what make-sddata-begin-idempotent left open]* carries 4.2 and 4.3,
+  says plainly that the coverage gap is only half closed without 4.2, and points 4.2 at
+  the DataFlash entry's own 9.2 because one card read closes both. It also reframes 4.3 as
+  what it actually is — the reference figures are single samples and cannot support a
+  claim of "unchanged" — and carries forward the `--without-uploading` linking trick and
+  the state of the recovery counters.

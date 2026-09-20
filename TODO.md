@@ -18,6 +18,56 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what make-sddata-begin-idempotent left open
+
+**Status:** defined
+**Scope:** hands at the board and at the SD card; `openspec/changes/archive/`
+
+`openspec/changes/archive/2026-09-20-make-sddata-begin-idempotent/` shipped 16 of its 18
+tasks. `begin()` reopens, `end()` exists, and the Unity suite covers both — 17/17 on the
+board, with the two new cases watched failing against the pre-fix `begin()` first. Two
+steps remain, for different reasons.
+
+- **4.2 — read the preamble off a real card.** Pull the card and parse `data0.BIN` with
+  `pymavlink`'s `DFReader`; the procedure is in `ARCHITECTURE.md` §5.2, and note
+  `mavlogdump.py` is not in the bundled `pymavlink`. **Until this is done the `onOpen`
+  coverage gap that change set out to close is only half closed.** The Unity case proves
+  the callback *ran*; it cannot prove the preamble is in the file, because
+  `cleanSdFiles()` deletes the files a reader would need and the suite has no DataFlash
+  reader. This is the same evidence *[Finish what replace-messagepack-log-with-dataflash
+  left open]*'s 9.2 needs, so one card read closes both.
+
+  The card is in a good state for it: `pio test -e libs` erased it, so `data0.BIN` is a
+  file written from scratch by the flight firmware, whose first bytes are the preamble
+  from the open `begin()` performed — a cleaner artifact than an appended-to file.
+
+- **4.3 — the high-water marks are not comparable yet, and that is the real gap.** That
+  step asked to confirm them unchanged. They were not: `SdWrite` read 83 words free
+  against a reference of 87. What the measurement actually showed is that the reference
+  cannot support the question — `Mavlink`, a task that change could not touch, moved
+  **15 words** between two readings. A single sample is not a baseline.
+
+  So this is not "re-read `SdWrite`". It is: take several readings across reboots, for
+  every task, and record a range rather than a number, then put that range where the
+  current figures live. Until then no change can honestly claim a high-water mark is
+  unchanged, which is a check `CLAUDE.md` asks for after every task-body edit. Needs the
+  board and the link only — `NAMED_VALUE_INT` armed with `MAV_CMD_SET_MESSAGE_INTERVAL`
+  on message id 252 — not the card, and not hands.
+
+Two things worth knowing before spending board time:
+
+- **`pio test -e libs --without-uploading --without-testing` links the Unity binary
+  without flashing.** It prints "Building in test mode", and `nm` on
+  `.pio/build/libs/firmware.elf` then shows `runUnityTests()` and each case. That clears
+  the link-failure class a `lib/` change can introduce — pulling a FreeRTOS translation
+  unit into an environment whose `test_build_src` excludes the hook it needs — without
+  spending a flash. `pio run -e libs` does not catch it.
+- **The recovery counters were at `consecutive` 2 of 3 and `cumulative` 8 of 10** when
+  that change finished (`custom_mode` `0x08020603`). The five-minute stability window
+  clears the first; only `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` clears either. Worth sending
+  that command before the next session of reflashes rather than discovering the reduced
+  configuration latched.
+
 ### Finish what replace-messagepack-log-with-dataflash left open
 
 **Status:** defined
