@@ -5,21 +5,38 @@
 
 SdData::SdData(int files, size_t size): _files(files), _size(size)
 {
-    
+
 }
 
 int SdData::readLogIndex() {
     File idxFile = SD.open(LOG_INDEX_FILE, FILE_READ);
     if (!idxFile) return 0;
     int idx = 0;
-    idxFile.readBytes((char*)&idx, sizeof(idx));
+    idxFile.readBytes(reinterpret_cast<char*>(&idx), sizeof(idx));
     idxFile.close();
     if (idx < 0 || idx >= _files) return 0;
     return idx;
 }
 
+// data<i>.BIN, not .mpk: .BIN is what the ground-side log tools filter on, and the
+// contents are DataFlash records rather than MessagePack.
 String SdData::getLogFileName() {
-    return String("data") + _fileIdx + ".mpk";
+    return String("data") + _fileIdx + ".BIN";
+}
+
+void SdData::setOnOpen(SdDataOnOpen callback)
+{
+    _onOpen = callback;
+}
+
+// Called only where a file has just been opened successfully. The callback writes
+// the format preamble through writeRaw(), which does not check the size limit, so
+// this cannot start another rotation.
+void SdData::notifyOpened()
+{
+    if (_onOpen != nullptr && _dataFile) {
+        _onOpen(*this);
+    }
 }
 
 void SdData::begin()
@@ -31,6 +48,7 @@ void SdData::begin()
         if (!_dataFile) {
             return;
         }
+        notifyOpened();
     }
 }
 
@@ -41,19 +59,29 @@ void SdData::writeLogIndex() {
     }
 
     idxFile.seek(0);
-    idxFile.write((uint8_t*)&_fileIdx, sizeof(_fileIdx));
+    idxFile.write(reinterpret_cast<uint8_t*>(&_fileIdx), sizeof(_fileIdx));
     idxFile.flush();
     idxFile.close();
 }
 
-void SdData::write(const JsonDocument& json)
+void SdData::writeRaw(const uint8_t *data, size_t length)
+{
+    if (!_dataFile || data == nullptr || length == 0) {
+        return;
+    }
+
+    _dataFile.write(data, length);
+    _dataFile.flush();
+}
+
+void SdData::write(const uint8_t *data, size_t length)
 {
     if (!_dataFile) {
         return;
     }
 
-    serializeMsgPack(json, _dataFile);
-    _dataFile.flush();
+    writeRaw(data, length);
+
     size_t fileSize = _dataFile.size();
 
     if (fileSize >= _size ) {
@@ -66,5 +94,6 @@ void SdData::write(const JsonDocument& json)
         }
 
         _dataFile = SD.open(newLogFileName.c_str(), FILE_WRITE);
+        notifyOpened();
     }
 }

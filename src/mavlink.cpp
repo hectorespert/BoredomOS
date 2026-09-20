@@ -6,6 +6,7 @@
 #include <Recovery.h>
 #include <LinkMsg.h>
 #include <LinkPort.h>
+#include <SdRecord.h>
 #include <Link.h>
 #include <MavlinkPack.h>
 #include <string.h>
@@ -193,6 +194,69 @@ static void sendCommandAck(uint8_t port, uint16_t command, uint8_t result)
 }
 
 extern Battery battery;
+
+extern QueueHandle_t sdWriteQueue;
+
+// The flight log's battery record. It comes from THIS task and not from TaskLogger
+// because this is the task that already reads lib/Battery: reading it from a second
+// task of a different priority would make Battery's unguarded 125 ms cache shared
+// state, which is the rule that keeps this firmware free of mutexes.
+//
+// Separating it from the 1 Hz record is also what makes an absent battery record
+// absent rather than zero -- the log's own requirement. Nothing is allocated here:
+// sdWriteQueue carries its items by value, which is what lets this file post to it
+// at all, since CI forbids run-time allocation in this file by name.
+static void logBattery()
+{
+    // No consumer, no record. TaskSdWrite exists only when the card was mounted at
+    // boot (src/main.cpp), and `reducedConfiguration` is NOT the same condition: a
+    // board in the normal configuration with no card has no SD writer at all. Without
+    // this the queue fills in four sends and then drops everything for ever. Found by
+    // Copilot's review, which caught that the comment above promised this gate and the
+    // code did not have it.
+    if (taskSdWriteHandler == NULL) {
+        return;
+    }
+
+    // 0 mV means the ADC has not been read yet or there is nothing to read: voltage()
+    // returns its initial cached 0 without touching the ADC for the first 125 ms after
+    // boot, and this record's first sample is due on TaskMavlink's very first pass. A
+    // record carrying zero is exactly what the flight-log capability forbids -- it is
+    // the defect this change exists to fix -- so the absence is recorded as an absence,
+    // by emitting nothing. Also Copilot's review.
+    uint16_t millivolts = battery.millivolts();
+    if (millivolts == 0) {
+        return;
+    }
+
+    SdRecord record;
+    record.kind = SdRecordKind::Pwr;
+    record.pwr.timeUs = systemTime.sinceBootUsec();
+    record.pwr.millivolts = millivolts;
+    record.pwr.remaining = battery.remaining();
+    xQueueSend(sdWriteQueue, &record, 0);
+}
+
+// The flight log's wall-clock record, emitted when a clock set is ACCEPTED so that a
+// mid-mission correction is visible in the log instead of appearing as an
+// unexplained jump in timestamps. The origin comes from SystemTime::Source rather
+// than a second enumeration.
+static void logClock()
+{
+    // Same gate as logBattery(), and for the same reason: with no card there is no
+    // SdWrite task to drain this. A clock set from the ground would otherwise post into
+    // a queue nothing reads.
+    if (taskSdWriteHandler == NULL) {
+        return;
+    }
+
+    SdRecord record;
+    record.kind = SdRecordKind::Time;
+    record.time.timeUs = systemTime.sinceBootUsec();
+    record.time.unixtime = (uint32_t)systemTime.getUnixTime();
+    record.time.source = (uint8_t)systemTime.source();
+    xQueueSend(sdWriteQueue, &record, 0);
+}
 
 static void sendBatteryStatus(uint8_t port)
 {
@@ -547,6 +611,19 @@ struct ScheduleEntry {
     constexpr uint32_t kClockReseedIntervalMs = 6u * 60u * 60u * 1000u;
     uint32_t lastReseedMs = startMs;
 
+    // The flight log's battery record, on the same 2 s cadence the battery is read
+    // at for BATTERY_STATUS. Kept OUT of the schedule table above for exactly the
+    // reason the reconciliation above is: that table is per port and every entry in
+    // it emits a MAVLink message, whereas this emits none and must happen once per
+    // period rather than once per port. Putting it there would write two records
+    // every 2 s and imply a fifth per-port producer into the write queues.
+    //
+    // Disabled in the reduced configuration, matching the BATTERY_STATUS entry: with
+    // no card there is nothing to write to, and with the battery entry disabled there
+    // is no reading being taken to record.
+    constexpr uint32_t kBatteryLogIntervalMs = 2000u;
+    uint32_t lastBatteryLogMs = startMs - kBatteryLogIntervalMs;
+
     for (;;)
     {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -564,9 +641,10 @@ struct ScheduleEntry {
             lastReseedMs += kClockReseedIntervalMs;
             SystemTime::Source beforeReconcile = systemTime.source();
 
+            bool reseedMovedClock = false;
             bool reconciled = (beforeReconcile == SystemTime::Source::Ground)
                                   ? systemTime.pushToDs1307()
-                                  : systemTime.reseedFromDs1307();
+                                  : systemTime.reseedFromDs1307(&reseedMovedClock);
 
             // Reports a change like any other: a re-seed can promote `survived` to
             // `ds1307`, and the ground has no other way to learn that the clock it
@@ -575,6 +653,21 @@ struct ScheduleEntry {
             if (reconciled && systemTime.source() != beforeReconcile) {
                 sendClockStatusText();
             }
+
+            // The log is gated differently from the text, and on purpose. Correcting
+            // drift is the whole point of this re-seed, and it moves the wall clock
+            // WITHOUT changing the origin -- ds1307 to ds1307 -- so gating the record
+            // on a provenance change would silently omit every drift correction a
+            // mission makes. pushToDs1307() writes the external clock and never the
+            // internal one, so it cannot move this clock and reports nothing here.
+            if (reseedMovedClock || (reconciled && systemTime.source() != beforeReconcile)) {
+                logClock();
+            }
+        }
+
+        if (!reducedConfiguration && (now - lastBatteryLogMs) >= kBatteryLogIntervalMs) {
+            lastBatteryLogMs += kBatteryLogIntervalMs;
+            logBattery();
         }
 
         uint32_t waitMs = UINT32_MAX;
@@ -691,9 +784,27 @@ struct ScheduleEntry {
                     // the periodic cadences specs/mavlink-link/spec.md
                     // guarantees. A refusal is observable anyway: the reported
                     // time does not move.
-                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground)
-                        && systemTime.source() != before) {
-                        sendClockStatusText();
+                    bool clockMoved = false;
+                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground,
+                                               &clockMoved)) {
+                        // The log records a CHANGE, not an acceptance. Those differ on
+                        // almost every call: setUnixTime() returns true for a time equal
+                        // to the second already held, and the reference GCS offers one
+                        // every second, so logging on the bool alone would append a TIME
+                        // record per second for ever -- half again the log's whole byte
+                        // rate, and sustained pressure on a depth-4 queue whose drops are
+                        // silent, discarding the housekeeping the log exists for. Found by
+                        // Copilot's review of this change.
+                        //
+                        // An origin change counts as well even when the second did not
+                        // move: TIME carries Src, and a promotion changes the provenance
+                        // of every record after it.
+                        if (clockMoved || systemTime.source() != before) {
+                            logClock();
+                        }
+                        if (systemTime.source() != before) {
+                            sendClockStatusText();
+                        }
                     }
                     break;
                 }

@@ -46,7 +46,7 @@ flowchart LR
         RQ[["linkReadQueue<br/>8 × {chan, mavlink_message_t}"]]
         UWQ[["uartWriteQueue<br/>6 × LinkMsg"]]
         BWQ[["usbWriteQueue<br/>6 × LinkMsg"]]
-        DQ[["sdWriteQueue<br/>4 × Data*"]]
+        DQ[["sdWriteQueue<br/>4 × SdRecord"]]
 
         BAT["Battery<br/>(lib)"]
         ST["SystemTime<br/>(lib)"]
@@ -122,9 +122,14 @@ Adding a subsystem therefore means four edits, always the same four:
    static storage a `NULL` can only mean a bad argument.
 
 A fifth edit applies to any task whose stack is worth watching: add it to
-`src/mavlink.cpp`'s housekeeping table and to `include/Data.h`, or its high-water
-mark reaches neither the ground nor the SD log. Both follow the task count, and so
-does each write queue's depth.
+`src/mavlink.cpp`'s housekeeping table and to the `SYS` record in
+`include/SdRecord.h`, or its high-water mark reaches neither the ground nor the SD
+log. Both follow the task count, and so does each write queue's depth. Widening `SYS`
+means three matching edits and not one — its `SD_RECORD_TASK_COUNT`, the packed
+`LogSys` structure in `src/sdwrite.cpp` and that record's `FMT` definition beside it,
+whose declared length a `static_assert` checks against the structure. Adding a field
+without its label produces plausible-looking wrong numbers on the ground, which is
+what those assertions exist to stop.
 
 The one exception to the composition root is `sdData` in `src/sdwrite.cpp`: the
 SD ring object is a file-scope global next to its only user, because nothing else
@@ -234,10 +239,32 @@ about current behaviour.
 
 ## 4. Queue memory ownership protocol
 
-This used to be one rule for all three queues. Since `queue-mavlink-messages-by-value`
-it is two: `sdWriteQueue` still follows the heap-pointer protocol below; the two
-MAVLink queues do not, because their items shrank enough to make by-value storage
-cheaper than the heap-pointer machinery around it.
+**Every queue carries its items by value, and nothing in the firmware allocates at
+run time.** There is no protocol left to get wrong, which is the point of this
+section now.
+
+It took two changes to get here. `queue-mavlink-messages-by-value` moved the MAVLink
+queues off the heap once their items shrank below the point where by-value storage
+cost less than the heap-pointer machinery around it. `replace-messagepack-log-with-
+dataflash` then moved the last one, `sdWriteQueue` — not because its item shrank, but
+because the flight log's battery record has to come from `TaskMavlink`, the task that
+already reads `lib/Battery`, and CI forbids run-time allocation in that file. A
+heap-pointer producer there was simply not available.
+
+The consequence is worth stating plainly: **the FreeRTOS heap has no users.**
+`configTOTAL_HEAP_SIZE` is `0x0`, and the linker drops `ucHeap`, `prvHeapInit` and
+the allocator itself from the image because nothing references them. A run-time
+allocation reintroduced anywhere in `src/` now fails on its first call and halts the
+board through the malloc-failed hook, which is the behaviour `openspec/specs/memory-
+budget/spec.md` prescribes — and CI greps all of `src/` to stop it reaching the board
+at all. That grep is textual, so the files that discuss this rule describe it rather
+than naming the function.
+
+One counter survives the removal and is a trap for the unwary:
+`xPortGetFreeHeapSize()` still links, still compiles, and returns **0 for ever**,
+because the variable behind it is only ever written by an allocator that no longer
+exists. The housekeeping stream's `HeapFree` and `HeapMin` report that 0, truthfully.
+Do not read them as a heap that is full.
 
 **`linkReadQueue` and the two write queues carry their items by value.**
 `linkReadQueue`'s element is an `InboundMsg` (292 B): a full `mavlink_message_t`
@@ -265,52 +292,31 @@ to add on top — with a by-value queue, an item "held before send" or "held aft
 receive" is simply a local on that task's own stack, not a shared block, so the
 depth alone is what the storage needs.
 
-**`sdWriteQueue` still carries a heap pointer**, because its item (`Data`, from
-`include/Data.h`) is queued by `src/logger.cpp` and consumed by `src/sdwrite.cpp`,
-and this protocol has not been revisited for it:
+**`sdWriteQueue` carries its item by value too**, and follows the same rule as the
+rest: storage is depth × item size in `.bss`, with no margin added on top.
 
-| Queue | Depth | Also in existence | Blocks | Bytes |
-|---|---|---|---|---|
-| `sdWriteQueue` | 4 | 1 producer, 1 consumer | 6 x 44 | 264 |
+| Queue | Depth | Item | Bytes in `.bss` |
+|---|---|---|---|
+| `sdWriteQueue` | 4 | `SdRecord`, 32 B | 128 |
 
-`sizeof(Data)` is 44 B, measured at compile time rather than counted by hand.
-This table said `6 x 56` = 336 B until `replace-console-cli-with-usb-mavlink-link`
-checked it: the item was 36 B then, so the figure had never been right and the
-queue had always used less of the heap than documented. It is 44 B now because
-that change took `Tasks` from five per-task marks to seven.
+`SdRecord` (`include/SdRecord.h`) is a tagged union of what a producer *means* —
+`SYS`, `PWR` or `TIME` — in the same spirit as `LinkMsg`, and for the same reason: the
+file that owns the resource is the only one that forms the bytes. `src/sdwrite.cpp`
+turns an `SdRecord` into a DataFlash record on its way to the card, and no producer
+knows the log's format. It is 32 B rather than the 24 B of its largest payload because
+the timestamp is a `uint64_t`, so the union takes 8-byte alignment and the tag costs
+8 B of the struct; a `static_assert` in that header holds the figure, because
+`src/main.cpp` sizes the storage on it.
 
-against `configTOTAL_HEAP_SIZE`, now `0x200` (512 B) — sized to this one queue with
-margin, since neither MAVLink queue draws on the heap any more. The extra two
-blocks beyond the depth are not slack: a producer allocates *before* it sends, so
-learning that the queue is full costs a block beyond the depth; a consumer holds
-one between `xQueueReceive` and `vPortFree`.
+**Two producers post to it** — `TaskLogger` for the 1 Hz `SYS` record, `TaskMavlink`
+for `PWR` on its battery cadence and `TIME` when a clock set is accepted — and that
+costs nothing extra, because a by-value queue has no producer-held block to reserve.
 
-**The consequence is which failure a burst finds, and it now differs by queue.**
-For `sdWriteQueue`, a saturated queue reports itself through `xQueueSend`, handled
-by freeing the item; before that, the allocator could run out first and return
-`NULL`. For the link queues, there is no allocator in the
-path at all: a saturated queue simply does not accept the new item, and the
-producer has nothing to free because it never held anything the queue didn't
-already copy.
-
-`sdWriteQueue`'s protocol has exactly three rules, and its producer and consumer
-follow them:
-
-1. **The producer allocates** with `pvPortMalloc`, fills the struct, and posts the
-   pointer with `xQueueSend`.
-2. **The producer frees on failure.** If `xQueueSend` does not return `pdPASS` the
-   queue is full, the pointer was not handed over, and the producer must
-   `vPortFree` it. Skipping this leaks, and on the heap this queue is now sized
-   against, a leak is fatal within minutes.
-3. **The consumer owns the pointer** once `xQueueReceive` returns it, and frees it
-   after use — `TaskSdWrite` frees the `Data*` after copying it into the JSON
-   document.
-
-The reference implementation is `src/logger.cpp:38`, which also shows the fourth
-half-rule: **check that `pvPortMalloc` returned something** before writing through
-the pointer. `src/link.cpp` and `src/mavlink.cpp` do not call `pvPortMalloc`
-at all — a CI step (`.github/workflows/main.yml`) greps those two files
-specifically and fails the build if it reappears there.
+**What a burst finds is now the same at every queue**: a full queue does not accept
+the item, `xQueueSend` says so, and the producer has nothing to release because it
+never held anything the queue had not already copied. For `sdWriteQueue` the cost of
+a refusal is one housekeeping sample, dropped silently — the log has no way to report
+its own gaps, which is a known and deliberate hole rather than an oversight.
 
 ## 5. The three pipelines
 
@@ -413,36 +419,95 @@ The log exists for one purpose: **to size the stacks**. There is no other way to
 know how close a 96-word task came to overflowing, and `configCHECK_FOR_STACK_OVERFLOW`
 only tells you after the fact.
 
-`src/logger.cpp` samples once a second into the `Data` struct of `include/Data.h`
-and posts it to `sdWriteQueue`. The struct is the log schema: Unix time, uptime in
-milliseconds, a `System` block with the free FreeRTOS heap and
-`uxTaskGetStackHighWaterMark` for each of the seven tasks that can exist, and an
-`Energy` block with the battery millivolts and charge percentage. `sizeof(Data)`
-is 44 B. `mavlinkAvailableStack` covers `Mavlink`'s inbound dispatch *and* every periodic
-send it carries for both ports (§5.1), so it is the figure that matters most when
-checking whether that task's 384-word stack still fits.
+**The format is ArduPilot DataFlash**, in `data<i>.BIN`. That was chosen for three
+reasons specific to this project, none of them general merit: the reader is already a
+dependency (`pymavlink`'s `DFReader`, from the same family as the reference GCS, so
+nothing project-specific has to exist on the ground); every record opens with
+`0xA3 0x95`, a resynchronisation marker, so a log truncated by the power dying
+mid-write — the expected ending — costs the truncated record rather than the rest of
+the file; and the `FMT` records make schema evolution additive, so a new sensor
+declares a new record type instead of widening an existing one and old logs stay
+readable.
 
-**Three record shapes can share one card, and the field count no longer tells them
-apart.** The oldest has seven per-task fields including `heartbeatAvailableStack`
-and `batteryStatusAvailableStack`; `fold-periodic-telemetry-into-mavlink-task` cut
-it to five; `replace-console-cli-with-usb-mavlink-link` took it back to seven, but
-a different seven — `uartRead`/`uartWrite`/`usbRead`/`usbWrite` in place of
-`serialRead`/`serialWrite`, and no CLI field in any of them. `lib/SdData`'s ring can
-hold all three at once and nothing in the firmware reads a record back, so whoever
-reads the `.mpk` files on the ground has to match on **field names**, not on how
-many there are.
+Four record types, none of them a wide combined record:
 
-`src/sdwrite.cpp` **owns the card**. It converts the `Data` into an ArduinoJson
-`JsonDocument` and hands it to `lib/SdData`, which — despite the JSON document —
-serialises **MessagePack**: the `data0..N.mpk` files are binary, not text.
+| id | name | format | labels | bytes | when |
+|---|---|---|---|---|---|
+| 128 | `FMT` | `BBnNZ` | `Type,Length,Name,Format,Columns` | 89 | preamble, one per type |
+| 129 | `TIME` | `QIB` | `TimeUS,Unix,Src` | 16 | file open, and on an accepted clock set |
+| 130 | `SYS` | `QHHHHHHHH` | `TimeUS,Heap,Log,SdW,Mav,SRd,SWr,URd,UWr` | 27 | 1 Hz |
+| 131 | `PWR` | `QHb` | `TimeUS,mV,Pct` | 14 | with the battery's own read cadence |
+
+~34 B/s, against the ~251 B/s of the MessagePack records this replaced, 87 % of which
+were field-name strings rewritten 86 400 times a day.
+
+`Mav` covers `Mavlink`'s inbound dispatch *and* every periodic send it carries for both
+ports (§5.1), so it is the figure that matters most when checking whether that task's
+384-word stack still fits. **`Heap` reads 0 and always will** — see §4; it is not a
+heap that is full, it is a heap that does not exist.
+
+Separating `PWR` from `SYS` is what makes an absent battery reading *absent*. Before
+this split the battery fields were part of the 1 Hz record and `src/logger.cpp` never
+filled them, so every `.mpk` file ever written carried `millivolts: 0`. `PWR` now comes
+from `TaskMavlink`, the task that already reads `lib/Battery` — which also keeps that
+library's unguarded 125 ms cache out of two priorities at once.
+
+`src/sdwrite.cpp` **owns the card and the format**. It is the only place that turns an
+`SdRecord` into DataFlash bytes. `lib/SdData` moves bytes and owns the ring, the index
+and rotation, and knows nothing about what it is writing.
+
+The `FMT` preamble is re-emitted every time a file is opened, which is what makes each
+file of the ring readable on its own. `lib/SdData` invokes a callback after any
+successful open — at `begin()` and again on rotation — and that callback writes the
+preamble through `writeRaw()`, which appends without checking the size limit and
+therefore cannot rotate. That split is the whole reason the callback cannot re-enter
+the rotation that invoked it. The preamble itself is constant and lives in flash, so it
+costs no RAM; the `TIME` record that follows it carries a live value and is built by
+`TaskSdWrite`, which has to be able to do so because rotation happens inside it.
 
 `lib/SdData` is a fixed-footprint ring, which is what bounds how much of the card
-the log can ever occupy. It writes to `data<i>.mpk` until the file reaches its size
+the log can ever occupy. It writes to `data<i>.BIN` until the file reaches its size
 limit, then closes it, advances `i` modulo the file count, deletes whatever was
 there and opens the next one. The current index is persisted in `index.bin`, so a
 power cycle resumes where it left off instead of overwriting from zero. The
 footprint is fixed by the two constructor arguments — file count and size per file,
-defaulting to 4 files of 1 GiB.
+defaulting to 4 files of 1 GiB, at which rotation does not happen within a realistic
+mission.
+
+Older cards may still hold `data<i>.mpk` files in the retired MessagePack format, in
+any of three incompatible record shapes. Nothing converts or reclaims them: the
+extensions differ, so the firmware never touches them again.
+
+#### Reading a stack high-water mark out of the log
+
+`CLAUDE.md` has told you to do this after changing a task body since long before it
+was possible. It is possible now, and this is how. Pull the card, copy a `data<i>.BIN`
+to a host, and read it with `pymavlink` — already a dependency of
+`test/test_hil/requirements.txt`, so nothing new is needed:
+
+```python
+from pymavlink import DFReader
+log = DFReader.DFReader_binary("data0.BIN")
+while True:
+    m = log.recv_msg()
+    if m is None:
+        break
+    if m.get_type() == "SYS":
+        print(m.TimeUS, m.Log, m.SdW, m.Mav, m.SRd, m.SWr, m.URd, m.UWr)
+```
+
+Each field is **words of stack still free** at that moment — the minimum ever seen, not
+an instantaneous reading, so it only falls. The field names are `SYS`'s labels:
+`Log`, `SdW`, `Mav`, `SRd`, `SWr`, `URd`, `UWr` for logger, SD write, MAVLink, and the
+UART and USB reader/writer pairs. Compare against the stack sizes in §3's task table;
+what matters is the margin, and this project's convention is to leave a comparable one
+to the rest of the fleet rather than a round number.
+
+The same figures reach the ground live as the `NAMED_VALUE_INT` housekeeping stream
+(§5.1), which a GCS arms with `MAV_CMD_SET_MESSAGE_INTERVAL` on message id 252 at or
+above a 1000 ms interval. Reading both and finding they agree is the cheapest way to
+know neither is lying. `Heap` is in the record for historical continuity and reads 0 —
+see §4.
 
 ### 5.3 Time
 
@@ -496,9 +561,11 @@ the claim here that it set the clock too was wrong before this section was rewri
 answered with elapsed
 time since boot in nanoseconds, captured when the request arrives rather than when the
 reply is packed. With no origin, `SYSTEM_TIME` carries `0` for the UNIX field — the
-protocol's "not known" — rather than a date in 1970. Every SD record carries the
-resulting `unixtime` in whole seconds, which is the reference the `.mpk` files are read
-against later.
+protocol's "not known" — rather than a date in 1970. The log's `TIME` record carries the
+resulting `unixtime` in whole seconds together with the origin it came from, and every
+other record is stamped with elapsed time since boot, so a file can be placed on an
+absolute timeline and a mid-mission clock correction is visible rather than appearing as
+an unexplained jump.
 
 ## 6. Hardware map and resource ownership
 
@@ -548,16 +615,15 @@ from
 a build rather than trusted from here, since this figure moves whenever a change
 touches `.data`, `.noinit` or `.bss`). Not 32 KB, and not what `pio run`'s own
 printed percentage appears to leave free. Task stacks, control blocks and queue
-structures are in `.bss`, counted by the linker; `configTOTAL_HEAP_SIZE` is
-`0x200` and backs only `sdWriteQueue`'s items, since the link queues carry theirs
-by value (§4); and `g_heap`, the main stack and the
+structures are in `.bss`, counted by the linker; `configTOTAL_HEAP_SIZE` is `0x0`
+because every queue carries its items by value and nothing allocates at run time
+(§4); and `g_heap`, the main stack and the
 vector table take another 9472 bytes that the printed figure omits.
 `scripts/ram_budget.py` prints the honest total after every link and fails the build
-before the headroom runs out. This is why `sdWriteQueue`'s items are still freed the
-instant they are consumed, why the link queues carry by-value items instead once
-their size made that cheaper, and why adding a library or a
-task is a decision rather than a detail — but it is now a decision the build can
-refuse.
+before the headroom runs out. This is why every queue carries by-value items, why the
+FreeRTOS allocator is not merely unused but absent from the image, and why adding a
+library or a task is a decision rather than a detail — but it is now a decision the
+build can refuse.
 
 **Stack sizes are in words, not bytes**, and they are tuned tight — 96 to 384 words,
 384 to 1536 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled and

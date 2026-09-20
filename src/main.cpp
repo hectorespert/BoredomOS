@@ -6,7 +6,7 @@
 #include <LinkPort.h>
 #include <MAVLink.h>
 #include <LinkMsg.h>
-#include <Data.h>
+#include <SdRecord.h>
 #include <Battery.h>
 #include <SystemTime.h>
 #include <Recovery.h>
@@ -135,15 +135,14 @@ StaticTask_t loggerTcb;
 StackType_t sdWriteStack[256];
 StaticTask_t sdWriteTcb;
 
-// Queue structures and item storage. sdWriteQueue still carries a heap pointer,
-// so its storage is depth x sizeof(pointer) and the FreeRTOS heap backs the
-// items themselves, sized in platformio.ini against the worst case computed in
-// that queue's own design. linkReadQueue and the two per-port write queues
-// carry their items by value instead (queue-mavlink-messages-by-value), so
-// their storage is depth x sizeof(item) directly and none of them touches the
-// heap at all.
+// Queue structures and item storage. EVERY queue now carries its items by value,
+// so each one's storage is depth x sizeof(item) in .bss and none of them touches
+// the FreeRTOS heap -- which, after sdWriteQueue stopped carrying a heap pointer,
+// has no users left at all. There is no producer/consumer margin to add on top of
+// the depth: with a by-value queue an item held before a send or after a receive
+// is a local on that task's own stack, not a shared block.
 StaticQueue_t sdWriteQueueBuffer;
-uint8_t sdWriteQueueStorage[4 * sizeof(Data*)];
+uint8_t sdWriteQueueStorage[4 * sizeof(SdRecord)];
 
 StaticQueue_t linkReadQueueBuffer;
 uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
@@ -389,7 +388,7 @@ void setup()
   sdCardAvailable = SD.begin(9);
   Recovery::setPhase(Recovery::BootPhase::CardDone);
 
-  sdWriteQueue = xQueueCreateStatic(4, sizeof(Data*), sdWriteQueueStorage, &sdWriteQueueBuffer);
+  sdWriteQueue = xQueueCreateStatic(4, sizeof(SdRecord), sdWriteQueueStorage, &sdWriteQueueBuffer);
   configASSERT(sdWriteQueue != NULL);
 
   linkReadQueue = xQueueCreateStatic(8, sizeof(InboundMsg), linkReadQueueStorage, &linkReadQueueBuffer);

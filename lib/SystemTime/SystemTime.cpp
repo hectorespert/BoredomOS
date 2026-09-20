@@ -1,5 +1,6 @@
 #include <SystemTime.h>
 #include <Arduino.h>
+#include <Arduino_FreeRTOS.h>
 #include <RTC.h>
 
 // 2022-01-01T00:00:00Z, after ArduPilot's AP_RTC oldest_acceptable_date_us. A
@@ -159,8 +160,14 @@ int64_t SystemTime::sinceBootNsec()
     return (int64_t)(sinceBootUsec() * 1000ULL);
 }
 
-bool SystemTime::setUnixTime(time_t unix_time, Source from)
+bool SystemTime::setUnixTime(time_t unix_time, Source from, bool *clockMoved)
 {
+    // Default to "the clock did not move" and set it true only on the one path that
+    // writes the clock. Every early return below is a path where it did not.
+    if (clockMoved != nullptr) {
+        *clockMoved = false;
+    }
+
     if (!isPlausible(unix_time)) {
         return false;
     }
@@ -205,17 +212,43 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     }
 
     RTCTime updated(unix_time);
-    if (!RTC.setTime(updated)) {
+
+    // The clock write and the epoch correction are ONE update as far as any reader
+    // of sinceBootUsec() is concerned, and they are performed with the scheduler
+    // suspended so that no reader can land between them. A reader that did would
+    // compute the new wall clock against the old epoch and get an elapsed time
+    // wrong by the size of the correction -- usually decades. The scheduler is
+    // suspended rather than a mutex taken because this firmware's freedom from
+    // mutexes rests on single ownership (ARCHITECTURE.md section 6) and the pair is
+    // two stores; the header's note on this required it before a second task read
+    // these accessors, and the DataFlash log made TaskLogger and TaskSdWrite exactly
+    // that.
+    //
+    // Nothing that can block is inside the suspended region. RTC.setTime() reaches
+    // R_RTC_CalendarTimeSet, which busy-waits on registers rather than yielding, and
+    // the DS1307's I2C write is deliberately left outside it below -- I2C is the one
+    // call here that could block, and it does not participate in the pair.
+    vTaskSuspendAll();
+    bool clockWritten = RTC.setTime(updated);
+    if (clockWritten) {
+        // The one path where the wall clock actually changed.
+        if (clockMoved != nullptr) {
+            *clockMoved = true;
+        }
+
+        // The correction applies to the epoch as well, so that time since boot is
+        // continuous across it. Without this a clock set makes the elapsed measure
+        // jump by the size of the correction. It is also what lets this firmware
+        // accept a BACKWARDS correction at all, which ArduPilot refuses outright
+        // because its wall clock and its monotonic timestamps are coupled and ours
+        // are not.
+        _bootEpoch = (uint32_t)((int64_t)_bootEpoch + ((int64_t)unix_time - (int64_t)previous));
+    }
+    xTaskResumeAll();
+
+    if (!clockWritten) {
         return false;
     }
-
-    // The correction applies to the epoch as well, so that time since boot is
-    // continuous across it. Without this a clock set makes the elapsed measure
-    // jump by the size of the correction -- usually decades. It is also what
-    // lets this firmware accept a BACKWARDS correction at all, which ArduPilot
-    // refuses outright because its wall clock and its monotonic timestamps are
-    // coupled and ours are not.
-    _bootEpoch = (uint32_t)((int64_t)_bootEpoch + ((int64_t)unix_time - (int64_t)previous));
 
     // Skipped when the value came from the DS1307 -- writing it straight back
     // would be an I2C round trip to store what is already there -- and skipped
@@ -235,12 +268,15 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     return true;
 }
 
-bool SystemTime::reseedFromDs1307()
+bool SystemTime::reseedFromDs1307(bool *clockMoved)
 {
+    if (clockMoved != nullptr) {
+        *clockMoved = false;
+    }
     if (!_ds1307Present) {
         return false;
     }
-    return setUnixTime((time_t)_ds1307.now().unixtime(), Source::Ds1307);
+    return setUnixTime((time_t)_ds1307.now().unixtime(), Source::Ds1307, clockMoved);
 }
 
 bool SystemTime::pushToDs1307()

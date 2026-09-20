@@ -1,9 +1,9 @@
 #include <unity.h>
 #include <Arduino.h>
+#include <Arduino_FreeRTOS.h>
 #include <Battery.h>
 #include <SystemTime.h>
 #include <SD.h>
-#include <ArduinoJson.h>
 #include <SdData.h>
 
 #define TEST_FILE_COUNT 4
@@ -15,7 +15,7 @@ SdData sdData(TEST_FILE_COUNT, TEST_FILE_SIZE_MB);
 
 void cleanSdFiles() {
     for (int i = 0; i < TEST_FILE_COUNT; ++i) {
-        String fname = "data" + String(i) + ".mpk";
+        String fname = "data" + String(i) + ".BIN";
         if (SD.exists(fname.c_str())) {
             SD.remove(fname.c_str());
         }
@@ -239,23 +239,144 @@ void test_report_internal_versus_ds1307_drift(void) {
 }
 
 void test_sddata_write_and_rotate(void) {
-    StaticJsonDocument<128> doc;
+    // SdData is format-agnostic now: it takes bytes, and src/sdwrite.cpp is what
+    // knows they are DataFlash records. This exercises the ring, not the format,
+    // so an arbitrary fixed-size payload is the honest thing to write here.
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
     for (int i = 0; i < TEST_FILE_COUNT + 2; ++i) {
         for (int j = 0; j < 100; ++j) {
-          doc["test"] = j;
-          sdData.write(doc);
+          sdData.write(payload, sizeof(payload));
         }
     }
 
     int fileCount = 0;
     for (int i = 0; i < TEST_FILE_COUNT; ++i) {
-        String fname = "data" + String(i) + ".mpk";
+        String fname = "data" + String(i) + ".BIN";
         if (SD.exists(fname.c_str())) {
             fileCount++;
         }
     }
     TEST_ASSERT_EQUAL(TEST_FILE_COUNT, fileCount);
     TEST_ASSERT_TRUE(SD.exists("index.bin"));
+}
+
+void test_set_unix_time_distinguishes_accepted_from_moved(void) {
+    TEST_ASSERT_TRUE(systemTime.begin());
+    time_t original = systemTime.getUnixTime();
+    TEST_ASSERT_TRUE(SystemTime::isPlausible(original));
+
+    // Accepted AND moved: a different plausible second.
+    bool moved = false;
+    TEST_ASSERT_TRUE(systemTime.setUnixTime(original + 120, SystemTime::Source::Ground, &moved));
+    TEST_ASSERT_TRUE_MESSAGE(moved, "a real clock change must report clockMoved");
+
+    // Accepted and NOT moved: the second the clock already holds. This is the case the
+    // reference GCS generates once a second, and reading the return value as "changed"
+    // is what made the flight log append a TIME record per second.
+    //
+    // Retried rather than asserted once: if a second boundary falls between reading the
+    // held value and offering it back, setUnixTime sees a DIFFERENT second and correctly
+    // writes the clock, which would fail this spuriously. Eight attempts all landing on
+    // a boundary is not a real possibility.
+    bool sawNotMoved = false;
+    for (int attempt = 0; attempt < 8 && !sawNotMoved; ++attempt) {
+        time_t held = systemTime.getUnixTime();
+        moved = true;
+        TEST_ASSERT_TRUE(systemTime.setUnixTime(held, SystemTime::Source::Ground, &moved));
+        if (!moved) {
+            sawNotMoved = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(sawNotMoved, "an equal second must report clockMoved false");
+
+    // Refused for implausibility: not moved either.
+    moved = true;
+    TEST_ASSERT_FALSE(systemTime.setUnixTime(0, SystemTime::Source::Ground, &moved));
+    TEST_ASSERT_FALSE_MESSAGE(moved, "a refused time must not report clockMoved");
+
+    // Refused as a demotion: Ground is held, so a Ds1307 re-seed cannot move it.
+    moved = true;
+    TEST_ASSERT_FALSE(systemTime.reseedFromDs1307(&moved));
+    TEST_ASSERT_FALSE_MESSAGE(moved, "a refused re-seed must not report clockMoved");
+
+    systemTime.setUnixTime(original, SystemTime::Source::Ground);
+}
+
+// State for the onOpen coverage below. File-scope rather than captured, because
+// SdDataOnOpen is a plain function pointer -- deliberately, so registering a callback
+// allocates nothing.
+static int onOpenCalls = 0;
+static bool onOpenInside = false;
+static bool onOpenReentered = false;
+
+static void countingOnOpen(SdData &sd) {
+    // If the callback is ever entered while already inside itself, the writeRaw/write
+    // split has failed and rotation has re-entered itself. Recorded rather than
+    // asserted here: Unity assertions from inside a callback would unwind through
+    // library code.
+    if (onOpenInside) {
+        onOpenReentered = true;
+        return;
+    }
+    onOpenInside = true;
+    onOpenCalls++;
+
+    // Deliberately through writeRaw, exactly as src/sdwrite.cpp writes the preamble.
+    // writeRaw does not check the size limit, which is what makes this safe.
+    uint8_t marker[8] = {0xA3, 0x95, 128, 0, 0, 0, 0, 0};
+    sd.writeRaw(marker, sizeof(marker));
+
+    onOpenInside = false;
+}
+
+void test_sddata_on_open_fires_on_rotation_without_re_entering(void) {
+    onOpenCalls = 0;
+    onOpenInside = false;
+    onOpenReentered = false;
+
+    sdData.setOnOpen(countingOnOpen);
+
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
+    // Enough to cross every file of the ring several times.
+    for (int i = 0; i < TEST_FILE_COUNT + 2; ++i) {
+        for (int j = 0; j < 100; ++j) {
+            sdData.write(payload, sizeof(payload));
+        }
+    }
+
+    sdData.setOnOpen(nullptr);
+
+    // Fired at least once, so rotation really does notify.
+    TEST_ASSERT_TRUE_MESSAGE(onOpenCalls > 0, "onOpen never fired on rotation");
+    // Never re-entered: the callback writes through writeRaw, which cannot rotate.
+    TEST_ASSERT_FALSE_MESSAGE(onOpenReentered, "onOpen re-entered itself: writeRaw rotated");
+    // Bounded. Runaway recursion would either overflow the stack or drive this far
+    // past the number of rotations 600 writes of 32 B into 1024 B files can cause.
+    TEST_ASSERT_TRUE_MESSAGE(onOpenCalls < 100, "onOpen fired implausibly often");
+
+    // The ring is still intact after all that.
+    int fileCount = 0;
+    for (int i = 0; i < TEST_FILE_COUNT; ++i) {
+        String fname = "data" + String(i) + ".BIN";
+        if (SD.exists(fname.c_str())) {
+            fileCount++;
+        }
+    }
+    TEST_ASSERT_EQUAL(TEST_FILE_COUNT, fileCount);
+
+    // NOT covered here, and it cannot be from this suite: the callback firing on the
+    // FIRST open, inside begin(). setUp() has already called begin() by the time a
+    // test body runs, and begin() is not idempotent -- it returns early when a file is
+    // already open, and there is no end() to close one. Registering a callback
+    // afterwards and calling begin() again would therefore prove nothing. That path is
+    // exercised only by the flight firmware, and reading it back needs the card pulled.
+    // See the backlog entry on begin() not being idempotent.
 }
 
 int runUnityTests(void) {
@@ -267,13 +388,33 @@ int runUnityTests(void) {
     RUN_TEST(test_subsecond_part_is_present_and_never_goes_backwards);
     RUN_TEST(test_plausibility_floor);
     RUN_TEST(test_set_unix_time_reports_whether_it_accepted);
+    RUN_TEST(test_set_unix_time_distinguishes_accepted_from_moved);
     RUN_TEST(test_time_since_boot_survives_a_backwards_clock_set);
     RUN_TEST(test_an_accepted_time_reaches_the_ds1307);
     RUN_TEST(test_push_to_ds1307_corrects_a_drifted_external_clock);
     RUN_TEST(test_report_r64cnt_range);
     RUN_TEST(test_report_internal_versus_ds1307_drift);
     RUN_TEST(test_sddata_write_and_rotate);
+    RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
     return UNITY_END();
+}
+
+// The linker needs this; nothing here can ever call it.
+//
+// This environment sets test_build_src = no, so src/hooks.cpp -- which defines the
+// real hook -- is not in the test binary. It became necessary when lib/SystemTime
+// started calling vTaskSuspendAll() to make setUnixTime()'s clock-and-epoch update
+// indivisible: that pulls FreeRTOS's tasks.c into the link, and tasks.c references
+// this hook because configCHECK_FOR_STACK_OVERFLOW is 2.
+//
+// A stub is honest rather than a shortcut. This suite never starts a scheduler --
+// setup() calls runUnityTests() directly and creates no task -- so
+// vTaskSwitchContext, the only caller, never runs. Do NOT read a passing run as
+// evidence that overflow detection works: that lives in src/, which this environment
+// deliberately excludes.
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
+    (void)xTask;
+    (void)pcTaskName;
 }
 
 /**
