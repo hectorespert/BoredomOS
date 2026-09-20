@@ -67,10 +67,13 @@ that change's own `tasks.md`.
 
 **One thing is covered nowhere and is not in the list above**, because no task claimed
 it: the `onOpen` callback firing on the **first** open inside `SdData::begin()`. The
-Unity suite cannot reach it — `setUp()` calls `begin()` before any test body runs and
-`begin()` is not idempotent, so a second call proves nothing. See *[`SdData::begin()`
-is not idempotent, and the Unity tests delete its open file]*, which this is now a
-second reason to fix. Rotation's callback **is** tested.
+Unity suite could not reach it — `setUp()` calls `begin()` before any test body runs and
+`begin()` was not idempotent, so a second call proved nothing. Rotation's callback **is**
+tested. `openspec/changes/make-sddata-begin-idempotent/` is picking this up: it makes
+`begin()` reopen, which puts the path within reach, and its task 2.2 adds the case. Note
+what that case does and does not close — it asserts the callback **fired**, not that the
+preamble reached the card, because `cleanSdFiles()` deletes the files a reader would need.
+Only that change's task 4.2, with the card pulled, closes the rest.
 
 Two things worth knowing before spending board time on any of the above:
 
@@ -466,6 +469,11 @@ Today the housekeeping log can only be recovered by pulling the card out of the
 board: nothing exposes it over the link, which is not a realistic way of reading it
 with the satellite assembled.
 
+Read *[Serve the SD card as USB mass storage]* before starting this one. It moves the same
+bytes far more cheaply, and if it works it may retire this entry and its FTP sibling — but
+only for an operator holding the board. This path is the only one that works from orbit, so
+the two are not substitutes; decide which problem is being solved.
+
 This entry is the **log protocol**: `LOG_REQUEST_LIST` / `LOG_ENTRY` /
 `LOG_REQUEST_DATA` / `LOG_DATA` / `LOG_REQUEST_END` / `LOG_ERASE`, ids 117–122. Its
 sibling is *[Serve the SD card over MAVLink FTP]*, and **the firmware wants both**:
@@ -539,7 +547,9 @@ MAVLink FTP (`FILE_TRANSFER_PROTOCOL`) exposes the card as a filesystem: listing
 directory and reading a file by path, with the reference GCS (`ftp list` / `ftp get`
 in MAVProxy, and QGroundControl's own uses). It is the sibling of *[Download the
 flight log over the MAVLink log protocol]*, and the firmware wants both — that entry
-has the table of which tool drives which, and why one does not replace the other.
+has the table of which tool drives which, and why one does not replace the other. Both
+should be read against *[Serve the SD card as USB mass storage]*, which does the same job
+over the USB cable for a fraction of the work, and only for someone holding the board.
 
 The short version: the log protocol is the one an operator reaches for to pull a
 flight log, because the GCS enumerates them without being told anything. FTP is what
@@ -582,6 +592,42 @@ Points to resolve before implementing:
   `index.bin` has no such property and a torn read of it is simply wrong.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+
+### Serve the SD card as USB mass storage
+
+**Status:** defined
+**Scope:** `src/link.cpp`, `platformio.ini`, `ARCHITECTURE.md`
+
+Both existing download paths are expensive: *[Download the flight log over the MAVLink log
+protocol]* and *[Serve the SD card over MAVLink FTP]* each implement a protocol to move
+bytes the host could read directly. madflight does neither — it exposes the card as a USB
+mass storage device:
+
+```c
+usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
+// msc_read_cb -> sd.card()->readSectors(lba, buffer, bufsize/512)
+```
+
+Plug the board in, a disk appears, copy the file. No protocol, no rate limit, no partial
+transfers to resume.
+
+**The open question is whether it can coexist with the MAVLink CDC.** USB already carries
+MAVLink as a CDC endpoint and `src/link.cpp` owns it, so this needs a composite CDC+MSC
+device. The Renesas core does ship TinyUSB — it is named in *[The toolchain and uploader
+are x86_64-only]* as the part GCC 14 rejects — but whether a composite descriptor is
+reachable from this core, and what it costs in flash and RAM, is unknown and is the first
+thing to find out.
+
+**And it forces a question the two protocol entries dodge:** two writers on one card. MSC
+hands the host raw sector access while `TaskSdWrite` is appending. Betaflight and madflight
+sidestep it by only enabling MSC when disarmed; the equivalent here would be serving the
+card only while logging is stopped, which needs `SdData::end()` from
+`openspec/changes/make-sddata-begin-idempotent/`.
+
+If this works it may retire both protocol entries, which is a large saving — but it serves
+only an operator holding the board, never a ground station on a radio link. The MAVLink
+paths are the only ones that work from orbit, so this is a convenience for development, not
+a replacement for them. Decide which problem is actually being solved before picking.
 
 ### Debug and release builds, with MAVLink tracing on the console
 
@@ -815,44 +861,166 @@ hundred kilobytes to a few megabytes puts rotation at hours or days), and whethe
 the size is a compile-time constant or a ground-settable parameter under *[Implement
 the MAVLink parameter protocol]*.
 
-### `SdData::begin()` is not idempotent, and the Unity tests delete its open file
+**Do this one BEFORE *[The flush policy costs far more card writes than it needs to]*,
+not after.** Rotation is dead code: `writeLogIndex()`, `index.bin` and the whole
+resume-after-power-cycle mechanism have never executed, in any build, ever. Changing the
+write policy first would ship a buffering scheme whose interaction with rotation cannot be
+observed, which is the exact shape of debt this project keeps finding later. Shrinking the
+files first, with today's simple flush-per-record, makes rotation observable and makes
+that change verifiable.
+
+**A latent watchdog reset lives on this path, and this entry is what wakes it.** Rotation
+does `SD.remove()` on the next file and then `SD.open()`. On a 1 GiB file with 32 KiB
+clusters that walks ~32 768 FAT entries. `WDT_TIMEOUT_MS` is **1398**, and the failure
+mode is a reset with no trace — indistinguishable from a mystery. Measure a rotation's
+duration on the board before reducing the size, not after. If it does not fit, the options
+are pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
+remove in pieces across several `write()` calls, or accepting a larger file.
+
+**And decide how a reader finds the end of a rewritten file.** Once rotation actually
+happens, a file is written over on its second lap, so records from the previous lap sit
+after the write cursor — complete, valid, and with older timestamps. `DFReader`
+resynchronises on `0xA3 0x95` and will parse them as real data. Nothing today
+distinguishes them. Options: delete and recreate the file on rotation (which is the
+expensive FAT walk above), a lap counter in the file (see *[Put the ring's position in the
+log data instead of `index.bin`]*), or leaving the reader to cut where time goes backwards.
+This has never mattered because rotation has never happened.
+
+### The flush policy costs far more card writes than it needs to
 
 **Status:** defined
-**Scope:** `lib/SdData`, `test/test_libs/test_main.cpp`
+**Scope:** `lib/SdData`, `openspec/specs/flight-log/spec.md`
 
-`SdData::begin()` opens the log file only when it does not already hold one:
+`SdData::writeRaw()` calls `_dataFile.flush()` after **every record**. Nobody chose that;
+it has been there since the log existed. Traced through `SdFile::sync()` and
+`SdVolume::cacheFlush()` in `.pio/libdeps/uno_r4_minima/SD/`, one 27-byte `SYS` record
+costs **two sector writes and two sector reads**:
 
-```cpp
-_fileIdx = readLogIndex();
-if (!_dataFile) {
-    _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
+- the data block is not in cache (the previous `sync()` evicted it) → **read** it
+- copy 27 B in; the file grew, so `F_FILE_DIR_DIRTY` is set
+- `sync()` needs the directory block, which is not in cache → `cacheFlush()` **writes**
+  the data block, then **reads** the directory block
+- `sync()` writes `d->fileSize` and `cacheFlush()` **writes** the directory block
+
+`SdVolume` has a single 512 B cache block, so the `sync()` evicts the very block the next
+record needs. The `flush()` is paid twice.
+
+Without the per-record flush, `SdFile::write` takes a different branch entirely: when
+`blockOffset == 0` and the write is at the end of the file it does not even read the
+block, it marks it dirty and fills it, and the block is written **once, when full**.
+
+| | sector writes/s | factor | lost on a power cut |
+|---|---|---|---|
+| today, flush per record | 3,00 | 1× | one record |
+| flush per sector | 0,13 | 23× | ~15 s |
+| flush per 32 sectors | 0,068 | 44× | ~8 min |
+
+**Most of the win is in not flushing per record; per-sector is the right choice here.**
+madflight uses 32 sectors (16 kB) because at a drone's data rate a sector fills in
+milliseconds. At our 34 B/s a sector is fifteen seconds, so copying that constant would be
+copying the answer to a different question.
+
+**Where the wear actually lands.** Half of those writes go to the *same* directory sector,
+about 129 600 times a day, 47 million times a year. Card wear levelling should spread it,
+but the FAT and directory region is the known death zone of cheap cards — what is at risk
+is not the log, it is the filesystem that indexes it, and with it the other three files.
+
+**This modifies a live requirement, and that is the real cost.**
+`openspec/specs/flight-log/spec.md`'s *A truncated record costs only that record* says
+"the incomplete tail is the only data lost". Buffering breaks that literally: completed
+records in the unflushed block are lost too. The change has to carry a MODIFIED delta
+stating the new bound honestly, not slip the trade past the spec. Per-sector flushing makes
+that bound ~15 s, which is defensible; 16 kB would make it ~8 minutes, which is a different
+argument.
+
+Two things the change has to handle:
+
+- **Pad the unfilled tail with `0xFF`, not zeros.** This is what madflight does
+  (`memset(wbuf, 0xff, sizeof(wbuf))`), and it makes a half-filled sector
+  **self-terminating**: DataFlash readers skip `0xFF`, so the file ends where it should
+  without anyone having recorded its length.
+- **Recover the true end on reopen.** After a power cut the directory entry's `fileSize`
+  is stale and short, while the bytes past it are physically on the card. Appending from
+  the stale offset would overwrite data that survived. Scanning forward from `fileSize`
+  for the real end is a bounded read — at most one flush interval — and turns an accepted
+  loss into no loss at all.
+
+No new RAM: **the 512 B `SdVolume` cache already is the buffer**, and today we throw it
+away on every record. That is the difference from madflight, which needs its own
+`wbuf[512]` on top of SdFat.
+
+### Replace `arduino-libraries/SD` with `greiman/SdFat`
+
+**Status:** defined
+**Scope:** `platformio.ini`, `lib/SdData`, `test/test_libs/test_main.cpp`,
+`ARCHITECTURE.md`
+
+`arduino-libraries/SD` is a fork of an ancient SdFat and it is the reason this project
+cannot do what every comparable project does. It has no `preAllocate()`, no `truncate()`,
+no contiguous-write fast path, and one global 512 B cache block.
+
+What that unlocks, in order of value:
+
+- **`preAllocate()` reserves clusters in the FAT without writing a byte of data.** It is a
+  metadata operation, cheap. A file that never grows never sets `F_FILE_DIR_DIRTY`, so its
+  directory entry is **never touched in flight** — which removes the wear target described
+  in *[The flush policy costs far more card writes than it needs to]* rather than merely
+  reducing it. madflight pre-allocates 100 MB and calls `truncate()` on close to give back
+  what it did not use.
+- **It removes the rotation watchdog risk.** If the next file is already allocated there is
+  no FAT walk on the flight path.
+- Betaflight went further and wrote [asyncfatfs](https://github.com/thenickdude/asyncfatfs)
+  for the same reason: it reserves the largest contiguous free region as a file and lends
+  space from it, so "the FAT entries for the file need never be read".
+
+**Start with a spike, not a swap.** RAM is the binding constraint and this is a new
+dependency: measure SdFat's `.bss` and flash against the headroom `scripts/ram_budget.py`
+reports (3184 B as of 2026-09-20) before committing to anything. SdFat is configurable
+(`SdFatConfig.h`) and has a reduced mode, so the first question is what the smallest
+useful configuration costs. If it does not fit, this entry closes as "does not fit" and
+*[The flush policy...]* stands on its own, which it can.
+
+### Put the ring's position in the log data instead of `index.bin`
+
+**Status:** defined
+**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `include/SdRecord.h`,
+`openspec/specs/flight-log/spec.md`
+
+`index.bin` is a second file that has to stay in agreement with the data, and it is
+written from the rotation path with its own `open`/`seek`/`write`/`flush`/`close`. If it is
+lost or torn the ring does not know where it is. It also evicts the single `SdVolume` cache
+block every time it is touched.
+
+ArduPilot's `AP_Logger_Block` — the backend for raw flash chips, with no filesystem at all
+— does not have this piece, because the information lives in the data. Every page carries a
+header with `FileNumber` and `FilePage`, and at startup `find_last_page()` runs a **binary
+search** for where the pair stops increasing:
+
+```c
+while (top - bottom > 1) {
+  look = (top + bottom) / 2;
+  StartRead(look);
+  look_hash = (int64_t)GetFileNumber() << 32 | df_FilePage;
+  if (look_hash < bottom_hash) { top = look; }
+  else { bottom = look; bottom_hash = look_hash; }
 }
 ```
 
-There is no `end()` and nothing ever closes `_dataFile`, so a second `begin()` is a
-no-op that silently keeps the first file — even when `_fileIdx` has changed and a
-different file is what should be open.
+A new log is `FileNumber + 1`. The end of the ring is where the counter goes backwards.
 
-`test/test_libs/test_main.cpp` walks straight into it. `setUp()` calls
-`cleanSdFiles()` and then `begin()`; `tearDown()` calls `cleanSdFiles()` again, which
-`SD.remove()`s a file `sdData` still has open. From the second case onwards `begin()`
-sees a truthy `_dataFile` and does not reopen, so the remaining cases write through a
-handle to a deleted file. The suite passes — it asserts on `SD.exists()`, not on the
-bytes — which is what makes this worth writing down rather than noticing the day it
-matters.
+Adapted to a ring of *files* rather than raw flash, the equivalent is a monotonically
+increasing lap or session counter written into each file when it is opened — a record type
+with its own `FMT`, so it stays `DFReader`-visible — and a boot that reads the four
+counters and picks the highest. That satisfies the existing requirement (*The log occupies
+a bounded amount of the card*: "The position within that set SHALL survive a power cycle")
+without a side-car file, and it is **also the answer** to how a reader finds the end of a
+rewritten file, which *[The default SD ring is 4 GiB and never rotates]* has to solve
+anyway.
 
-In flight `begin()` is called exactly once, from `TaskSdWrite`, so nothing is broken
-today. It becomes real the moment anything restarts the logger: a card remount, an
-error-recovery path, or the SD failure handling of *[SD logging failure is silent]*.
-
-To decide: whether `begin()` closes and reopens unconditionally, or gains an `end()`
-and the tests call it; and whether `cleanSdFiles()` should refuse to remove a file the
-object still holds, which would have made this visible immediately.
-
-Found by Copilot reviewing the pull request that split `test/` into `test_libs` and
-`test_hil`. It is not a regression of that change: the code is untouched and only
-moved.
-
+Note that ArduPilot's *file* backend does **not** do this — page headers exist because raw
+flash has no filesystem. So this is a borrowed idea, not a copied one, and the question of
+whether a side-car file is genuinely worse than a counter in every file is the thing to
+settle first.
 
 ### Decide whether `SYSTEM_TIME` deserves 1 Hz
 
@@ -978,6 +1146,12 @@ it; and how the ground finds out — a `STATUSTEXT`, a field in the heartbeat (w
 `custom_mode` bytes `add-degraded-mode` already spent on the boot-time state — see
 *Emit `SYS_STATUS`* above), or both. Be careful not to flood the link by repeating
 the warning at 1 Hz.
+
+Note that `openspec/changes/make-sddata-begin-idempotent/` is touching `begin()` now and
+deliberately does **not** change its `void` return — it says so in its own Non-Goals. So
+the signature question is still entirely open here, and that change also gives the error
+path a new reason to exist: recovering from a card failure means reopening the log, which
+is the case that change makes work.
 
 
 ### `TaskSerialRead` polls the port instead of waiting
