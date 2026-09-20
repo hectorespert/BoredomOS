@@ -18,6 +18,73 @@ pointers travelling through the queue.
 
 ## To implement
 
+### Finish what replace-messagepack-log-with-dataflash left open
+
+**Status:** defined
+**Scope:** `test/test_hil/`, hands at the board and at the SD card
+
+`openspec/changes/archive/2026-09-20-replace-messagepack-log-with-dataflash/` shipped
+38 of its 45 tasks. The seven that remain are recorded here because the change
+directory stops being read once archived, and because **six of them are the only
+evidence that would close this capability's central claim**: that the flight log is
+readable by a standard tool. The format was validated against `pymavlink`'s
+`DFReader` — including recovering 5 of 6 records from a deliberately truncated file —
+but **against bytes built in Python, not bytes the firmware emitted**. Nobody has yet
+read a file the board wrote.
+
+All six need the card physically pulled and read on another machine; nothing over the
+link reads the card, which is what *[Download the flight log over the MAVLink log
+protocol]* and *[Serve the SD card over MAVLink FTP]* would change. Numbers below are
+that change's own `tasks.md`.
+
+- **9.2 — parse a real `data0.BIN` with a general-purpose tool.** The whole point of
+  the change, and the first scenario of `openspec/specs/flight-log/spec.md`.
+  `ARCHITECTURE.md` §5.2 records the procedure. Note `mavlogdump.py` is **not** in the
+  PlatformIO-bundled `pymavlink` (it ships without `tools/`), so use `DFReader`
+  directly.
+- **9.3 — check the log's stack figures against the housekeeping stream.** Cross-
+  validates log and telemetry against each other. The reference reading taken during
+  that change: `Logger` 56, `SdWrite` 87, `Mavlink` 122, `UartRead` 41, `UartWrite`
+  146, `UsbRead` 52, `UsbWrite` 136 words free.
+- **9.4 — check the battery figures against `BATTERY_STATUS`.** This is what actually
+  closes the defect where every `.mpk` ever written carried `millivolts: 0`. The
+  firmware reported 3919 mV / 59 % when it was left running, so the log's `PWR`
+  records should agree and none should read zero.
+- **9.5 — cut power mid-write and confirm only the torn tail is lost.** The resilience
+  claim. No script observes it.
+- **9.6 — read back a `TIME` record after a ground clock set.** A `TIME` record from
+  origin `ground` was written before the board was left running, so the evidence is
+  already on the card.
+- **1.3 — copy a surviving `data*.mpk` off the card.** Optional now: `cleanSdFiles()`
+  was retargeted at `data*.BIN`, so the old MessagePack logs survive every Unity run
+  and nothing in the firmware touches them again. They will sit there until removed by
+  hand.
+- **9.10 — that the log's time reference does not wrap is not demonstrable here.**
+  It needs an uninterrupted run past what a 32-bit millisecond count can represent,
+  ~49.7 days. The requirement is in the spec because the behaviour matters, and after
+  archiving nothing in `openspec/specs/flight-log/spec.md` distinguishes it from a
+  proven one. This entry is that distinction.
+
+**One thing is covered nowhere and is not in the list above**, because no task claimed
+it: the `onOpen` callback firing on the **first** open inside `SdData::begin()`. The
+Unity suite cannot reach it — `setUp()` calls `begin()` before any test body runs and
+`begin()` is not idempotent, so a second call proves nothing. See *[`SdData::begin()`
+is not idempotent, and the Unity tests delete its open file]*, which this is now a
+second reason to fix. Rotation's callback **is** tested.
+
+Two things worth knowing before spending board time on any of the above:
+
+- **`pio run -e libs` does not catch everything `pio test -e libs` does.** Adding a
+  `vTaskSuspendAll()` to `lib/SystemTime` pulled FreeRTOS's `tasks.c` into that
+  environment's link for the first time, which then needed a hook `src/hooks.cpp`
+  defines and `test_build_src = no` excludes. `pio run -e libs` stayed green
+  throughout. Expect this the next time a `lib/` change touches a FreeRTOS primitive.
+- **`lib/SdData` had never been analysed by `pio check`.** `SdData.h` included
+  `ArduinoJson.h` and cppcheck was silently giving up on the translation unit, hiding
+  three pre-existing findings until the include left. Worth asking which other
+  translation units are being skipped for the same reason — nothing reports a file it
+  declined to parse.
+
 ### Finish what replace-console-cli-with-usb-mavlink-link left open
 
 **Status:** defined
