@@ -63,13 +63,24 @@ rules:
     - Any proposal that adds a task, a queue or a library must state its RAM cost
       against the headroom the build reports, read from a current build rather
       than quoted from anywhere. A task's stack and control block are counted by
-      the linker; a queue's storage is depth times item size in .bss, declared
-      beside the queue and nothing more, because every queue carries its items by
-      value. There is no producer or consumer margin to add -- an item held before
-      a send or after a receive is a local on that task's own stack. Proposing a
-      depth is proposing that arithmetic. Nothing allocates at run time, so a
+      the linker; a queue costs depth times item size, PLUS one StaticQueue_t
+      control block, both declared in .bss beside the queue in the composition
+      root. Do not leave the control block out -- xQueueCreateStatic takes it as
+      an argument and it is per queue, so a total that counts only the storage
+      array claims more headroom than the linker will give. What there is NOT is
+      any producer or consumer margin, because every queue carries its items by
+      value and an item held before a send or after a receive is a local on that
+      task's own stack. Proposing a depth is proposing that arithmetic. Nothing allocates at run time, so a
       proposal that needs a run-time allocation is proposing to reintroduce the
       heap, which is a decision to argue for explicitly rather than a detail.
+      BE AWARE that openspec/specs/memory-budget/spec.md still describes the
+      previous model -- a run-time pool, reserved margin per producer and consumer,
+      and a producer releasing the memory of a rejected item. That spec has not
+      been migrated and it contradicts this rule, so satisfying one can violate the
+      other. This rule describes the firmware as it is; the spec is the one that is
+      out of date. A proposal that touches queue memory should carry the MODIFIED
+      delta that fixes it -- see TODO.md, "memory-budget's queue requirements still
+      describe the heap".
     - State explicitly when a change alters the MAVLink surface (new message id,
       new stream rate, changed identity triple).
     - Read the other active changes under openspec/changes/ before writing, not

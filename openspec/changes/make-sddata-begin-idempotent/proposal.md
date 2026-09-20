@@ -25,8 +25,22 @@ build on a coherent lifecycle rather than preserving an incoherent one.
 
 ## What Changes
 
-- `SdData::begin()` becomes idempotent: it closes whatever file it holds, reads the
-  index, opens the file that index names, and notifies. Opening always opens.
+- `SdData::begin()` gains **reopen semantics**: it closes whatever file it holds, reads
+  the index, opens the file that index names, and notifies. Opening always opens.
+
+  **It is not idempotent, and the change id overstates it.** Every call has observable
+  effects: a close, an open, and an `onOpen` that appends another `FMT` preamble and
+  another `TIME` record to the file. Two calls produce two preambles. A caller cannot
+  treat this as a repeatable no-op, and the API must not be described as though it can —
+  the id `make-sddata-begin-idempotent` should be read as "opening always opens", not as
+  the algebraic property.
+
+  The duplicate preamble is **specified behaviour rather than a side effect to avoid**.
+  `flight-log`'s *Each log file is readable on its own* requires that "a file that is
+  reopened and appended to SHALL carry those definitions again from the point of
+  reopening", which is exactly what a second `begin()` produces. `DFReader` accepts
+  repeated `FMT` records; that is how ArduPilot's own logs survive a reboot into the same
+  file.
 - A new `SdData::end()` closes the open file, so a caller can put the object back to a
   state where the card may be modified underneath it.
 - The Unity suite's `tearDown()` calls `end()` before `cleanSdFiles()`, so the suite

@@ -32,7 +32,10 @@ about a call site the suite cannot execute, and must be marked as such.
 **Goals:**
 
 - `begin()` means "open the file the index names", unconditionally, whatever the object
-  was holding.
+  was holding. **Reopen semantics, not idempotence** — every call closes, opens and
+  notifies, so two calls append two `FMT` preambles. See `proposal.md` for why that is
+  what `flight-log` already requires of a reopened file, and for why the change id
+  overstates the property.
 - A caller can close the file, so the card can be modified underneath without the object
   holding a handle to something that no longer exists.
 - The `onOpen` callback's `begin()` path becomes reachable from the Unity suite, closing
