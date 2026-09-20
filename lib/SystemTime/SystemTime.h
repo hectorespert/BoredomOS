@@ -75,9 +75,21 @@ public:
   // than the one currently held, and reports whether it did. Writes the DS1307
   // too when it is present, so the clock that seeds the next boot is corrected
   // as well -- which is what makes Ds1307 able to outrank Survived. The return
-  // value is what a caller needs to know a clock set actually happened; the
-  // planned DataFlash log emits its TIME record on it.
-  bool setUnixTime(time_t unix_time, Source from);
+  // value says the time was ACCEPTED. It does not say the clock moved, and reading
+  // it as though it did is a mistake this interface has already caused once.
+  //
+  // The optional clockMoved out-parameter reports whether the WALL CLOCK actually
+  // changed, which the return value does not: this returns true for an accepted time
+  // that equals the second already held, and the reference GCS offers a time every
+  // second, so "accepted" and "changed" differ on almost every call. A caller that
+  // needs the distinction -- the flight log emits its TIME record on a change, not on
+  // an acceptance -- must use this rather than infer it from the bool. Set to false on
+  // every path that does not write the clock, including both refusals.
+  //
+  // Deducing it by comparing getUnixTime() before and after does NOT work: a second
+  // boundary crossed between the caller's read and this function's own makes an
+  // unchanged clock look changed. Only this function knows which path it took.
+  bool setUnixTime(time_t unix_time, Source from, bool *clockMoved = nullptr);
 
   // The two halves of the periodic reconciliation, which the caller picks between
   // by looking at source(). Neither belongs on the inbound-message path: keeping
@@ -86,7 +98,11 @@ public:
   // Re-reads the DS1307 and brings the internal RTC back to it. Does nothing once
   // a time from the ground has been accepted, since Ground outranks Ds1307 and
   // setUnixTime() refuses the demotion.
-  bool reseedFromDs1307();
+  // clockMoved, as on setUnixTime(): whether the wall clock actually changed, which
+  // is what a drift correction does without changing the origin. The return value only
+  // says the re-seed was accepted, and a DS1307 already on the held second accepts
+  // without moving anything.
+  bool reseedFromDs1307(bool *clockMoved = nullptr);
 
   // The other direction, for when the ground is the authority: writes the internal
   // clock out to the DS1307 so the next boot seeds from something current. This is

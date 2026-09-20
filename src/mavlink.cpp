@@ -613,9 +613,10 @@ struct ScheduleEntry {
             lastReseedMs += kClockReseedIntervalMs;
             SystemTime::Source beforeReconcile = systemTime.source();
 
+            bool reseedMovedClock = false;
             bool reconciled = (beforeReconcile == SystemTime::Source::Ground)
                                   ? systemTime.pushToDs1307()
-                                  : systemTime.reseedFromDs1307();
+                                  : systemTime.reseedFromDs1307(&reseedMovedClock);
 
             // Reports a change like any other: a re-seed can promote `survived` to
             // `ds1307`, and the ground has no other way to learn that the clock it
@@ -623,6 +624,15 @@ struct ScheduleEntry {
             // not by a peer, so it cannot flood.
             if (reconciled && systemTime.source() != beforeReconcile) {
                 sendClockStatusText();
+            }
+
+            // The log is gated differently from the text, and on purpose. Correcting
+            // drift is the whole point of this re-seed, and it moves the wall clock
+            // WITHOUT changing the origin -- ds1307 to ds1307 -- so gating the record
+            // on a provenance change would silently omit every drift correction a
+            // mission makes. pushToDs1307() writes the external clock and never the
+            // internal one, so it cannot move this clock and reports nothing here.
+            if (reseedMovedClock || (reconciled && systemTime.source() != beforeReconcile)) {
                 logClock();
             }
         }
@@ -746,14 +756,24 @@ struct ScheduleEntry {
                     // the periodic cadences specs/mavlink-link/spec.md
                     // guarantees. A refusal is observable anyway: the reported
                     // time does not move.
-                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground)) {
-                        // The log records every ACCEPTED set, whether or not the
-                        // origin changed: what matters to whoever reads the file is
-                        // that the wall clock moved, and setUnixTime()'s own bool is
-                        // exactly that report -- no new hook is needed. The status
-                        // text stays gated on a change of origin, which is what the
-                        // ground has no other way to learn.
-                        logClock();
+                    bool clockMoved = false;
+                    if (systemTime.setUnixTime(unix_time_from_gcs, SystemTime::Source::Ground,
+                                               &clockMoved)) {
+                        // The log records a CHANGE, not an acceptance. Those differ on
+                        // almost every call: setUnixTime() returns true for a time equal
+                        // to the second already held, and the reference GCS offers one
+                        // every second, so logging on the bool alone would append a TIME
+                        // record per second for ever -- half again the log's whole byte
+                        // rate, and sustained pressure on a depth-4 queue whose drops are
+                        // silent, discarding the housekeeping the log exists for. Found by
+                        // Copilot's review of this change.
+                        //
+                        // An origin change counts as well even when the second did not
+                        // move: TIME carries Src, and a promotion changes the provenance
+                        // of every record after it.
+                        if (clockMoved || systemTime.source() != before) {
+                            logClock();
+                        }
                         if (systemTime.source() != before) {
                             sendClockStatusText();
                         }

@@ -455,10 +455,29 @@ A step nothing available can reach is still listed, said plainly, and left untic
   a mission**, so the Unity suite is the only place it is exercised at all.
 
   Closed by `test_sddata_write_and_rotate` in the same run: it writes past the capacity
-  of all four files and asserts the file count stays at four and `index.bin` exists. The
-  rotation path now also invokes the `onOpen` callback, so this run is the first evidence
-  that the callback fires on rotation without re-entering it — the `writeRaw`/`write`
-  split holding up in practice rather than only by inspection.
+  of all four files and asserts the file count stays at four and `index.bin` exists.
+
+  **A claim written here first was false, and Copilot's review caught it.** This note
+  originally said the run was "the first evidence that the callback fires on rotation
+  without re-entering it". It was not: that test never called `setOnOpen`, so `_onOpen`
+  stayed `nullptr` and `notifyOpened()` did nothing in all thirteen cases. The callback
+  path was covered *nowhere* — not by the suite, not by the board (the card had not been
+  read), and not by the Python format check (which parsed a preamble built in Python, not
+  one the firmware emitted). Exactly the failure `openspec/config.yaml` warns about: a
+  check that looks closed is worse than a recorded absence.
+
+  Now covered for real by `test_sddata_on_open_fires_on_rotation_without_re_entering`,
+  which registers a callback, writes through `writeRaw` from inside it exactly as
+  `src/sdwrite.cpp` does, and asserts it fired, never re-entered itself, and fired a
+  bounded number of times. **15 of 15 passed.** The `writeRaw`/`write` split is now
+  demonstrated rather than inspected.
+
+  Still not covered, and stated rather than glossed: the callback firing on the **first**
+  open inside `begin()`. `setUp()` has already called `begin()` before any test body runs,
+  and `begin()` is not idempotent — it returns early when a file is open and there is no
+  `end()` — so registering a callback afterwards and calling `begin()` again would prove
+  nothing. That is the backlog entry on `begin()`'s idempotency biting. Only the flight
+  firmware exercises it, and task 9.2 is what would observe it.
 
   Note what this does **not** cover: the suite constructs `SdData(4, 1024)`, where 1024
   is **bytes** despite the constant being named `TEST_FILE_SIZE_MB`. That misleading name
@@ -467,6 +486,47 @@ A step nothing available can reach is still listed, said plainly, and left untic
 - [ ] 9.10 Not reachable by anything available: that the log's time reference does not
   wrap. Demonstrating it needs an uninterrupted run of more than ~49.7 days. Recorded in
   `proposal.md`'s Impact and left unticked deliberately, not forgotten.
+
+## 11. Copilot's review
+
+- [x] 11.1 **`src/mavlink.cpp` queued a `TIME` record for every repeated `SYSTEM_TIME`,
+  not only for a clock change.** `setUnixTime()` returns true on its equal-second path,
+  and the reference GCS offers a time once a second — a fact stated in a comment four
+  lines above that `return true`. So a synchronising ground station added ~16 B/s of
+  `TIME` on top of a declared ~34 B/s, a 47 % overrun, plus sustained pressure on a
+  depth-4 queue whose drops are silent and would have discarded the `SYS` records the log
+  exists for.
+
+  The justification was the actual defect: this change's own comment asserted that
+  `setUnixTime()`'s bool "is exactly that report" of the wall clock having moved. It is
+  not — it reports acceptance.
+
+  Fixed by exposing the distinction where it is known rather than inferring it at the
+  call site: `setUnixTime()` and `reseedFromDs1307()` take an optional `bool *clockMoved`,
+  false on every path that does not write the clock. Inferring it by comparing
+  `getUnixTime()` before and after does **not** work — a second boundary between the
+  caller's read and the function's own makes an unchanged clock look changed — and that
+  reasoning is recorded in the header so the next caller does not repeat it. The default
+  argument keeps the existing signature working, so
+  `test_set_unix_time_reports_whether_it_accepted` is untouched.
+
+  Verified on the board by a new case,
+  `test_set_unix_time_distinguishes_accepted_from_moved`: accepted-and-moved,
+  accepted-and-not-moved, refused-as-implausible and refused-as-demotion. The
+  equal-second assertion retries up to eight times, because a second boundary falling
+  between reading the held value and offering it back would fail it spuriously.
+
+- [x] 11.2 **The same bug existed on the 6-hourly reconciliation path, and Copilot did
+  not flag it.** Found while fixing 11.1. `reseedFromDs1307()` exists to correct drift,
+  which moves the wall clock **without** changing the origin (`ds1307` to `ds1307`), and
+  the log record was gated on a provenance change — so every drift correction a mission
+  makes would have gone unrecorded, against this change's own spec requirement that a
+  clock change be visible. Now gated on `clockMoved` as well. `pushToDs1307()` writes the
+  external clock only and cannot move this one, so it reports nothing.
+
+- [x] 11.3 Re-run both suites after the fixes. **Unity 15 of 15** (two new cases), **HIL
+  25 passed / 8 skipped / 0 failed**, flash 88844 -> 88972 B (+128 B), RAM unchanged at
+  `committed 29584 B, headroom 3184 B`. Flight firmware restored to the board.
 
 ## 10. Backlog surgery, in the proposing commit
 

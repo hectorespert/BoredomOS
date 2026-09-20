@@ -160,8 +160,14 @@ int64_t SystemTime::sinceBootNsec()
     return (int64_t)(sinceBootUsec() * 1000ULL);
 }
 
-bool SystemTime::setUnixTime(time_t unix_time, Source from)
+bool SystemTime::setUnixTime(time_t unix_time, Source from, bool *clockMoved)
 {
+    // Default to "the clock did not move" and set it true only on the one path that
+    // writes the clock. Every early return below is a path where it did not.
+    if (clockMoved != nullptr) {
+        *clockMoved = false;
+    }
+
     if (!isPlausible(unix_time)) {
         return false;
     }
@@ -225,6 +231,11 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     vTaskSuspendAll();
     bool clockWritten = RTC.setTime(updated);
     if (clockWritten) {
+        // The one path where the wall clock actually changed.
+        if (clockMoved != nullptr) {
+            *clockMoved = true;
+        }
+
         // The correction applies to the epoch as well, so that time since boot is
         // continuous across it. Without this a clock set makes the elapsed measure
         // jump by the size of the correction. It is also what lets this firmware
@@ -257,12 +268,15 @@ bool SystemTime::setUnixTime(time_t unix_time, Source from)
     return true;
 }
 
-bool SystemTime::reseedFromDs1307()
+bool SystemTime::reseedFromDs1307(bool *clockMoved)
 {
+    if (clockMoved != nullptr) {
+        *clockMoved = false;
+    }
     if (!_ds1307Present) {
         return false;
     }
-    return setUnixTime((time_t)_ds1307.now().unixtime(), Source::Ds1307);
+    return setUnixTime((time_t)_ds1307.now().unixtime(), Source::Ds1307, clockMoved);
 }
 
 bool SystemTime::pushToDs1307()
