@@ -404,9 +404,12 @@ Implementation points:
 - If the reading is not taken by `TaskLogger` itself, the value has to reach it
   without breaking the queue protocol: **a new `SdRecordKind` and payload in
   `include/SdRecord.h`, sent by value**. There is nothing to free and nothing to
-  allocate — and if the new payload pushes `SdRecord` past its current size, the
-  `static_assert` in that header fails the build until `sdWriteQueueStorage` in
-  `src/main.cpp` is resized to match.
+  allocate. Note there is **no array to resize**: `sdWriteQueueStorage` in
+  `src/main.cpp` is declared `4 * sizeof(SdRecord)`, so it follows the record
+  automatically. What a larger payload does need is the `static_assert` in
+  `include/SdRecord.h` updated — it pins the exact size, so it fails the build
+  deliberately — and the queue's `.bss` cost rechecked against the headroom
+  `scripts/ram_budget.py` reports, because four items grow with it.
 - Outbound MAVLink message: pick a standard one (`SCALED_PRESSURE.temperature` in
   centidegrees, or `HYGROMETER_SENSOR`) and emit it with the same identity triple as
   the rest: system `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
@@ -879,20 +882,28 @@ the size is a compile-time constant or a ground-settable parameter under *[Imple
 the MAVLink parameter protocol]*.
 
 **Do this one BEFORE *[The flush policy costs far more card writes than it needs to]*,
-not after.** Rotation is dead code: `writeLogIndex()`, `index.bin` and the whole
-resume-after-power-cycle mechanism have never executed, in any build, ever. Changing the
-write policy first would ship a buffering scheme whose interaction with rotation cannot be
-observed, which is the exact shape of debt this project keeps finding later. Shrinking the
-files first, with today's simple flush-per-record, makes rotation observable and makes
-that change verifiable.
+not after.** Rotation has never executed **in the shipped flight configuration** — at
+4 × 1 GiB it would take about a year — so `writeLogIndex()`, `index.bin` and the whole
+resume-after-power-cycle mechanism have never run on a board doing its actual job. The
+only place they run at all is `test_sddata_write_and_rotate` in the Unity suite, and only
+because `TEST_FILE_SIZE_MB` is 1024 *bytes*, as the paragraph above says. That is coverage
+of the mechanism, not evidence about flight: the suite writes a fixed 32-byte payload in a
+tight loop with no scheduler, no watchdog and no other task, so it says nothing about how
+long a rotation takes or what else is waiting while it happens. Changing the write policy
+first would ship a buffering scheme whose interaction with rotation cannot be observed
+where it matters. Shrinking the files first, with today's simple flush-per-record, puts
+rotation on the flight path and makes that change verifiable.
 
 **A latent watchdog reset lives on this path, and this entry is what wakes it.** Rotation
 does `SD.remove()` on the next file and then `SD.open()`. On a 1 GiB file with 32 KiB
 clusters that walks ~32 768 FAT entries. `WDT_TIMEOUT_MS` is **1398**, and the failure
-mode is a reset with no trace — indistinguishable from a mystery. Measure a rotation's
-duration on the board before reducing the size, not after. If it does not fit, the options
-are pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
-remove in pieces across several `write()` calls, or accepting a larger file.
+mode is a reset with no trace — indistinguishable from a mystery. The Unity coverage does
+not touch this at all: it deletes 1024-byte files, where the FAT walk is a handful of
+entries, so a rotation that passes there says nothing about one on a file three orders of
+magnitude larger. Measure a rotation's duration on the board before reducing the size, not
+after. If it does not fit, the options are pre-allocation (see *[Replace
+`arduino-libraries/SD` with `greiman/SdFat`]*), doing the remove in pieces across several
+`write()` calls, or accepting a larger file.
 
 **A reader does not have to find the end of a rewritten file, and it is worth knowing
 why.** Rotation does not overwrite in place: it deletes the next slot before opening it
