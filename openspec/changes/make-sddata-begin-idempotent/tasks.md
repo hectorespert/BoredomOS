@@ -35,7 +35,7 @@ asked for before it is run, then followed by `pio run -t upload`.
   callback, `end()`, `begin()`, assert the count advanced, then restore whatever callback
   the other cases expect. Note in a comment that this proves the wiring, not that the
   preamble reached the card — 4.2 is what proves that.
-- [x] 2.3 Add a case asserting `begin()` is idempotent in the sense that matters: with a
+- [x] 2.3 Add a case asserting `begin()` reopens in the sense that matters: with a
   file open, write `index.bin` to a different index by hand, call `begin()`, and assert
   the file the object now writes to is the one that index names. Verify the case fails
   against the old `begin()` before it passes against the new one — a test that never saw
@@ -87,7 +87,7 @@ asked for before it is run, then followed by `pio run -t upload`.
   on the open that `begin()` performed. This is the only step that distinguishes "the
   callback ran" from "the preamble is in the file". Note that `mavlogdump.py` is not in
   the bundled `pymavlink`, so use `DFReader` directly.
-- [x] 4.3 **`[board]`** Confirm the high-water marks are unchanged: read
+- [ ] 4.3 **`[board]`** Confirm the high-water marks are unchanged: read
   `SdWrite` and `Logger` off the housekeeping stream (`NAMED_VALUE_INT`, armed with
   `MAV_CMD_SET_MESSAGE_INTERVAL` on message id 252) and compare against the reference
   taken on 2026-09-20 — `Logger` 56 of 160 words free, `SdWrite` 87 of 256. `end()` adds
@@ -111,8 +111,17 @@ asked for before it is run, then followed by `pio run -t upload`.
   4 words, and the reference was one reading, not a distribution. A plausible mechanism
   that is also not this change: 3.2 had just erased the card, so `index.bin` was absent
   and `readLogIndex()` took its early-return branch instead of reading a file. `SdWrite`
-  at 83 of 256 free is 32 %, in line with the rest of the fleet. Recorded rather than
-  called "unchanged", because it is not unchanged.
+  at 83 of 256 free is 32 %, in line with the rest of the fleet.
+
+  **Left unticked, and the reason is the task's own wording.** This step says "confirm the
+  high-water marks are unchanged". They are not unchanged, so it is not closed, however
+  well the difference is accounted for — the same standard that sent 2.3 back. What is
+  actually missing is not another reading of `SdWrite`: it is a **reference worth comparing
+  against**. The 2026-09-20 figures are one sample, and this measurement shows a task this
+  change cannot touch moving 15 words between two samples, so a single-reading reference
+  cannot support a claim of "unchanged" for anybody. Closing this needs several readings
+  across reboots to establish a range, which is a job for whoever next has the board idle,
+  not for this change.
 
   Also read, and worth carrying: `custom_mode` is `0x08020603` — reset reason 3, boot
   phase 6, **consecutive 2 of 3, cumulative 8 of 10**. Three flashes in this session
