@@ -33,6 +33,13 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+  // end() BEFORE cleanSdFiles(), and the order is the whole protection: without it
+  // cleanSdFiles() SD.remove()s a file sdData still holds open, and the close that
+  // eventually follows syncs a directory entry that has already been freed. There is
+  // deliberately no guard inside cleanSdFiles() -- that would need SdData to expose
+  // which file it holds, a public accessor describing internal state with no other
+  // caller. If these two lines are ever reordered, nothing will complain.
+  sdData.end();
   cleanSdFiles();
 }
 
@@ -370,13 +377,107 @@ void test_sddata_on_open_fires_on_rotation_without_re_entering(void) {
     }
     TEST_ASSERT_EQUAL(TEST_FILE_COUNT, fileCount);
 
-    // NOT covered here, and it cannot be from this suite: the callback firing on the
-    // FIRST open, inside begin(). setUp() has already called begin() by the time a
-    // test body runs, and begin() is not idempotent -- it returns early when a file is
-    // already open, and there is no end() to close one. Registering a callback
-    // afterwards and calling begin() again would therefore prove nothing. That path is
-    // exercised only by the flight firmware, and reading it back needs the card pulled.
-    // See the backlog entry on begin() not being idempotent.
+    // The other open that fires this callback -- the one inside begin() -- is covered
+    // by test_sddata_on_open_fires_on_begin below. It was unreachable from here until
+    // begin() became idempotent.
+}
+
+// Reads a file's length without disturbing whatever else holds it. Returns 0 for a
+// file that does not exist, which is distinguishable here because every file these
+// tests care about has had something written to it.
+static uint32_t fileSizeOf(const char *name) {
+    if (!SD.exists(name)) {
+        return 0;
+    }
+    File f = SD.open(name, FILE_READ);
+    if (!f) {
+        return 0;
+    }
+    uint32_t size = f.size();
+    f.close();
+    return size;
+}
+
+// Writes index.bin the way SdData::writeLogIndex() does -- a bare int at offset 0 --
+// so readLogIndex() will believe it. This is how a test moves the ring's position out
+// from under the object.
+static void writeLogIndexByHand(int idx) {
+    if (SD.exists("index.bin")) {
+        SD.remove("index.bin");
+    }
+    File f = SD.open("index.bin", FILE_WRITE);
+    if (!f) {
+        return;
+    }
+    f.seek(0);
+    f.write(reinterpret_cast<uint8_t *>(&idx), sizeof(idx));
+    f.flush();
+    f.close();
+}
+
+void test_sddata_on_open_fires_on_begin(void) {
+    onOpenCalls = 0;
+    onOpenInside = false;
+    onOpenReentered = false;
+
+    sdData.setOnOpen(countingOnOpen);
+
+    // First, with a file already open: setUp() called begin() before this body ran, so
+    // this is exactly the call that used to return early and fire nothing.
+    sdData.begin();
+    // Then from a closed state, which also exercises end().
+    sdData.end();
+    sdData.begin();
+
+    sdData.setOnOpen(nullptr);
+
+    TEST_ASSERT_EQUAL_MESSAGE(2, onOpenCalls,
+                              "begin() must fire onOpen on every open, held file or not");
+    TEST_ASSERT_FALSE_MESSAGE(onOpenReentered, "onOpen re-entered itself from begin()");
+
+    // What this does NOT prove: that the bytes the callback wrote are in the file a
+    // reader will later open. cleanSdFiles() deletes those files on every case and this
+    // suite has no DataFlash reader, so it can only show that the callback ran. Reading
+    // the preamble back off a real card is a separate, hands-on step.
+}
+
+void test_sddata_begin_reopens_the_file_the_index_names(void) {
+    sdData.setOnOpen(nullptr);
+
+    // setUp() cleaned the card and called begin(), and cleanSdFiles() removed
+    // index.bin, so readLogIndex() returned 0 and the object holds data0.BIN.
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
+    sdData.write(payload, sizeof(payload));
+
+    // Move the ring's position while a file is open, which is what a card remount or an
+    // error-recovery restart would do.
+    writeLogIndexByHand(2);
+    sdData.begin();
+
+    // Sizes are read only after begin() has closed data0.BIN, so nothing here opens a
+    // file the object is holding.
+    uint32_t zeroAfterBegin = fileSizeOf("data0.BIN");
+    TEST_ASSERT_TRUE_MESSAGE(zeroAfterBegin > 0, "setUp's begin() never wrote to data0.BIN");
+
+    sdData.write(payload, sizeof(payload));
+
+    // Closed before measuring, so nothing below opens a file this object still holds --
+    // two SdFile instances on one file share the single SdVolume cache block, and there
+    // is no reason to lean on that here.
+    sdData.end();
+
+    // Against the old begin() this fails on the first assertion: it returned early
+    // because a file was open, data2.BIN was never created, and the write went to
+    // data0.BIN instead.
+    TEST_ASSERT_TRUE_MESSAGE(SD.exists("data2.BIN"),
+                             "begin() did not open the file index.bin names");
+    TEST_ASSERT_TRUE_MESSAGE(fileSizeOf("data2.BIN") > 0,
+                             "writes did not follow begin() to the new file");
+    TEST_ASSERT_EQUAL_MESSAGE(zeroAfterBegin, fileSizeOf("data0.BIN"),
+                              "writes still went to the file begin() left behind");
 }
 
 int runUnityTests(void) {
@@ -396,6 +497,8 @@ int runUnityTests(void) {
     RUN_TEST(test_report_internal_versus_ds1307_drift);
     RUN_TEST(test_sddata_write_and_rotate);
     RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
+    RUN_TEST(test_sddata_on_open_fires_on_begin);
+    RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
     return UNITY_END();
 }
 

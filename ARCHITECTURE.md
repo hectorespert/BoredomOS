@@ -465,6 +465,14 @@ the rotation that invoked it. The preamble itself is constant and lives in flash
 costs no RAM; the `TIME` record that follows it carries a live value and is built by
 `TaskSdWrite`, which has to be able to do so because rotation happens inside it.
 
+`begin()` opens unconditionally: it closes whatever the object was holding, reads the
+index and opens the file that index names, so every call notifies. It used to open only
+when nothing was held, which made a second call a silent no-op that kept a file the index
+had moved away from — harmless in flight, where `TaskSdWrite` calls it once, and the
+reason the callback's `begin()` path went untested for as long as it did. `end()` exists
+for the same reason, closing the file so the card can be modified underneath; the firmware
+never calls it, and the Unity suite does, before it deletes the log files.
+
 `lib/SdData` is a fixed-footprint ring, which is what bounds how much of the card
 the log can ever occupy. It writes to `data<i>.BIN` until the file reaches its size
 limit, then closes it, advances `i` modulo the file count, deletes whatever was

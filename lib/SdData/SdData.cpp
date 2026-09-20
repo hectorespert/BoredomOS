@@ -39,16 +39,32 @@ void SdData::notifyOpened()
     }
 }
 
+// Unconditional: see the header for why the "open only if nothing is held" guard
+// this used to carry could not be repaired by inverting it.
+//
+// The close comes BEFORE readLogIndex() rather than after. SdVolume's cache is a
+// single 512 B block shared by every file, and readLogIndex() opens index.bin,
+// which evicts it. Closing first means this file's own sync() happens while the
+// block is still ours instead of racing the eviction.
 void SdData::begin()
 {
+    if (_dataFile) {
+        _dataFile.close();
+    }
+
     _fileIdx = readLogIndex();
     String logFileName = getLogFileName();
+    _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
     if (!_dataFile) {
-        _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
-        if (!_dataFile) {
-            return;
-        }
-        notifyOpened();
+        return;
+    }
+    notifyOpened();
+}
+
+void SdData::end()
+{
+    if (_dataFile) {
+        _dataFile.close();
     }
 }
 

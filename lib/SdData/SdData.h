@@ -22,10 +22,31 @@ public:
   // left this header -- it had been giving up on the translation unit before, so
   // this library was never actually analysed.
   explicit SdData(int files = 4, size_t size = 1024UL * 1024UL * 1024UL);
+
+  // Opens the file the persisted index names, closing whatever this object was
+  // already holding. Opening always opens: calling this twice reopens, and the
+  // second call lands on the file the index names rather than keeping the first.
+  // It used to open only when nothing was held, which made a second call a
+  // silent no-op that kept a file the index had moved away from -- and the object
+  // cannot detect that for itself, because getLogFileName() derives the name from
+  // _fileIdx, which readLogIndex() has just overwritten. Closing first is what
+  // removes the question.
   void begin();
 
-  // Registers the callback, which must be set BEFORE begin() to catch the first
-  // file's open. Passing nullptr disables it.
+  // Closes the open file, and nothing else: the index is not reset, the callback
+  // is not cleared and index.bin is not touched. begin() is the way back.
+  //
+  // The firmware never calls this -- TaskSdWrite calls begin() once and then
+  // writes until power goes. It exists for a caller that needs the card to be
+  // modifiable underneath it without this object holding a handle into a file
+  // that is about to stop existing, which is exactly what the Unity suite's
+  // tearDown() does before it deletes the log files.
+  void end();
+
+  // Registers the callback. Set it BEFORE begin() to catch the first file's
+  // open: every begin() opens, so a callback registered afterwards catches
+  // subsequent opens -- the next rotation, or the next begin() -- and never the
+  // one that has already happened. Passing nullptr disables it.
   void setOnOpen(SdDataOnOpen callback);
 
   // Appends bytes and does NOT check the size limit, so it can never rotate. This
