@@ -208,10 +208,31 @@ extern QueueHandle_t sdWriteQueue;
 // at all, since CI forbids run-time allocation in this file by name.
 static void logBattery()
 {
+    // No consumer, no record. TaskSdWrite exists only when the card was mounted at
+    // boot (src/main.cpp), and `reducedConfiguration` is NOT the same condition: a
+    // board in the normal configuration with no card has no SD writer at all. Without
+    // this the queue fills in four sends and then drops everything for ever. Found by
+    // Copilot's review, which caught that the comment above promised this gate and the
+    // code did not have it.
+    if (taskSdWriteHandler == NULL) {
+        return;
+    }
+
+    // 0 mV means the ADC has not been read yet or there is nothing to read: voltage()
+    // returns its initial cached 0 without touching the ADC for the first 125 ms after
+    // boot, and this record's first sample is due on TaskMavlink's very first pass. A
+    // record carrying zero is exactly what the flight-log capability forbids -- it is
+    // the defect this change exists to fix -- so the absence is recorded as an absence,
+    // by emitting nothing. Also Copilot's review.
+    uint16_t millivolts = battery.millivolts();
+    if (millivolts == 0) {
+        return;
+    }
+
     SdRecord record;
     record.kind = SdRecordKind::Pwr;
     record.pwr.timeUs = systemTime.sinceBootUsec();
-    record.pwr.millivolts = battery.millivolts();
+    record.pwr.millivolts = millivolts;
     record.pwr.remaining = battery.remaining();
     xQueueSend(sdWriteQueue, &record, 0);
 }
@@ -222,6 +243,13 @@ static void logBattery()
 // than a second enumeration.
 static void logClock()
 {
+    // Same gate as logBattery(), and for the same reason: with no card there is no
+    // SdWrite task to drain this. A clock set from the ground would otherwise post into
+    // a queue nothing reads.
+    if (taskSdWriteHandler == NULL) {
+        return;
+    }
+
     SdRecord record;
     record.kind = SdRecordKind::Time;
     record.time.timeUs = systemTime.sinceBootUsec();

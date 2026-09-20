@@ -122,9 +122,14 @@ Adding a subsystem therefore means four edits, always the same four:
    static storage a `NULL` can only mean a bad argument.
 
 A fifth edit applies to any task whose stack is worth watching: add it to
-`src/mavlink.cpp`'s housekeeping table and to `include/Data.h`, or its high-water
-mark reaches neither the ground nor the SD log. Both follow the task count, and so
-does each write queue's depth.
+`src/mavlink.cpp`'s housekeeping table and to the `SYS` record in
+`include/SdRecord.h`, or its high-water mark reaches neither the ground nor the SD
+log. Both follow the task count, and so does each write queue's depth. Widening `SYS`
+means three matching edits and not one — its `SD_RECORD_TASK_COUNT`, the packed
+`LogSys` structure in `src/sdwrite.cpp` and that record's `FMT` definition beside it,
+whose declared length a `static_assert` checks against the structure. Adding a field
+without its label produces plausible-looking wrong numbers on the ground, which is
+what those assertions exist to stop.
 
 The one exception to the composition root is `sdData` in `src/sdwrite.cpp`: the
 SD ring object is a file-scope global next to its only user, because nothing else

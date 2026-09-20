@@ -528,6 +528,53 @@ A step nothing available can reach is still listed, said plainly, and left untic
   25 passed / 8 skipped / 0 failed**, flash 88844 -> 88972 B (+128 B), RAM unchanged at
   `committed 29584 B, headroom 3184 B`. Flight firmware restored to the board.
 
+## 12. Copilot's second pass, after archiving
+
+Three findings it had not raised on the first pass, all verified in the code before
+being accepted. Landed after the archive commit but before the merge.
+
+- [x] 12.1 **`PWR` could carry a zero it never read.** `Battery::voltage()` returns its
+  initial cached `0.0f` without touching the ADC for the first 125 ms after boot, and
+  this record's first sample falls due on `TaskMavlink`'s very first pass. A record
+  reading `mV=0, Pct=0` is precisely what this change's own flight-log requirement
+  forbids — the same defect the change exists to fix. In practice `setup()`'s I2C and
+  `SD.begin()` probably push `millis()` past 125 first, but relying on that is relying
+  on timing.
+
+  Fixed by emitting nothing when `millivolts()` is 0, which honours the requirement
+  literally: an absence is recorded as an absence. Deliberately **not** fixed by giving
+  `lib/Battery` a presence signal — that is *[Detect when the battery is charging]*'s
+  territory and would be scope.
+
+- [x] 12.2 **`PWR` and `TIME` were queued with no consumer on a cardless board.**
+  `TaskSdWrite` is created only when `!reducedConfiguration && sdCardAvailable`
+  (`src/main.cpp`), and both producers were gated on `!reducedConfiguration` alone —
+  `logClock()` on nothing at all. A board in the normal configuration with no card
+  therefore filled the depth-4 queue in four sends and dropped everything after.
+
+  Not fatal — by-value sends fail silently and leak nothing — but the comment above
+  `logBattery()` claimed this gate existed. Both now check
+  `taskSdWriteHandler == NULL` and return, which is the real condition.
+
+- [x] 12.3 **`ARCHITECTURE.md`'s add-a-subsystem checklist pointed at `include/Data.h`**,
+  which this change deletes. Anyone following it went to a file that does not exist.
+  Repointed at the `SYS` record in `include/SdRecord.h`, and while there the rule now
+  states that widening `SYS` is **three** matching edits, not one —
+  `SD_RECORD_TASK_COUNT`, the packed `LogSys` structure, and that record's `FMT`
+  definition whose declared length the `static_assert` checks.
+
+- [x] 12.4 Re-verified: `pio run` and `pio run -e libs` succeed, `pio check` still **2
+  LOW** with neither new, **HIL 25 passed / 8 skipped / 0 failed**, flash 88972 ->
+  89004 B (+32 B), RAM unchanged at `committed 29584 B, headroom 3184 B`. Live check
+  that the new battery gate does not suppress real readings: the board reports 3919 mV,
+  so `PWR` is emitted. No `lib/` file changed, so the destructive Unity suite was not
+  needed and was not re-run.
+
+  The fourth finding, *low* — that the `onOpen` callback on the **first** open inside
+  `begin()` is uncovered — is left as recorded rather than fixed. The reason is in 9.9
+  and in the `TODO.md` entry: the Unity suite cannot reach it while `begin()` is not
+  idempotent.
+
 ## 10. Backlog surgery, in the proposing commit
 
 - [x] 10.1 Delete the `TODO.md` entry *The flight log is a private MessagePack format no
