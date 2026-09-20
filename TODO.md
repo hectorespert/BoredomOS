@@ -155,11 +155,12 @@ explained in that change's own `tasks.md`, not silently skipped:
   Needs the SD card physically removed.
 - **5.9 — read a fresh `data*.mpk` back and confirm it carries five per-task
   fields, and that a card still holding old seven-field records is written to
-  without error.** Needs the card pulled and read on a separate machine.
-  **This step is overtaken** if
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands first: that change
-  stops `.mpk` being written at all, and its own task 9.2 reads a `.BIN` back instead.
-  The per-task field count is already wrong here as well — it is seven, not five, since
+  without error.** **Overtaken — not to be done.**
+  `replace-messagepack-log-with-dataflash` landed on 2026-09-20 and stopped `.mpk`
+  being written at all. Reading a log the board wrote back off the card is carried by
+  that change's own 9.2 instead, now in *[Finish what
+  replace-messagepack-log-with-dataflash left open]*. The per-task field count was
+  already wrong here as well — it is seven, not five, since
   `replace-console-cli-with-usb-mavlink-link`.
 - **5.11 — the 30-minute reduced-configuration retry has still never been
   observed firing**, moved in this change but not watched end to end. Needs an
@@ -200,11 +201,11 @@ being no command at all.
 board-verified against the recovered board. Seven remain, each already scoped in that
 change's own `tasks.md` (numbers below refer to it). **6.1 and 6.4 are no longer here**:
 6.1's short-circuit fix belongs to
-`openspec/changes/improve-clock-synchronisation/`, which cannot read the RTC's
-sub-second counter without it, and 6.4 moved there as a task. It is still unclosed for
-the same reason it always was — the DS1307 cannot be disconnected on this assembly, which
-is now known to be a standing property rather than one session's bad luck, and which
-blocks 6.6 below as well.
+`openspec/changes/archive/2026-09-19-improve-clock-synchronisation/`, which cannot read
+the RTC's sub-second counter without it, and 6.4 moved there as a task. It is still
+unclosed for the same reason it always was — the DS1307 cannot be disconnected on this
+assembly, which is now known to be a standing property rather than one session's bad
+luck, and which blocks 6.6 below as well.
 
 - **3.2 / 3.3 — the fault hooks are still unsafe (review finding 9).**
   `vApplicationStackOverflowHook` in `src/hooks.cpp` writes the new phase marker
@@ -285,14 +286,17 @@ found, for whoever next touches this:
 Also worth knowing if this change is touched again: its own `proposal.md`/`design.md`
 originally estimated the RAM cost at ~337 B and were corrected, after implementation,
 to a measured 8 B — the task-name table is `const` (flash, not RAM) and the queue
-depth increase draws on already-reserved FreeRTOS heap slack rather than growing
+depth increase drew on already-reserved FreeRTOS heap slack rather than growing
 `.bss`. See the archived proposal's Impact section for the full explanation before
-assuming a similar table/queue change elsewhere costs what an estimate says it does.
+assuming a similar table/queue change elsewhere costs what an estimate says it does —
+but note the mechanism behind the second half is gone: there is no heap to find slack
+in any more, so a deeper queue now costs depth times item size in `.bss`, every byte
+of it.
 
 ### Add the GY-87 IMU
 
 **Status:** proposed
-**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/Data.h`,
+**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/SdRecord.h`,
 `src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
 Add the **GY-87** module as the satellite's inertial unit, to know its attitude and
@@ -351,20 +355,19 @@ Implementation points:
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - Extend the log's record set and `src/sdwrite.cpp`. These are quite a few new fields:
   review how much the log grows per second and what that does to the rotation rate of
-  the `lib/SdData` ring. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands this is **additive**
-  — a new record type with its own `FMT` definition, not a widened existing record, so
-  old logs stay readable and nothing has to be decided about compatibility.
+  the `lib/SdData` ring. This is **additive**: since the log became DataFlash it takes
+  a new record type with its own `FMT` definition rather than a widened existing
+  record, so old logs stay readable and nothing has to be decided about compatibility.
 - With three chips on the bus, I2C access is no longer exclusive to the RTC. How it
   is serialised against `lib/SystemTime` has to be decided, the same way the SD card
   is against `TaskSdWrite`.
-- Checks in `test/test_main.cpp`, which runs against real hardware.
+- Checks in `test/test_libs/test_main.cpp`, which runs against real hardware.
 
 
 ### Add a temperature sensor
 
 **Status:** proposed
-**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/Data.h`,
+**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/SdRecord.h`,
 `src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
 Measure the on-board temperature and expose it through the two paths that already
@@ -392,25 +395,27 @@ Implementation points:
   `src/sensors.cpp` has to be created and given a priority from
   `include/Priority.h` and a stack size in words.
 - Add the field to the log's record set, fill it in `src/logger.cpp` and dump it in
-  `src/sdwrite.cpp`. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands, this is a new
-  record type with its own `FMT` definition rather than a widened existing one, so old
-  logs stay readable and there is nothing to decide about compatibility.
+  `src/sdwrite.cpp`. Since the log became DataFlash this is a new record type with its
+  own `FMT` definition rather than a widened existing one, so old logs stay readable
+  and there is nothing to decide about compatibility.
 - If the reading is not taken by `TaskLogger` itself, the value has to reach it
-  without breaking the queue protocol: **heap pointers, `vPortFree` if `xQueueSend`
-  does not return `pdPASS`, and the consumer frees**.
+  without breaking the queue protocol: **a new `SdRecordKind` and payload in
+  `include/SdRecord.h`, sent by value**. There is nothing to free and nothing to
+  allocate — and if the new payload pushes `SdRecord` past its current size, the
+  `static_assert` in that header fails the build until `sdWriteQueueStorage` in
+  `src/main.cpp` is resized to match.
 - Outbound MAVLink message: pick a standard one (`SCALED_PRESSURE.temperature` in
   centidegrees, or `HYGROMETER_SENSOR`) and emit it with the same identity triple as
   the rest: system `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
-- Add the check to `test/test_main.cpp`, which only runs on real hardware. If the
-  sensor is initialised with `configASSERT` in `setup()`, its absence will hang the
+- Add the check to `test/test_libs/test_main.cpp`, which only runs on real hardware. If
+  the sensor is initialised with `configASSERT` in `setup()`, its absence will hang the
   board just as the RTC and the SD card do today.
 - Watch the high-water marks after adding the task: the RAM margin is thin.
 
 ### Detect when the battery is charging
 
 **Status:** proposed
-**Scope:** `lib/Battery`, `src/mavlink.cpp`, `include/Data.h`, `src/logger.cpp`,
+**Scope:** `lib/Battery`, `src/mavlink.cpp`, `include/SdRecord.h`, `src/logger.cpp`,
 `src/sdwrite.cpp`
 
 Right now the firmware only knows *what voltage* the battery has, not whether
@@ -443,15 +448,14 @@ Implementation points:
   with the real state. Same identity triple as the rest: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - Add the state to the log's battery record and dump it in `src/sdwrite.cpp`, so that
-  charge cycles can later be reconstructed from the log files. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands, the battery figures
-  live in their own record emitted by `TaskMavlink` at the rate the battery is actually
-  read — so this extends that record rather than the 1 Hz one, and old logs stay
-  readable.
+  charge cycles can later be reconstructed from the log files. The battery figures now
+  live in their own `PWR` record emitted by `TaskMavlink` at the rate the battery is
+  actually read, so this extends that record rather than the 1 Hz one, and old logs
+  stay readable.
 - If the software route is chosen, the history cannot grow: fixed-size buffer, no
   `malloc` per sample.
-- Check in `test/test_main.cpp`, which runs on real hardware and can therefore
-  validate the state with the board plugged in (charging) and unplugged.
+- Check in `test/test_libs/test_main.cpp`, which runs on real hardware and can
+  therefore validate the state with the board plugged in (charging) and unplugged.
 
 ### Download the flight log over the MAVLink log protocol
 
@@ -485,9 +489,10 @@ dialect change is needed.
 Whichever lands first settles the card-access design for the other — see the
 concurrency point below.
 
-**Depends on `openspec/changes/replace-messagepack-log-with-dataflash/`.** Downloading
-`.mpk` files accomplishes little, since nothing on the ground opens one. This feature is
-worth having once that change has made the log DataFlash `.BIN`.
+**Unblocked by `replace-messagepack-log-with-dataflash`, archived 2026-09-20.**
+Downloading `.mpk` files would have accomplished little, since nothing on the ground
+opens one. The log is DataFlash `.BIN` now and `pymavlink` reads it, which is what
+makes this feature worth having.
 
 Points to resolve before implementing:
 
@@ -520,8 +525,8 @@ Points to resolve before implementing:
 - **What QGroundControl calls the result.** QGC picks how to treat the downloaded
   bytes from the autopilot type, and this firmware announces `MAV_AUTOPILOT_GENERIC`.
   See the identity point in
-  `openspec/changes/replace-messagepack-log-with-dataflash/`; it is a decision shared
-  with that change.
+  `openspec/changes/archive/2026-09-20-replace-messagepack-log-with-dataflash/`, which
+  raised this and did not settle it.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 
@@ -572,8 +577,7 @@ Points to resolve before implementing:
   part of the protocol and let the ground fetch only the stretch of interest.
 - **Consistency of what is served.** The active file is being written while it is
   read. Define whether it is served as is or whether only the closed files of the ring
-  are offered. Once `openspec/changes/replace-messagepack-log-with-dataflash/` lands,
-  a half-written record at the tail is survivable rather than fatal,
+  are offered. A half-written record at the tail is survivable rather than fatal now,
   because DataFlash records carry a `0xA3 0x95` resynchronisation header — but
   `index.bin` has no such property and a torn read of it is simply wrong.
 - Keep the identity triple of the rest of the firmware: system `1`,
@@ -590,14 +594,14 @@ messages come in and go out without a GCS on the other end interpreting them. Th
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on `openspec/changes/add-console-cli`, not only on the `move-mavlink-link-
-to-serial1` change (archived) that freed the console port. That change gives the
-console an owner, `src/cli.cpp`, and makes it the port's only writer while tasks
-run: a trace can no longer `print()` into `CLI_SERIAL` directly without becoming a
-second writer, which `specs/console-cli/spec.md` forbids. The trace has to reach
-the port through the CLI somehow — a new command that dumps a ring buffer the
-`TaskMavlink` switch and the `TaskSerialWrite` drain fill, most likely — rather
-than writing on its own.
+Depends on `openspec/changes/archive/2026-09-13-add-console-cli`, not only on the
+`move-mavlink-link-to-serial1` change (archived) that freed the console port. That
+change gives the console an owner, `src/cli.cpp`, and makes it the port's only writer
+while tasks run: a trace can no longer `print()` into `CLI_SERIAL` directly without
+becoming a second writer, which `specs/console-cli/spec.md` forbids. The trace has to
+reach the port through the CLI somehow — a new command that dumps a ring buffer the
+`TaskMavlink` switch and the `TaskSerialWrite` drain fill, most likely — rather than
+writing on its own.
 
 That change's design also answers three of this entry's open questions directly,
 since it had to answer them for `ps` and `free`:
@@ -647,13 +651,12 @@ Points still to resolve before implementing:
 **Status:** proposed
 **Scope:** `src/mavlink.cpp`
 
-The `TaskMavlink` switch has several `case` branches that only `break`:
-`COMMAND_LONG` (including `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` and
-`REQUEST_DATA_STREAM`. The GCS gives them up for lost and retries: MAVProxy sits
-waiting for a `COMMAND_ACK` that never arrives. `openspec/changes/add-degraded-mode`
-answers one specific command, `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, with a
-`COMMAND_ACK`, since it needed that command to actually do something; every other
-branch here is unaffected.
+The `TaskMavlink` switch has several `case` branches that only `break`: `COMMAND_LONG`
+(including `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` and `REQUEST_DATA_STREAM`.
+The GCS gives them up for lost and retries: MAVProxy sits waiting for a `COMMAND_ACK`
+that never arrives. `openspec/changes/archive/2026-09-13-add-degraded-mode` answers one
+specific command, `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, with a `COMMAND_ACK`, since it
+needed that command to actually do something; every other branch here is unaffected.
 
 The bare minimum is to always answer something. A `COMMAND_ACK` with
 `MAV_RESULT_UNSUPPORTED` is an honest answer and stops the retry; silence is not.
@@ -679,7 +682,7 @@ To decide:
 ### Emit `SYS_STATUS`
 
 **Status:** proposed
-**Scope:** `src/mavlink.cpp`, `include/Data.h`
+**Scope:** `src/mavlink.cpp`, `include/SdRecord.h`
 
 `SYS_STATUS` (1) is the most conspicuous absence in the current telemetry. It
 carries the `onboard_control_sensors_present`, `_enabled` and `_health` bitmasks,
@@ -689,18 +692,19 @@ GCS shows it front and centre; today the satellite sends none of it.
 It fits with two things the firmware already has half done:
 
 - The health bitmasks are the place to express "the SD card failed", "the RTC was
-  lost", "the IMU does not answer". `openspec/changes/add-degraded-mode` (which
-  consumed *Report the satellite's real state in the heartbeat*) already spends
-  `custom_mode`'s four bytes on the reset reason, the boot phase and two fault
-  counters, and its own design notes that a *continuing* indicator for a missing
-  SD card has nowhere left to go in that field — `SYS_STATUS`'s sensor bitmap is
-  exactly the candidate it points at without adopting it. Both entries share the
-  same source: a centralised health state, which does not exist today.
-- `errors_count1..4` is where to keep the count of failed `pvPortMalloc` calls —
-  checked as of `openspec/changes/add-console-cli`, which absorbed the entry this
-  used to point at, but the failures themselves are still silently skipped rather
-  than counted — and of the sends dropped by a full queue, which are silently
-  lost today.
+  lost", "the IMU does not answer".
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` (which consumed *Report the
+  satellite's real state in the heartbeat*) already spends `custom_mode`'s four bytes
+  on the reset reason, the boot phase and two fault counters, and its own design notes
+  that a *continuing* indicator for a missing SD card has nowhere left to go in that
+  field — `SYS_STATUS`'s sensor bitmap is exactly the candidate it points at without
+  adopting it. Both entries share the same source: a centralised health state, which
+  does not exist today.
+- `errors_count1..4` is where to keep the count of sends dropped by a full queue,
+  which are silently lost today. This used to name failed run-time allocations as the
+  other candidate; there are none left to count, and the one that would matter now
+  halts the board through the malloc-failed hook rather than returning to a caller
+  that could tally it.
 
 To decide: which subsystems are declared in `present`/`enabled` (the
 `MAV_SYS_STATUS_SENSOR` enumeration has no entries for "SD card" or "RTC", so the
@@ -756,39 +760,10 @@ configuration first and self-skip (`NoLinkError`) when its assumption does not
 hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
 next `HEARTBEAT`'s `system_status`).
 
-### `TaskLogger`'s stack margin is critically tight
-
-**Status:** defined
-**Scope:** `src/logger.cpp`, `src/main.cpp`
-
-Found incidentally while board-verifying `queue-mavlink-messages-by-value`
-(2026-09-19), a change that does not touch this file: `ps` read `Logger`'s
-stack high-water mark at **6 of 96 words free** — under a plain 1 Hz sampling
-loop with nothing unusual happening, not a burst or an edge case. That figure
-held steady across a ~3.5-minute soak (didn't drop further), so it is not
-actively overflowing, but 6 words is not a margin this project would accept
-for a task discovered fresh — every other task's documented high-water marks
-leave far more headroom (e.g. `TaskSerialRead` at 45 of 96, `TaskMavlink` at
-169 of 384 after its own recent growth).
-
-`src/logger.cpp` has not been touched by any of the changes that grew other
-tasks' stacks recently, so this looks like a pre-existing condition that
-simply had never been read off the board and written down before. Worth
-doing before it is:
-
-- Read the high-water mark again after a longer soak and under whatever
-  produces `TaskLogger`'s largest stack frame (check `include/Data.h`'s
-  `Data` struct size and how it's built in `src/logger.cpp` — a local copy of
-  it, or of any nested struct, is the likely cost).
-- Decide the new stack size the same way other tasks' were derived here: not
-  a round increase, but sized to leave a comparable margin to the rest of the
-  fleet, then re-measured on the board rather than assumed.
-- Re-check `scripts/ram_budget.py`'s headroom after the change, however small.
-
 ### The default SD ring is 4 GiB and never rotates
 
 **Status:** defined
-**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `test/test_main.cpp`
+**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `test/test_libs/test_main.cpp`
 
 `SdData`'s default constructor is `SdData(int files = 4, size_t size = 1024UL *
 1024UL * 1024UL)`: four files of 1 GiB each, 4 GiB of card. The design intent is a
@@ -798,13 +773,14 @@ opposite holds:
 - The ring needs a card with 4 GiB free. On a smaller one, the first file simply
   grows until `SD.open` or the write fails, and that failure is silent — see *[SD
   logging failure is silent]*.
-- One housekeeping record is 254 bytes — not the hundred this entry first estimated;
-  the encoding is counted out in
-  `openspec/changes/replace-messagepack-log-with-dataflash/` — and `src/logger.cpp`
-  writes one per second. Filling 1 GiB at that
-  rate takes about 49 days, so rotation never actually happens in any realistic
-  mission: `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle
-  mechanism are effectively dead code that has never run in flight.
+- The log now writes about 34 B/s — a 27-byte `SYS` record once a second from
+  `src/logger.cpp`, a 14-byte `PWR` every two seconds from `TaskMavlink`, and a
+  16-byte `TIME` only when the clock moves. Filling 1 GiB at that rate takes about a
+  year, so rotation never actually happens in any realistic mission:
+  `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle mechanism are
+  effectively dead code that has never run in flight. This got **worse**, not better,
+  when `replace-messagepack-log-with-dataflash` cut the rate from 254 B/s: the smaller
+  the record, the longer the file takes to fill and the further away rotation moves.
 - It also makes both download paths impractical — *[Download the flight log over the
   MAVLink log protocol]* and *[Serve the SD card over MAVLink FTP]*: nothing that size
   comes down a telemetry radio.
@@ -813,9 +789,7 @@ opposite holds:
 bytes: ~4,6 KB/s at `LINK_BAUD` for the log protocol (90 useful bytes in a 111-byte
 `LOG_DATA` frame at 57 600), and ~239 useful bytes per packet for FTP. So the file
 size can be derived from how long a download may take rather than picked round. At the
-34 B/s of the DataFlash format that
-`openspec/changes/replace-messagepack-log-with-dataflash/` implements, using the log
-protocol's rate:
+34 B/s the DataFlash format delivers, using the log protocol's rate:
 
 | file size | covers | download |
 |---|---|---|
@@ -825,11 +799,12 @@ protocol's rate:
 | 256 KiB | ~2,1 h | ~56 s |
 
 Four files of 1 MiB give ~34 h of continuous log, rotate several times a day — so
-`index.bin` stops being dead code — and each comes down in under four minutes. Note
-the dependency: at today's 254 B/s that same 1 MiB would hold 1,1 h, so the size only
-becomes useful once the format changes.
+`index.bin` stops being dead code — and each comes down in under four minutes. **The
+dependency this entry used to carry is discharged:** the sizing only made sense once
+the format shrank, which it did on 2026-09-20, so this is actionable now in a way it
+was not when it was written.
 
-Related: `test/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
+Related: `test/test_libs/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
 TEST_FILE_SIZE_MB)` with `TEST_FILE_SIZE_MB = 1024UL`, which is bytes, not
 megabytes — so the only place rotation is ever exercised is the test, by accident of
 a misleading constant name. That constant is also listed in *[Minor leftovers
@@ -909,14 +884,14 @@ structure turn out to be, not against the bench UART.
 **Changing any of these rates alters the MAVLink surface.** It needs a spec delta —
 `openspec/specs/mavlink-link/spec.md` states the three rates twice, in the scenario at
 lines 20-21 and again at line 90 — and it touches whichever HIL cases assert them. It
-is deliberately not folded into
-`openspec/changes/fold-periodic-telemetry-into-mavlink-task/`, whose value rests on
-being invisible from the ground; once that change lands, the rate is one number in its
-schedule table.
+was deliberately not folded into
+`openspec/changes/archive/2026-09-18-fold-periodic-telemetry-into-mavlink-task/`, whose
+value rested on being invisible from the ground. That change has landed, so the rate is
+now one number in its schedule table in `src/mavlink.cpp`.
 
-Related: `openspec/changes/improve-clock-synchronisation/` covers the quality of the
-timestamp — resolution, provenance and time base — not how often it is sent. The two are
-independent, so that change landing does not answer this question.
+Related: `openspec/changes/archive/2026-09-19-improve-clock-synchronisation/` covered the
+quality of the timestamp — resolution, provenance and time base — not how often it is
+sent. The two are independent, so that change landing did not answer this question.
 
 ### Fix the pointer arithmetic in the unknown-message `STATUSTEXT`
 
@@ -952,45 +927,6 @@ Worth reviewing together with *[Debug and release builds...]*: if the protocol t
 ends up printing the `msgid` to the console, formatting the number should be solved
 once and not in two places.
 
-### `TaskLogger`'s stack margin is razor-thin
-
-**Status:** defined
-**Scope:** `src/logger.cpp`, `src/main.cpp`
-
-`openspec/changes/add-console-cli` gave the firmware a `ps` command, and the first
-live reading it produced showed `TaskLogger`'s unused stack at **5 of 96 words** —
-20 bytes of headroom, tighter than every other task by a wide margin. The
-next-tightest was `TaskHeartbeat` (128 words) at 28 free; everything else had more
-room than that. `TaskHeartbeat` no longer exists as its own task
-(`fold-periodic-telemetry-into-mavlink-task` folded it, and
-`TaskMavlinkBatteryStatus`, into `TaskMavlink`'s schedule), so this comparison
-point is gone. That change's task 5.10 re-read `TaskLogger`'s own margin on the
-board: **6 of 96 words free**, up from 5 — the small improvement `include/Data.h`'s
-`Tasks` losing two fields predicted, confirmed rather than assumed. Still the
-tightest margin in the project by a wide one-word difference from what used to be
-the next-tightest task, and still worth watching after any further change to
-`Data`'s size or to `src/logger.cpp`'s body.
-
-Nothing here is new to `add-console-cli`: `src/logger.cpp`'s task body is untouched
-by it, and the 96-word size predates it too — the entry about the log never storing the
-battery data, now absorbed into
-`openspec/changes/replace-messagepack-log-with-dataflash/`, already flagged the size as
-"among the tightest" without a live figure.
-`ps` is simply the first tool able to show the number without pulling the SD card
-and reading a housekeeping record's `System` block by hand.
-
-`configCHECK_FOR_STACK_OVERFLOW=2` is the only thing standing between this and a
-silent corruption if the margin is ever crossed — see `src/hooks.cpp`'s overflow
-hook and *[The stack overflow hook hangs before it warns]*, below, for what happens
-if it is.
-
-To decide: whether 96 words is still enough, or whether the size should grow — and
-if it does, that it is verified back down with the SD log's own recorded figure or
-`ps`'s live one, not assumed. Re-check after any change to `src/logger.cpp`'s body,
-`include/Data.h`'s size, or `lib/SdData`'s JSON conversion, since any of the three
-changes how much stack one `TaskLogger` cycle needs.
-
-
 ### The stack overflow hook hangs before it warns
 
 **Status:** defined
@@ -1013,9 +949,9 @@ pin register manipulation and a busy-wait delay, depending on nothing that needs
 interrupts. `ARCHITECTURE.md` describes this hook as trapping an overflow into a slow
 blink; once the behaviour is fixed, state the real period there.
 
-Overlaps with `openspec/changes/add-degraded-mode` (formerly *Add a watchdog* and
-*`setup()` asserts on the RTC before the console exists*, both consumed by that
-change): with a watchdog, sitting here blinking forever stops being the obvious
+Overlaps with `openspec/changes/archive/2026-09-13-add-degraded-mode` (formerly *Add a
+watchdog* and *`setup()` asserts on the RTC before the console exists*, both consumed
+by that change): with a watchdog, sitting here blinking forever stops being the obvious
 answer to an overflow, and that change's own review (`review.md` finding 9)
 already names the fix this entry describes — writing the phase marker first and
 resetting immediately, no blink — as not yet folded in.
@@ -1032,8 +968,9 @@ If `SD.open` fails in `SdData::begin()`, the object is left with no file and
 away".
 
 Result: the entire mission log can be lost without a single warning over the link.
-`setup()` reports a missing card at boot (`openspec/changes/add-degraded-mode`
-turned the old `configASSERT(SD.begin(9))` into a degradation), but that only
+`setup()` reports a missing card at boot
+(`openspec/changes/archive/2026-09-13-add-degraded-mode` turned the old
+`configASSERT(SD.begin(9))` into a degradation), but that only
 covers boot; a card that fails or is unmounted later still goes unnoticed.
 
 To decide: having `begin()`/`write()` return a result and `TaskSdWrite` propagate
@@ -1143,7 +1080,8 @@ verified; the uploader half is not, and it is the one that blocks every `[board]
 Whoever picks this up: moving the compiler re-bases every RAM figure in
 `ARCHITECTURE.md` and in any change then in flight, so do it when nothing else is
 mid-flight, and re-read the high-water marks on the board — a new compiler changes
-stack frame sizes, and `TaskLogger` has 20 bytes of margin.
+stack frame sizes, and the tightest margin in the fleet is `UartRead` at 41 words
+free of 96.
 
 ### The CI PlatformIO cache key hashes a file that does not exist
 
@@ -1173,65 +1111,64 @@ The four messages the satellite emits today go out with empty, constant or outri
 misleading fields. No new hardware is needed to fix a good part of it:
 
 - **`STATUSTEXT` is misused, not just badly formatted.** Beyond the bug in *[Fix the
-  pointer arithmetic...]*, the design problem is that the `default` branch of the
-  switch answers the ground with a text message **for every inbound message not
-  covered**. A talkative GCS continuously sends things the switch does not cover
-  (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the
-  satellite spends its time flooding a narrow link with complaints. Take it out of
-  there and reserve `STATUSTEXT` for what deserves a warning: an SD failure, and —
-  since `openspec/changes/add-degraded-mode` — the cause of the last reset, already
-  emitted once per boot.
+  pointer arithmetic...]*, the design problem is that the `default` branch of the switch
+  answers the ground with a text message **for every inbound message not covered**. A
+  talkative GCS continuously sends things the switch does not cover
+  (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the satellite
+  spends its time flooding a narrow link with complaints. Take it out of there and
+  reserve `STATUSTEXT` for what deserves a warning: an SD failure, and — since
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` — the cause of the last reset,
+  already emitted once per boot.
 - **`BATTERY_STATUS` goes out nearly empty:** `current_battery`, `current_consumed`
-  and `energy_consumed` at `-1`, `time_remaining` at `0`, `temperature` at
-  `INT16_MAX` and `charge_state` at `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Two of
-  them can be filled with no additional hardware as soon as *[Add the GY-87 IMU]*
-  (temperature) and *[Detect when the battery is charging]* (charge state) land.
-  `time_remaining` requires measuring current.
+  and `energy_consumed` at `-1`, `time_remaining` at `0`, `temperature` at `INT16_MAX`
+  and `charge_state` at `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Two of them can be filled
+  with no additional hardware as soon as *[Add the GY-87 IMU]* (temperature) and
+  *[Detect when the battery is charging]* (charge state) land. `time_remaining` requires
+  measuring current.
 - **`HEARTBEAT` used to declare things that were not so.**
-  `openspec/changes/add-degraded-mode` (which consumed *Report the satellite's real
-  state in the heartbeat*) makes `custom_mode` carry the reset reason, the boot
-  phase and both fault counters, and drops `MAV_MODE_FLAG_AUTO_ENABLED` in the
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` (which consumed *Report the
+  satellite's real state in the heartbeat*) makes `custom_mode` carry the reset reason,
+  the boot phase and both fault counters, and drops `MAV_MODE_FLAG_AUTO_ENABLED` in the
   reduced configuration. `MAV_MODE_FLAG_SAFETY_ARMED` stays fixed regardless — that
   remains a separate decision.
 - **`MAV_TYPE_ROCKET` is debatable.** There is no `MAV_TYPE_SATELLITE`, but
-  `MAV_TYPE_GENERIC` describes a CubeSat better than a rocket does, and it changes
-  how the GCS draws it. Worth deciding soon: `ARCHITECTURE.md` fixes it as the bus
-  identity and the more code assumes it, the more it costs to change.
+  `MAV_TYPE_GENERIC` describes a CubeSat better than a rocket does, and it changes how
+  the GCS draws it. Worth deciding soon: `ARCHITECTURE.md` fixes it as the bus identity
+  and the more code assumes it, the more it costs to change.
 - **`SYSTEM_TIME` at 1 Hz is a lot** for something that hardly ever changes in an
-  interesting way. If `MAV_CMD_SET_MESSAGE_INTERVAL` lands in *[Answer the GCS
-  messages that are ignored today]*, this solves itself.
+  interesting way. If `MAV_CMD_SET_MESSAGE_INTERVAL` lands in *[Answer the GCS messages
+  that are ignored today]*, this solves itself.
 
 
 ### Minor leftovers cleanup
 
 **Status:** defined
-**Scope:** `src/mavlink.cpp`, `src/logger.cpp`, `src/hooks.cpp`,
-`test/test_main.cpp`
+**Scope:** `src/mavlink.cpp`, `src/hooks.cpp`, `test/test_libs/test_main.cpp`
 
 Small, unrelated things worth getting out of the way in one go:
 
 - `src/mavlink.cpp` declares `extern RTC_DS1307 rtc;`, a global that exists nowhere.
   It does not fail to link only because nobody uses it.
-- `src/logger.cpp` initialises `Data` with the GNU label syntax (`unixtime: ...`),
-  an extension that recent GCC versions reject in C++. The C++20 designated
-  initialisers (`.unixtime = ...`) are the standard equivalent.
-- `src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
+- `src/mavlink.cpp` declares `mavlink_command_long_t command;` inside a `case`
   with no braces of its own, which puts a declaration in the scope of the rest of
   the switch. It compiles because it has no initialiser. Note that cppcheck does
   **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
-  actually reports, and this is not in it. It does report the GCC initialiser syntax
-  above, as three `unusedLabel` findings in `src/logger.cpp`.
-- `test/test_main.cpp` uses `StaticJsonDocument`, deprecated in ArduinoJson 7, while
-  `src/sdwrite.cpp` already uses `JsonDocument`.
+  actually reports, and this is not in it.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
   the name misleads about what is really being tested. See *[The default SD ring is
   4 GiB and never rotates]*.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
+Two items left this list on 2026-09-20 without anyone doing them:
+`src/logger.cpp`'s GNU label initialiser (`unixtime: ...`) and the test's
+`StaticJsonDocument`. `replace-messagepack-log-with-dataflash` rewrote the logger and
+dropped ArduinoJson as a dependency entirely, which also took cppcheck's three
+`unusedLabel` findings in `src/logger.cpp` with it.
+
 ### The tests do not link FreeRTOS, so nothing covers the tasks
 
 **Status:** defined
-**Scope:** `platformio.ini`, `test/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
+**Scope:** `platformio.ini`, `test/test_libs/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
 
 `test_build_src` defaults to `False` in PlatformIO, and `platformio.ini` does not
 set it. `src/` is therefore not compiled into the test binary: no `main.cpp`, no
@@ -1294,13 +1231,13 @@ To decide:
 
 - Whether anything should be added so this cannot recur silently. `VBTBKR[4..511]`,
   the RA4M1's battery-backed registers, survive any reset and are free once the
-  bootloader's own 32-bit double-tap magic at `VBTBKR[0..3]` is left alone. That
-  boot counter is now `openspec/changes/add-degraded-mode`, which selects a reduced
-  task set on repeated failure but deliberately does not park the board in DFU —
-  see that change's design for why. It is not part of recovering *this* board:
-  the change still needs the board reachable before it can be flashed.
-- Whether the SWD pads are worth wiring for a probe, which would make this
-  recoverable without the enclosure open.
+  bootloader's own 32-bit double-tap magic at `VBTBKR[0..3]` is left alone. That boot
+  counter is now `openspec/changes/archive/2026-09-13-add-degraded-mode`, which selects
+  a reduced task set on repeated failure but deliberately does not park the board in DFU
+  — see that change's design for why. It is not part of recovering *this* board: the
+  change still needs the board reachable before it can be flashed.
+- Whether the SWD pads are worth wiring for a probe, which would make this recoverable
+  without the enclosure open.
 
 
 ### Gate the watchdog refresh on the link still emitting

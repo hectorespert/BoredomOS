@@ -7,12 +7,13 @@
 // Bytes [0..3] belong to the Arduino core's bootloader -- cores/arduino/boot.h's
 // BOOT_DOUBLE_TAP_DATA, a 32-bit double-tap magic -- and are never read or written
 // here. This firmware's own block starts at [4]. See design.md's layout table
-// under openspec/changes/add-degraded-mode for the audit that established this.
+// under openspec/changes/archive/2026-09-13-add-degraded-mode for the audit that
+// established this.
 //
 // src/main.cpp writes every field here as the composition root for the boot
 // decision; src/mavlink.cpp reads them to fill the heartbeat. Neither owns the
-// definition, so it lives here, the same way include/Link.h and include/Data.h
-// are shared without owning behaviour.
+// definition, so it lives here, the same way include/Link.h and
+// include/SdRecord.h are shared without owning behaviour.
 namespace Recovery {
 
 // Marks [OFFSET_CONSECUTIVE_COUNT..OFFSET_DELIBERATE] as this firmware's own

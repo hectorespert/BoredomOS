@@ -63,10 +63,13 @@ rules:
     - Any proposal that adds a task, a queue or a library must state its RAM cost
       against the headroom the build reports, read from a current build rather
       than quoted from anywhere. A task's stack and control block are counted by
-      the linker; a queued item comes from the FreeRTOS heap, and a queue's
-      declared depth must be backed by it -- depth, plus one block per producer
-      that can hold an unsent item and one per consumer holding an unreleased one.
-      Proposing a depth is proposing that arithmetic.
+      the linker; a queue's storage is depth times item size in .bss, declared
+      beside the queue and nothing more, because every queue carries its items by
+      value. There is no producer or consumer margin to add -- an item held before
+      a send or after a receive is a local on that task's own stack. Proposing a
+      depth is proposing that arithmetic. Nothing allocates at run time, so a
+      proposal that needs a run-time allocation is proposing to reintroduce the
+      heap, which is a decision to argue for explicitly rather than a detail.
     - State explicitly when a change alters the MAVLink surface (new message id,
       new stream rate, changed identity triple).
     - Read the other active changes under openspec/changes/ before writing, not
@@ -125,9 +128,9 @@ operations:
       - '`pio test` means the HIL suite: it flashes this firmware, interrogates it
         from the host and leaves the board running what it would fly. It does not
         touch the card. `pio test -e libs` is the destructive one -- it replaces
-        the firmware with the Unity binary and deletes data*.mpk and index.bin on
-        every case. Ask before running that one, and follow it with
-        `pio run -t upload` to leave the board operational.'
+        the firmware with the Unity binary and deletes data*.BIN and index.bin on
+        every case, which is the current flight log. Ask before running that one,
+        and follow it with `pio run -t upload` to leave the board operational.'
   archive:
     guidance:
       - 'Before archiving, check the other active changes for claims this one
