@@ -70,6 +70,14 @@ rules:
       depth is proposing that arithmetic. Nothing allocates at run time, so a
       proposal that needs a run-time allocation is proposing to reintroduce the
       heap, which is a decision to argue for explicitly rather than a detail.
+      BE AWARE that openspec/specs/memory-budget/spec.md still describes the
+      previous model -- a run-time pool, reserved margin per producer and consumer,
+      and a producer releasing the memory of a rejected item. That spec has not
+      been migrated and it contradicts this rule, so satisfying one can violate the
+      other. This rule describes the firmware as it is; the spec is the one that is
+      out of date. A proposal that touches queue memory should carry the MODIFIED
+      delta that fixes it -- see TODO.md, "memory-budget's queue requirements still
+      describe the heap".
     - State explicitly when a change alters the MAVLink surface (new message id,
       new stream rate, changed identity triple).
     - Read the other active changes under openspec/changes/ before writing, not

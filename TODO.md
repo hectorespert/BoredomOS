@@ -596,7 +596,8 @@ Points to resolve before implementing:
 ### Serve the SD card as USB mass storage
 
 **Status:** defined
-**Scope:** `src/link.cpp`, `platformio.ini`, `ARCHITECTURE.md`
+**Scope:** `src/link.cpp`, `src/sdwrite.cpp`, `lib/SdData`, `src/logger.cpp`,
+`src/mavlink.cpp`, `src/main.cpp`, `platformio.ini`, `ARCHITECTURE.md`
 
 Both existing download paths are expensive: *[Download the flight log over the MAVLink log
 protocol]* and *[Serve the SD card over MAVLink FTP]* each implement a protocol to move
@@ -618,11 +619,27 @@ are x86_64-only]* as the part GCC 14 rejects — but whether a composite descrip
 reachable from this core, and what it costs in flash and RAM, is unknown and is the first
 thing to find out.
 
-**And it forces a question the two protocol entries dodge:** two writers on one card. MSC
-hands the host raw sector access while `TaskSdWrite` is appending. Betaflight and madflight
-sidestep it by only enabling MSC when disarmed; the equivalent here would be serving the
-card only while logging is stopped, which needs `SdData::end()` from
-`openspec/changes/make-sddata-begin-idempotent/`.
+**It breaks the ownership rule, and that is the blocking design question, not a detail.**
+`ARCHITECTURE.md` §3 and §6 say `src/sdwrite.cpp` via `lib/SdData` is the only code that
+touches the card, and that single rule is what makes the absence of mutexes safe. MSC
+callbacks read and write raw sectors from the USB side — a second owner, on another task, at
+another priority. So this entry cannot be implemented as "add MSC callbacks"; it has to say
+who owns the card in each state and how the handoff happens, and that design does not exist
+yet. Until it does, the entry is a sketch and not something to pick up.
+
+**`SdData::end()` is not the handoff, and it is important not to mistake it for one.**
+Closing the file does not stop logging. `TaskLogger` keeps posting `SdRecord`s once a second
+and `TaskMavlink` keeps posting `PWR`, `TaskSdWrite` keeps receiving them, and
+`SdData::write()` **silently returns without doing anything** when no file is open — so
+enabling MSC on the strength of `end()` alone would race the producers and discard every
+sample for as long as the host held the card. What is actually needed is a state transition:
+stop the producers, drain `sdWriteQueue`, have `TaskSdWrite` stop consuming, *then* `end()`,
+serve MSC, and reverse it on eject — with `begin()` reopening at the far side, which is why
+`openspec/changes/make-sddata-begin-idempotent/` is a prerequisite rather than the answer.
+That transition is the bulk of the work here and none of it exists.
+
+Betaflight and madflight sidestep all of this by only enabling MSC when disarmed, which is a
+state this firmware does not have.
 
 If this works it may retire both protocol entries, which is a large saving — but it serves
 only an operator holding the board, never a ground station on a radio link. The MAVLink
@@ -877,14 +894,61 @@ duration on the board before reducing the size, not after. If it does not fit, t
 are pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
 remove in pieces across several `write()` calls, or accepting a larger file.
 
-**And decide how a reader finds the end of a rewritten file.** Once rotation actually
-happens, a file is written over on its second lap, so records from the previous lap sit
-after the write cursor — complete, valid, and with older timestamps. `DFReader`
-resynchronises on `0xA3 0x95` and will parse them as real data. Nothing today
-distinguishes them. Options: delete and recreate the file on rotation (which is the
-expensive FAT walk above), a lap counter in the file (see *[Put the ring's position in the
-log data instead of `index.bin`]*), or leaving the reader to cut where time goes backwards.
-This has never mattered because rotation has never happened.
+**A reader does not have to find the end of a rewritten file, and it is worth knowing
+why.** Rotation does not overwrite in place: it deletes the next slot before opening it
+(`lib/SdData/SdData.cpp`, the `SD.remove()` ahead of the `SD.open()`), so a file always
+starts empty and never holds records from a previous lap after the write cursor. The
+problem that a circular log usually has — complete, valid, older records sitting past the
+end, which `DFReader` would resynchronise on and parse as real data — **does not exist
+here**.
+
+That has a price and a consequence, and they pull in opposite directions:
+
+- The price is the `SD.remove()` in the paragraph above. Deleting is what walks the FAT,
+  so the property that makes files honest is the same thing that puts the watchdog at
+  risk. Any scheme that stops deleting — pre-allocation, in particular — buys back that
+  time and hands back the stale-record problem with it.
+- The consequence is that a lap counter in the file is **not** needed for readability.
+  *[Put the ring's position in the log data instead of `index.bin`]* therefore stands or
+  falls on `index.bin` being a side-car that can desynchronise, which is its own
+  argument, and not on anything about parsing.
+
+### `memory-budget`'s queue requirements still describe the heap
+
+**Status:** defined
+**Scope:** `openspec/specs/memory-budget/spec.md`
+
+`replace-messagepack-log-with-dataflash` moved the last queue off the FreeRTOS heap and
+`configTOTAL_HEAP_SIZE` is `0x0`, with the allocator dropped from the image entirely. It
+did **not** carry a spec delta for `memory-budget`, so that live capability still states
+the model it replaced:
+
+- *A declared queue depth is backed* requires the reserved memory to "account for the
+  items that exist without sitting in a queue: the item a producer is holding when it
+  discovers the queue is full, the item a consumer holds between taking it and releasing
+  it, and one such item for every producer that can be doing this at the same instant."
+  With items carried by value those are locals on each task's own stack, counted by the
+  linker inside the stack that already exists. There is nothing to reserve.
+- The same requirement ends "A producer whose item the queue did not accept SHALL release
+  that item's memory." There is no memory to release, and nothing can release any: CI
+  greps all of `src/` for the allocator by name.
+- *Task and queue memory is accounted for at build time* has a scenario asserting that
+  "the pool from which memory is obtained at run time is committed to queued items only".
+  There is no such pool.
+
+This is not cosmetic. `openspec/config.yaml`'s proposal rule now states the by-value
+model, so the guidance injected into every new proposal and the canonical spec say
+opposite things, and a proposal can satisfy one while violating the other. The rule
+carries a warning pointing here, which is a signpost and not a fix.
+
+Found by Copilot reviewing the planning-hygiene pull request that corrected the same drift
+everywhere except here.
+
+To decide: whether the requirements are rewritten around by-value queueing — depth times
+item size in `.bss`, and a rejected send costing nothing — or whether the run-time-pool
+requirements are removed outright as describing a facility the firmware no longer has. It
+needs a change with a MODIFIED delta either way; a live spec is not hand-edited outside
+one.
 
 ### The flush policy costs far more card writes than it needs to
 
@@ -1013,14 +1077,20 @@ increasing lap or session counter written into each file when it is opened — a
 with its own `FMT`, so it stays `DFReader`-visible — and a boot that reads the four
 counters and picks the highest. That satisfies the existing requirement (*The log occupies
 a bounded amount of the card*: "The position within that set SHALL survive a power cycle")
-without a side-car file, and it is **also the answer** to how a reader finds the end of a
-rewritten file, which *[The default SD ring is 4 GiB and never rotates]* has to solve
-anyway.
+without a side-car file that can desynchronise.
 
-Note that ArduPilot's *file* backend does **not** do this — page headers exist because raw
-flash has no filesystem. So this is a borrowed idea, not a copied one, and the question of
-whether a side-car file is genuinely worse than a counter in every file is the thing to
-settle first.
+**That side-car argument is the whole case, and it is a thin one.** This entry first
+claimed a second benefit — that a counter in the file is also how a reader finds the end of
+a file written over on a later lap — and that benefit does not exist. Rotation deletes the
+next slot before opening it, so a file never contains records from a previous lap and there
+is no end to find. Do not pick this up expecting it to solve a parsing problem; it solves
+exactly one thing, which is `index.bin` being a separate file that has to stay in agreement
+with the data and can be lost or torn on its own.
+
+Note also that ArduPilot's *file* backend does **not** do this — page headers exist because
+raw flash has no filesystem, where there is genuinely nothing else to hold the position. So
+this is a borrowed idea, not a copied one, and whether a side-car file is actually worse
+than a counter in every file is the thing to settle before writing any code.
 
 ### Decide whether `SYSTEM_TIME` deserves 1 Hz
 
