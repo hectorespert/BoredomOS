@@ -63,11 +63,14 @@ rules:
     - Any proposal that adds a task, a queue or a library must state its RAM cost
       against the headroom the build reports, read from a current build rather
       than quoted from anywhere. A task's stack and control block are counted by
-      the linker; a queue's storage is depth times item size in .bss, declared
-      beside the queue and nothing more, because every queue carries its items by
-      value. There is no producer or consumer margin to add -- an item held before
-      a send or after a receive is a local on that task's own stack. Proposing a
-      depth is proposing that arithmetic. Nothing allocates at run time, so a
+      the linker; a queue costs depth times item size, PLUS one StaticQueue_t
+      control block, both declared in .bss beside the queue in the composition
+      root. Do not leave the control block out -- xQueueCreateStatic takes it as
+      an argument and it is per queue, so a total that counts only the storage
+      array claims more headroom than the linker will give. What there is NOT is
+      any producer or consumer margin, because every queue carries its items by
+      value and an item held before a send or after a receive is a local on that
+      task's own stack. Proposing a depth is proposing that arithmetic. Nothing allocates at run time, so a
       proposal that needs a run-time allocation is proposing to reintroduce the
       heap, which is a decision to argue for explicitly rather than a detail.
       BE AWARE that openspec/specs/memory-budget/spec.md still describes the
