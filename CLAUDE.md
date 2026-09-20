@@ -49,7 +49,7 @@ change. Changes now use `spec-driven` and are reviewed, applied and archived dir
 without that apparatus, which means without the independent-review guarantee it existed
 for — read anything written under this arrangement with that in mind.
 
-`openspec/changes/add-degraded-mode/` still carries a `test-plan.md` and a `review.md` from
+`openspec/changes/archive/2026-09-13-add-degraded-mode/` still carries a `test-plan.md` and a `review.md` from
 when it used the old schema, migrated to `spec-driven` after the fact. They are not
 tracked artifacts anymore, just historical record, but `tasks.md` in that change cites
 their row ids and finding numbers throughout — don't delete either file without checking

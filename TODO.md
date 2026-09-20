@@ -67,10 +67,13 @@ that change's own `tasks.md`.
 
 **One thing is covered nowhere and is not in the list above**, because no task claimed
 it: the `onOpen` callback firing on the **first** open inside `SdData::begin()`. The
-Unity suite cannot reach it — `setUp()` calls `begin()` before any test body runs and
-`begin()` is not idempotent, so a second call proves nothing. See *[`SdData::begin()`
-is not idempotent, and the Unity tests delete its open file]*, which this is now a
-second reason to fix. Rotation's callback **is** tested.
+Unity suite could not reach it — `setUp()` calls `begin()` before any test body runs and
+`begin()` was not idempotent, so a second call proved nothing. Rotation's callback **is**
+tested. `openspec/changes/make-sddata-begin-idempotent/` is picking this up: it makes
+`begin()` reopen, which puts the path within reach, and its task 2.2 adds the case. Note
+what that case does and does not close — it asserts the callback **fired**, not that the
+preamble reached the card, because `cleanSdFiles()` deletes the files a reader would need.
+Only that change's task 4.2, with the card pulled, closes the rest.
 
 Two things worth knowing before spending board time on any of the above:
 
@@ -155,11 +158,12 @@ explained in that change's own `tasks.md`, not silently skipped:
   Needs the SD card physically removed.
 - **5.9 — read a fresh `data*.mpk` back and confirm it carries five per-task
   fields, and that a card still holding old seven-field records is written to
-  without error.** Needs the card pulled and read on a separate machine.
-  **This step is overtaken** if
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands first: that change
-  stops `.mpk` being written at all, and its own task 9.2 reads a `.BIN` back instead.
-  The per-task field count is already wrong here as well — it is seven, not five, since
+  without error.** **Overtaken — not to be done.**
+  `replace-messagepack-log-with-dataflash` landed on 2026-09-20 and stopped `.mpk`
+  being written at all. Reading a log the board wrote back off the card is carried by
+  that change's own 9.2 instead, now in *[Finish what
+  replace-messagepack-log-with-dataflash left open]*. The per-task field count was
+  already wrong here as well — it is seven, not five, since
   `replace-console-cli-with-usb-mavlink-link`.
 - **5.11 — the 30-minute reduced-configuration retry has still never been
   observed firing**, moved in this change but not watched end to end. Needs an
@@ -200,11 +204,11 @@ being no command at all.
 board-verified against the recovered board. Seven remain, each already scoped in that
 change's own `tasks.md` (numbers below refer to it). **6.1 and 6.4 are no longer here**:
 6.1's short-circuit fix belongs to
-`openspec/changes/improve-clock-synchronisation/`, which cannot read the RTC's
-sub-second counter without it, and 6.4 moved there as a task. It is still unclosed for
-the same reason it always was — the DS1307 cannot be disconnected on this assembly, which
-is now known to be a standing property rather than one session's bad luck, and which
-blocks 6.6 below as well.
+`openspec/changes/archive/2026-09-19-improve-clock-synchronisation/`, which cannot read
+the RTC's sub-second counter without it, and 6.4 moved there as a task. It is still
+unclosed for the same reason it always was — the DS1307 cannot be disconnected on this
+assembly, which is now known to be a standing property rather than one session's bad
+luck, and which blocks 6.6 below as well.
 
 - **3.2 / 3.3 — the fault hooks are still unsafe (review finding 9).**
   `vApplicationStackOverflowHook` in `src/hooks.cpp` writes the new phase marker
@@ -285,14 +289,17 @@ found, for whoever next touches this:
 Also worth knowing if this change is touched again: its own `proposal.md`/`design.md`
 originally estimated the RAM cost at ~337 B and were corrected, after implementation,
 to a measured 8 B — the task-name table is `const` (flash, not RAM) and the queue
-depth increase draws on already-reserved FreeRTOS heap slack rather than growing
+depth increase drew on already-reserved FreeRTOS heap slack rather than growing
 `.bss`. See the archived proposal's Impact section for the full explanation before
-assuming a similar table/queue change elsewhere costs what an estimate says it does.
+assuming a similar table/queue change elsewhere costs what an estimate says it does —
+but note the mechanism behind the second half is gone: there is no heap to find slack
+in any more, so a deeper queue now costs depth times item size in `.bss`, every byte
+of it.
 
 ### Add the GY-87 IMU
 
 **Status:** proposed
-**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/Data.h`,
+**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/SdRecord.h`,
 `src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
 Add the **GY-87** module as the satellite's inertial unit, to know its attitude and
@@ -351,20 +358,19 @@ Implementation points:
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - Extend the log's record set and `src/sdwrite.cpp`. These are quite a few new fields:
   review how much the log grows per second and what that does to the rotation rate of
-  the `lib/SdData` ring. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands this is **additive**
-  — a new record type with its own `FMT` definition, not a widened existing record, so
-  old logs stay readable and nothing has to be decided about compatibility.
+  the `lib/SdData` ring. This is **additive**: since the log became DataFlash it takes
+  a new record type with its own `FMT` definition rather than a widened existing
+  record, so old logs stay readable and nothing has to be decided about compatibility.
 - With three chips on the bus, I2C access is no longer exclusive to the RTC. How it
   is serialised against `lib/SystemTime` has to be decided, the same way the SD card
   is against `TaskSdWrite`.
-- Checks in `test/test_main.cpp`, which runs against real hardware.
+- Checks in `test/test_libs/test_main.cpp`, which runs against real hardware.
 
 
 ### Add a temperature sensor
 
 **Status:** proposed
-**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/Data.h`,
+**Scope:** `src/sensors.cpp` (new), `src/main.cpp`, `include/SdRecord.h`,
 `src/logger.cpp`, `src/sdwrite.cpp`, `src/mavlink.cpp`, `platformio.ini`
 
 Measure the on-board temperature and expose it through the two paths that already
@@ -392,25 +398,30 @@ Implementation points:
   `src/sensors.cpp` has to be created and given a priority from
   `include/Priority.h` and a stack size in words.
 - Add the field to the log's record set, fill it in `src/logger.cpp` and dump it in
-  `src/sdwrite.cpp`. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands, this is a new
-  record type with its own `FMT` definition rather than a widened existing one, so old
-  logs stay readable and there is nothing to decide about compatibility.
+  `src/sdwrite.cpp`. Since the log became DataFlash this is a new record type with its
+  own `FMT` definition rather than a widened existing one, so old logs stay readable
+  and there is nothing to decide about compatibility.
 - If the reading is not taken by `TaskLogger` itself, the value has to reach it
-  without breaking the queue protocol: **heap pointers, `vPortFree` if `xQueueSend`
-  does not return `pdPASS`, and the consumer frees**.
+  without breaking the queue protocol: **a new `SdRecordKind` and payload in
+  `include/SdRecord.h`, sent by value**. There is nothing to free and nothing to
+  allocate. Note there is **no array to resize**: `sdWriteQueueStorage` in
+  `src/main.cpp` is declared `4 * sizeof(SdRecord)`, so it follows the record
+  automatically. What a larger payload does need is the `static_assert` in
+  `include/SdRecord.h` updated — it pins the exact size, so it fails the build
+  deliberately — and the queue's `.bss` cost rechecked against the headroom
+  `scripts/ram_budget.py` reports, because four items grow with it.
 - Outbound MAVLink message: pick a standard one (`SCALED_PRESSURE.temperature` in
   centidegrees, or `HYGROMETER_SENSOR`) and emit it with the same identity triple as
   the rest: system `1`, `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
-- Add the check to `test/test_main.cpp`, which only runs on real hardware. If the
-  sensor is initialised with `configASSERT` in `setup()`, its absence will hang the
+- Add the check to `test/test_libs/test_main.cpp`, which only runs on real hardware. If
+  the sensor is initialised with `configASSERT` in `setup()`, its absence will hang the
   board just as the RTC and the SD card do today.
 - Watch the high-water marks after adding the task: the RAM margin is thin.
 
 ### Detect when the battery is charging
 
 **Status:** proposed
-**Scope:** `lib/Battery`, `src/mavlink.cpp`, `include/Data.h`, `src/logger.cpp`,
+**Scope:** `lib/Battery`, `src/mavlink.cpp`, `include/SdRecord.h`, `src/logger.cpp`,
 `src/sdwrite.cpp`
 
 Right now the firmware only knows *what voltage* the battery has, not whether
@@ -443,15 +454,14 @@ Implementation points:
   with the real state. Same identity triple as the rest: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 - Add the state to the log's battery record and dump it in `src/sdwrite.cpp`, so that
-  charge cycles can later be reconstructed from the log files. Once
-  `openspec/changes/replace-messagepack-log-with-dataflash/` lands, the battery figures
-  live in their own record emitted by `TaskMavlink` at the rate the battery is actually
-  read — so this extends that record rather than the 1 Hz one, and old logs stay
-  readable.
+  charge cycles can later be reconstructed from the log files. The battery figures now
+  live in their own `PWR` record emitted by `TaskMavlink` at the rate the battery is
+  actually read, so this extends that record rather than the 1 Hz one, and old logs
+  stay readable.
 - If the software route is chosen, the history cannot grow: fixed-size buffer, no
   `malloc` per sample.
-- Check in `test/test_main.cpp`, which runs on real hardware and can therefore
-  validate the state with the board plugged in (charging) and unplugged.
+- Check in `test/test_libs/test_main.cpp`, which runs on real hardware and can
+  therefore validate the state with the board plugged in (charging) and unplugged.
 
 ### Download the flight log over the MAVLink log protocol
 
@@ -461,6 +471,11 @@ Implementation points:
 Today the housekeeping log can only be recovered by pulling the card out of the
 board: nothing exposes it over the link, which is not a realistic way of reading it
 with the satellite assembled.
+
+Read *[Serve the SD card as USB mass storage]* before starting this one. It moves the same
+bytes far more cheaply, and if it works it may retire this entry and its FTP sibling — but
+only for an operator holding the board. This path is the only one that works from orbit, so
+the two are not substitutes; decide which problem is being solved.
 
 This entry is the **log protocol**: `LOG_REQUEST_LIST` / `LOG_ENTRY` /
 `LOG_REQUEST_DATA` / `LOG_DATA` / `LOG_REQUEST_END` / `LOG_ERASE`, ids 117–122. Its
@@ -485,9 +500,10 @@ dialect change is needed.
 Whichever lands first settles the card-access design for the other — see the
 concurrency point below.
 
-**Depends on `openspec/changes/replace-messagepack-log-with-dataflash/`.** Downloading
-`.mpk` files accomplishes little, since nothing on the ground opens one. This feature is
-worth having once that change has made the log DataFlash `.BIN`.
+**Unblocked by `replace-messagepack-log-with-dataflash`, archived 2026-09-20.**
+Downloading `.mpk` files would have accomplished little, since nothing on the ground
+opens one. The log is DataFlash `.BIN` now and `pymavlink` reads it, which is what
+makes this feature worth having.
 
 Points to resolve before implementing:
 
@@ -520,8 +536,8 @@ Points to resolve before implementing:
 - **What QGroundControl calls the result.** QGC picks how to treat the downloaded
   bytes from the autopilot type, and this firmware announces `MAV_AUTOPILOT_GENERIC`.
   See the identity point in
-  `openspec/changes/replace-messagepack-log-with-dataflash/`; it is a decision shared
-  with that change.
+  `openspec/changes/archive/2026-09-20-replace-messagepack-log-with-dataflash/`, which
+  raised this and did not settle it.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
 
@@ -534,7 +550,9 @@ MAVLink FTP (`FILE_TRANSFER_PROTOCOL`) exposes the card as a filesystem: listing
 directory and reading a file by path, with the reference GCS (`ftp list` / `ftp get`
 in MAVProxy, and QGroundControl's own uses). It is the sibling of *[Download the
 flight log over the MAVLink log protocol]*, and the firmware wants both — that entry
-has the table of which tool drives which, and why one does not replace the other.
+has the table of which tool drives which, and why one does not replace the other. Both
+should be read against *[Serve the SD card as USB mass storage]*, which does the same job
+over the USB cable for a fraction of the work, and only for someone holding the board.
 
 The short version: the log protocol is the one an operator reaches for to pull a
 flight log, because the GCS enumerates them without being told anything. FTP is what
@@ -572,12 +590,64 @@ Points to resolve before implementing:
   part of the protocol and let the ground fetch only the stretch of interest.
 - **Consistency of what is served.** The active file is being written while it is
   read. Define whether it is served as is or whether only the closed files of the ring
-  are offered. Once `openspec/changes/replace-messagepack-log-with-dataflash/` lands,
-  a half-written record at the tail is survivable rather than fatal,
+  are offered. A half-written record at the tail is survivable rather than fatal now,
   because DataFlash records carry a `0xA3 0x95` resynchronisation header — but
   `index.bin` has no such property and a torn read of it is simply wrong.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
+
+### Serve the SD card as USB mass storage
+
+**Status:** defined
+**Scope:** `src/link.cpp`, `src/sdwrite.cpp`, `lib/SdData`, `src/logger.cpp`,
+`src/mavlink.cpp`, `src/main.cpp`, `platformio.ini`, `ARCHITECTURE.md`
+
+Both existing download paths are expensive: *[Download the flight log over the MAVLink log
+protocol]* and *[Serve the SD card over MAVLink FTP]* each implement a protocol to move
+bytes the host could read directly. madflight does neither — it exposes the card as a USB
+mass storage device:
+
+```c
+usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
+// msc_read_cb -> sd.card()->readSectors(lba, buffer, bufsize/512)
+```
+
+Plug the board in, a disk appears, copy the file. No protocol, no rate limit, no partial
+transfers to resume.
+
+**The open question is whether it can coexist with the MAVLink CDC.** USB already carries
+MAVLink as a CDC endpoint and `src/link.cpp` owns it, so this needs a composite CDC+MSC
+device. The Renesas core does ship TinyUSB — it is named in *[The toolchain and uploader
+are x86_64-only]* as the part GCC 14 rejects — but whether a composite descriptor is
+reachable from this core, and what it costs in flash and RAM, is unknown and is the first
+thing to find out.
+
+**It breaks the ownership rule, and that is the blocking design question, not a detail.**
+`ARCHITECTURE.md` §3 and §6 say `src/sdwrite.cpp` via `lib/SdData` is the only code that
+touches the card, and that single rule is what makes the absence of mutexes safe. MSC
+callbacks read and write raw sectors from the USB side — a second owner, on another task, at
+another priority. So this entry cannot be implemented as "add MSC callbacks"; it has to say
+who owns the card in each state and how the handoff happens, and that design does not exist
+yet. Until it does, the entry is a sketch and not something to pick up.
+
+**`SdData::end()` is not the handoff, and it is important not to mistake it for one.**
+Closing the file does not stop logging. `TaskLogger` keeps posting `SdRecord`s once a second
+and `TaskMavlink` keeps posting `PWR`, `TaskSdWrite` keeps receiving them, and
+`SdData::write()` **silently returns without doing anything** when no file is open — so
+enabling MSC on the strength of `end()` alone would race the producers and discard every
+sample for as long as the host held the card. What is actually needed is a state transition:
+stop the producers, drain `sdWriteQueue`, have `TaskSdWrite` stop consuming, *then* `end()`,
+serve MSC, and reverse it on eject — with `begin()` reopening at the far side, which is why
+`openspec/changes/make-sddata-begin-idempotent/` is a prerequisite rather than the answer.
+That transition is the bulk of the work here and none of it exists.
+
+Betaflight and madflight sidestep all of this by only enabling MSC when disarmed, which is a
+state this firmware does not have.
+
+If this works it may retire both protocol entries, which is a large saving — but it serves
+only an operator holding the board, never a ground station on a radio link. The MAVLink
+paths are the only ones that work from orbit, so this is a convenience for development, not
+a replacement for them. Decide which problem is actually being solved before picking.
 
 ### Debug and release builds, with MAVLink tracing on the console
 
@@ -590,14 +660,14 @@ messages come in and go out without a GCS on the other end interpreting them. Th
 idea is to have two build profiles, with the debug one dumping the protocol trace
 over the console port, in readable text.
 
-Depends on `openspec/changes/add-console-cli`, not only on the `move-mavlink-link-
-to-serial1` change (archived) that freed the console port. That change gives the
-console an owner, `src/cli.cpp`, and makes it the port's only writer while tasks
-run: a trace can no longer `print()` into `CLI_SERIAL` directly without becoming a
-second writer, which `specs/console-cli/spec.md` forbids. The trace has to reach
-the port through the CLI somehow — a new command that dumps a ring buffer the
-`TaskMavlink` switch and the `TaskSerialWrite` drain fill, most likely — rather
-than writing on its own.
+Depends on `openspec/changes/archive/2026-09-13-add-console-cli`, not only on the
+`move-mavlink-link-to-serial1` change (archived) that freed the console port. That
+change gives the console an owner, `src/cli.cpp`, and makes it the port's only writer
+while tasks run: a trace can no longer `print()` into `CLI_SERIAL` directly without
+becoming a second writer, which `specs/console-cli/spec.md` forbids. The trace has to
+reach the port through the CLI somehow — a new command that dumps a ring buffer the
+`TaskMavlink` switch and the `TaskSerialWrite` drain fill, most likely — rather than
+writing on its own.
 
 That change's design also answers three of this entry's open questions directly,
 since it had to answer them for `ps` and `free`:
@@ -647,13 +717,12 @@ Points still to resolve before implementing:
 **Status:** proposed
 **Scope:** `src/mavlink.cpp`
 
-The `TaskMavlink` switch has several `case` branches that only `break`:
-`COMMAND_LONG` (including `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` and
-`REQUEST_DATA_STREAM`. The GCS gives them up for lost and retries: MAVProxy sits
-waiting for a `COMMAND_ACK` that never arrives. `openspec/changes/add-degraded-mode`
-answers one specific command, `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, with a
-`COMMAND_ACK`, since it needed that command to actually do something; every other
-branch here is unaffected.
+The `TaskMavlink` switch has several `case` branches that only `break`: `COMMAND_LONG`
+(including `MAV_CMD_GET_HOME_POSITION`), `PARAM_REQUEST_LIST` and `REQUEST_DATA_STREAM`.
+The GCS gives them up for lost and retries: MAVProxy sits waiting for a `COMMAND_ACK`
+that never arrives. `openspec/changes/archive/2026-09-13-add-degraded-mode` answers one
+specific command, `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, with a `COMMAND_ACK`, since it
+needed that command to actually do something; every other branch here is unaffected.
 
 The bare minimum is to always answer something. A `COMMAND_ACK` with
 `MAV_RESULT_UNSUPPORTED` is an honest answer and stops the retry; silence is not.
@@ -679,7 +748,7 @@ To decide:
 ### Emit `SYS_STATUS`
 
 **Status:** proposed
-**Scope:** `src/mavlink.cpp`, `include/Data.h`
+**Scope:** `src/mavlink.cpp`, `include/SdRecord.h`
 
 `SYS_STATUS` (1) is the most conspicuous absence in the current telemetry. It
 carries the `onboard_control_sensors_present`, `_enabled` and `_health` bitmasks,
@@ -689,18 +758,19 @@ GCS shows it front and centre; today the satellite sends none of it.
 It fits with two things the firmware already has half done:
 
 - The health bitmasks are the place to express "the SD card failed", "the RTC was
-  lost", "the IMU does not answer". `openspec/changes/add-degraded-mode` (which
-  consumed *Report the satellite's real state in the heartbeat*) already spends
-  `custom_mode`'s four bytes on the reset reason, the boot phase and two fault
-  counters, and its own design notes that a *continuing* indicator for a missing
-  SD card has nowhere left to go in that field — `SYS_STATUS`'s sensor bitmap is
-  exactly the candidate it points at without adopting it. Both entries share the
-  same source: a centralised health state, which does not exist today.
-- `errors_count1..4` is where to keep the count of failed `pvPortMalloc` calls —
-  checked as of `openspec/changes/add-console-cli`, which absorbed the entry this
-  used to point at, but the failures themselves are still silently skipped rather
-  than counted — and of the sends dropped by a full queue, which are silently
-  lost today.
+  lost", "the IMU does not answer".
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` (which consumed *Report the
+  satellite's real state in the heartbeat*) already spends `custom_mode`'s four bytes
+  on the reset reason, the boot phase and two fault counters, and its own design notes
+  that a *continuing* indicator for a missing SD card has nowhere left to go in that
+  field — `SYS_STATUS`'s sensor bitmap is exactly the candidate it points at without
+  adopting it. Both entries share the same source: a centralised health state, which
+  does not exist today.
+- `errors_count1..4` is where to keep the count of sends dropped by a full queue,
+  which are silently lost today. This used to name failed run-time allocations as the
+  other candidate; there are none left to count, and the one that would matter now
+  halts the board through the malloc-failed hook rather than returning to a caller
+  that could tally it.
 
 To decide: which subsystems are declared in `present`/`enabled` (the
 `MAV_SYS_STATUS_SENSOR` enumeration has no entries for "SD card" or "RTC", so the
@@ -756,39 +826,10 @@ configuration first and self-skip (`NoLinkError`) when its assumption does not
 hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
 next `HEARTBEAT`'s `system_status`).
 
-### `TaskLogger`'s stack margin is critically tight
-
-**Status:** defined
-**Scope:** `src/logger.cpp`, `src/main.cpp`
-
-Found incidentally while board-verifying `queue-mavlink-messages-by-value`
-(2026-09-19), a change that does not touch this file: `ps` read `Logger`'s
-stack high-water mark at **6 of 96 words free** — under a plain 1 Hz sampling
-loop with nothing unusual happening, not a burst or an edge case. That figure
-held steady across a ~3.5-minute soak (didn't drop further), so it is not
-actively overflowing, but 6 words is not a margin this project would accept
-for a task discovered fresh — every other task's documented high-water marks
-leave far more headroom (e.g. `TaskSerialRead` at 45 of 96, `TaskMavlink` at
-169 of 384 after its own recent growth).
-
-`src/logger.cpp` has not been touched by any of the changes that grew other
-tasks' stacks recently, so this looks like a pre-existing condition that
-simply had never been read off the board and written down before. Worth
-doing before it is:
-
-- Read the high-water mark again after a longer soak and under whatever
-  produces `TaskLogger`'s largest stack frame (check `include/Data.h`'s
-  `Data` struct size and how it's built in `src/logger.cpp` — a local copy of
-  it, or of any nested struct, is the likely cost).
-- Decide the new stack size the same way other tasks' were derived here: not
-  a round increase, but sized to leave a comparable margin to the rest of the
-  fleet, then re-measured on the board rather than assumed.
-- Re-check `scripts/ram_budget.py`'s headroom after the change, however small.
-
 ### The default SD ring is 4 GiB and never rotates
 
 **Status:** defined
-**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `test/test_main.cpp`
+**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `test/test_libs/test_main.cpp`
 
 `SdData`'s default constructor is `SdData(int files = 4, size_t size = 1024UL *
 1024UL * 1024UL)`: four files of 1 GiB each, 4 GiB of card. The design intent is a
@@ -798,13 +839,14 @@ opposite holds:
 - The ring needs a card with 4 GiB free. On a smaller one, the first file simply
   grows until `SD.open` or the write fails, and that failure is silent — see *[SD
   logging failure is silent]*.
-- One housekeeping record is 254 bytes — not the hundred this entry first estimated;
-  the encoding is counted out in
-  `openspec/changes/replace-messagepack-log-with-dataflash/` — and `src/logger.cpp`
-  writes one per second. Filling 1 GiB at that
-  rate takes about 49 days, so rotation never actually happens in any realistic
-  mission: `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle
-  mechanism are effectively dead code that has never run in flight.
+- The log now writes about 34 B/s — a 27-byte `SYS` record once a second from
+  `src/logger.cpp`, a 14-byte `PWR` every two seconds from `TaskMavlink`, and a
+  16-byte `TIME` only when the clock moves. Filling 1 GiB at that rate takes about a
+  year, so rotation never actually happens in any realistic mission:
+  `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle mechanism are
+  effectively dead code that has never run in flight. This got **worse**, not better,
+  when `replace-messagepack-log-with-dataflash` cut the rate from 254 B/s: the smaller
+  the record, the longer the file takes to fill and the further away rotation moves.
 - It also makes both download paths impractical — *[Download the flight log over the
   MAVLink log protocol]* and *[Serve the SD card over MAVLink FTP]*: nothing that size
   comes down a telemetry radio.
@@ -813,9 +855,7 @@ opposite holds:
 bytes: ~4,6 KB/s at `LINK_BAUD` for the log protocol (90 useful bytes in a 111-byte
 `LOG_DATA` frame at 57 600), and ~239 useful bytes per packet for FTP. So the file
 size can be derived from how long a download may take rather than picked round. At the
-34 B/s of the DataFlash format that
-`openspec/changes/replace-messagepack-log-with-dataflash/` implements, using the log
-protocol's rate:
+34 B/s the DataFlash format delivers, using the log protocol's rate:
 
 | file size | covers | download |
 |---|---|---|
@@ -825,11 +865,12 @@ protocol's rate:
 | 256 KiB | ~2,1 h | ~56 s |
 
 Four files of 1 MiB give ~34 h of continuous log, rotate several times a day — so
-`index.bin` stops being dead code — and each comes down in under four minutes. Note
-the dependency: at today's 254 B/s that same 1 MiB would hold 1,1 h, so the size only
-becomes useful once the format changes.
+`index.bin` stops being dead code — and each comes down in under four minutes. **The
+dependency this entry used to carry is discharged:** the sizing only made sense once
+the format shrank, which it did on 2026-09-20, so this is actionable now in a way it
+was not when it was written.
 
-Related: `test/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
+Related: `test/test_libs/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
 TEST_FILE_SIZE_MB)` with `TEST_FILE_SIZE_MB = 1024UL`, which is bytes, not
 megabytes — so the only place rotation is ever exercised is the test, by accident of
 a misleading constant name. That constant is also listed in *[Minor leftovers
@@ -840,44 +881,227 @@ hundred kilobytes to a few megabytes puts rotation at hours or days), and whethe
 the size is a compile-time constant or a ground-settable parameter under *[Implement
 the MAVLink parameter protocol]*.
 
-### `SdData::begin()` is not idempotent, and the Unity tests delete its open file
+**Do this one BEFORE *[The flush policy costs far more card writes than it needs to]*,
+not after.** Rotation has never executed **in the shipped flight configuration** — at
+4 × 1 GiB it would take about a year — so `writeLogIndex()`, `index.bin` and the whole
+resume-after-power-cycle mechanism have never run on a board doing its actual job. The
+only place they run at all is `test_sddata_write_and_rotate` in the Unity suite, and only
+because `TEST_FILE_SIZE_MB` is 1024 *bytes*, as the paragraph above says. That is coverage
+of the mechanism, not evidence about flight: the suite writes a fixed 32-byte payload in a
+tight loop with no scheduler, no watchdog and no other task, so it says nothing about how
+long a rotation takes or what else is waiting while it happens. Changing the write policy
+first would ship a buffering scheme whose interaction with rotation cannot be observed
+where it matters. Shrinking the files first, with today's simple flush-per-record, puts
+rotation on the flight path and makes that change verifiable.
+
+**A latent watchdog reset lives on this path, and this entry is what wakes it.** Rotation
+does `SD.remove()` on the next file and then `SD.open()`. On a 1 GiB file with 32 KiB
+clusters that walks ~32 768 FAT entries. `WDT_TIMEOUT_MS` is **1398**, and the failure
+mode is a reset with no trace — indistinguishable from a mystery. The Unity coverage does
+not touch this at all: it deletes 1024-byte files, where the FAT walk is a handful of
+entries, so a rotation that passes there says nothing about one on a file three orders of
+magnitude larger. Measure a rotation's duration on the board before reducing the size, not
+after. If it does not fit, the options are pre-allocation (see *[Replace
+`arduino-libraries/SD` with `greiman/SdFat`]*), doing the remove in pieces across several
+`write()` calls, or accepting a larger file.
+
+**A reader does not have to find the end of a rewritten file, and it is worth knowing
+why.** Rotation does not overwrite in place: it deletes the next slot before opening it
+(`lib/SdData/SdData.cpp`, the `SD.remove()` ahead of the `SD.open()`), so a file always
+starts empty and never holds records from a previous lap after the write cursor. The
+problem that a circular log usually has — complete, valid, older records sitting past the
+end, which `DFReader` would resynchronise on and parse as real data — **does not exist
+here**.
+
+That has a price and a consequence, and they pull in opposite directions:
+
+- The price is the `SD.remove()` in the paragraph above. Deleting is what walks the FAT,
+  so the property that makes files honest is the same thing that puts the watchdog at
+  risk. Any scheme that stops deleting — pre-allocation, in particular — buys back that
+  time and hands back the stale-record problem with it.
+- The consequence is that a lap counter in the file is **not** needed for readability.
+  *[Put the ring's position in the log data instead of `index.bin`]* therefore stands or
+  falls on `index.bin` being a side-car that can desynchronise, which is its own
+  argument, and not on anything about parsing.
+
+### `memory-budget`'s queue requirements still describe the heap
 
 **Status:** defined
-**Scope:** `lib/SdData`, `test/test_libs/test_main.cpp`
+**Scope:** `openspec/specs/memory-budget/spec.md`
 
-`SdData::begin()` opens the log file only when it does not already hold one:
+`replace-messagepack-log-with-dataflash` moved the last queue off the FreeRTOS heap and
+`configTOTAL_HEAP_SIZE` is `0x0`, with the allocator dropped from the image entirely. It
+did **not** carry a spec delta for `memory-budget`, so that live capability still states
+the model it replaced:
 
-```cpp
-_fileIdx = readLogIndex();
-if (!_dataFile) {
-    _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
+- *A declared queue depth is backed* requires the reserved memory to "account for the
+  items that exist without sitting in a queue: the item a producer is holding when it
+  discovers the queue is full, the item a consumer holds between taking it and releasing
+  it, and one such item for every producer that can be doing this at the same instant."
+  With items carried by value those are locals on each task's own stack, counted by the
+  linker inside the stack that already exists. There is nothing to reserve.
+- The same requirement ends "A producer whose item the queue did not accept SHALL release
+  that item's memory." There is no memory to release, and nothing can release any: CI
+  greps all of `src/` for the allocator by name.
+- *Task and queue memory is accounted for at build time* has a scenario asserting that
+  "the pool from which memory is obtained at run time is committed to queued items only".
+  There is no such pool.
+
+This is not cosmetic. `openspec/config.yaml`'s proposal rule now states the by-value
+model, so the guidance injected into every new proposal and the canonical spec say
+opposite things, and a proposal can satisfy one while violating the other. The rule
+carries a warning pointing here, which is a signpost and not a fix.
+
+Found by Copilot reviewing the planning-hygiene pull request that corrected the same drift
+everywhere except here.
+
+To decide: whether the requirements are rewritten around by-value queueing — depth times
+item size in `.bss`, and a rejected send costing nothing — or whether the run-time-pool
+requirements are removed outright as describing a facility the firmware no longer has. It
+needs a change with a MODIFIED delta either way; a live spec is not hand-edited outside
+one.
+
+### The flush policy costs far more card writes than it needs to
+
+**Status:** defined
+**Scope:** `lib/SdData`, `openspec/specs/flight-log/spec.md`
+
+`SdData::writeRaw()` calls `_dataFile.flush()` after **every record**. Nobody chose that;
+it has been there since the log existed. Traced through `SdFile::sync()` and
+`SdVolume::cacheFlush()` in `.pio/libdeps/uno_r4_minima/SD/`, one 27-byte `SYS` record
+costs **two sector writes and two sector reads**:
+
+- the data block is not in cache (the previous `sync()` evicted it) → **read** it
+- copy 27 B in; the file grew, so `F_FILE_DIR_DIRTY` is set
+- `sync()` needs the directory block, which is not in cache → `cacheFlush()` **writes**
+  the data block, then **reads** the directory block
+- `sync()` writes `d->fileSize` and `cacheFlush()` **writes** the directory block
+
+`SdVolume` has a single 512 B cache block, so the `sync()` evicts the very block the next
+record needs. The `flush()` is paid twice.
+
+Without the per-record flush, `SdFile::write` takes a different branch entirely: when
+`blockOffset == 0` and the write is at the end of the file it does not even read the
+block, it marks it dirty and fills it, and the block is written **once, when full**.
+
+| | sector writes/s | factor | lost on a power cut |
+|---|---|---|---|
+| today, flush per record | 3,00 | 1× | one record |
+| flush per sector | 0,13 | 23× | ~15 s |
+| flush per 32 sectors | 0,068 | 44× | ~8 min |
+
+**Most of the win is in not flushing per record; per-sector is the right choice here.**
+madflight uses 32 sectors (16 kB) because at a drone's data rate a sector fills in
+milliseconds. At our 34 B/s a sector is fifteen seconds, so copying that constant would be
+copying the answer to a different question.
+
+**Where the wear actually lands.** Half of those writes go to the *same* directory sector,
+about 129 600 times a day, 47 million times a year. Card wear levelling should spread it,
+but the FAT and directory region is the known death zone of cheap cards — what is at risk
+is not the log, it is the filesystem that indexes it, and with it the other three files.
+
+**This modifies a live requirement, and that is the real cost.**
+`openspec/specs/flight-log/spec.md`'s *A truncated record costs only that record* says
+"the incomplete tail is the only data lost". Buffering breaks that literally: completed
+records in the unflushed block are lost too. The change has to carry a MODIFIED delta
+stating the new bound honestly, not slip the trade past the spec. Per-sector flushing makes
+that bound ~15 s, which is defensible; 16 kB would make it ~8 minutes, which is a different
+argument.
+
+Two things the change has to handle:
+
+- **Pad the unfilled tail with `0xFF`, not zeros.** This is what madflight does
+  (`memset(wbuf, 0xff, sizeof(wbuf))`), and it makes a half-filled sector
+  **self-terminating**: DataFlash readers skip `0xFF`, so the file ends where it should
+  without anyone having recorded its length.
+- **Recover the true end on reopen.** After a power cut the directory entry's `fileSize`
+  is stale and short, while the bytes past it are physically on the card. Appending from
+  the stale offset would overwrite data that survived. Scanning forward from `fileSize`
+  for the real end is a bounded read — at most one flush interval — and turns an accepted
+  loss into no loss at all.
+
+No new RAM: **the 512 B `SdVolume` cache already is the buffer**, and today we throw it
+away on every record. That is the difference from madflight, which needs its own
+`wbuf[512]` on top of SdFat.
+
+### Replace `arduino-libraries/SD` with `greiman/SdFat`
+
+**Status:** defined
+**Scope:** `platformio.ini`, `lib/SdData`, `test/test_libs/test_main.cpp`,
+`ARCHITECTURE.md`
+
+`arduino-libraries/SD` is a fork of an ancient SdFat and it is the reason this project
+cannot do what every comparable project does. It has no `preAllocate()`, no `truncate()`,
+no contiguous-write fast path, and one global 512 B cache block.
+
+What that unlocks, in order of value:
+
+- **`preAllocate()` reserves clusters in the FAT without writing a byte of data.** It is a
+  metadata operation, cheap. A file that never grows never sets `F_FILE_DIR_DIRTY`, so its
+  directory entry is **never touched in flight** — which removes the wear target described
+  in *[The flush policy costs far more card writes than it needs to]* rather than merely
+  reducing it. madflight pre-allocates 100 MB and calls `truncate()` on close to give back
+  what it did not use.
+- **It removes the rotation watchdog risk.** If the next file is already allocated there is
+  no FAT walk on the flight path.
+- Betaflight went further and wrote [asyncfatfs](https://github.com/thenickdude/asyncfatfs)
+  for the same reason: it reserves the largest contiguous free region as a file and lends
+  space from it, so "the FAT entries for the file need never be read".
+
+**Start with a spike, not a swap.** RAM is the binding constraint and this is a new
+dependency: measure SdFat's `.bss` and flash against the headroom `scripts/ram_budget.py`
+reports (3184 B as of 2026-09-20) before committing to anything. SdFat is configurable
+(`SdFatConfig.h`) and has a reduced mode, so the first question is what the smallest
+useful configuration costs. If it does not fit, this entry closes as "does not fit" and
+*[The flush policy...]* stands on its own, which it can.
+
+### Put the ring's position in the log data instead of `index.bin`
+
+**Status:** defined
+**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `include/SdRecord.h`,
+`openspec/specs/flight-log/spec.md`
+
+`index.bin` is a second file that has to stay in agreement with the data, and it is
+written from the rotation path with its own `open`/`seek`/`write`/`flush`/`close`. If it is
+lost or torn the ring does not know where it is. It also evicts the single `SdVolume` cache
+block every time it is touched.
+
+ArduPilot's `AP_Logger_Block` — the backend for raw flash chips, with no filesystem at all
+— does not have this piece, because the information lives in the data. Every page carries a
+header with `FileNumber` and `FilePage`, and at startup `find_last_page()` runs a **binary
+search** for where the pair stops increasing:
+
+```c
+while (top - bottom > 1) {
+  look = (top + bottom) / 2;
+  StartRead(look);
+  look_hash = (int64_t)GetFileNumber() << 32 | df_FilePage;
+  if (look_hash < bottom_hash) { top = look; }
+  else { bottom = look; bottom_hash = look_hash; }
 }
 ```
 
-There is no `end()` and nothing ever closes `_dataFile`, so a second `begin()` is a
-no-op that silently keeps the first file — even when `_fileIdx` has changed and a
-different file is what should be open.
+A new log is `FileNumber + 1`. The end of the ring is where the counter goes backwards.
 
-`test/test_libs/test_main.cpp` walks straight into it. `setUp()` calls
-`cleanSdFiles()` and then `begin()`; `tearDown()` calls `cleanSdFiles()` again, which
-`SD.remove()`s a file `sdData` still has open. From the second case onwards `begin()`
-sees a truthy `_dataFile` and does not reopen, so the remaining cases write through a
-handle to a deleted file. The suite passes — it asserts on `SD.exists()`, not on the
-bytes — which is what makes this worth writing down rather than noticing the day it
-matters.
+Adapted to a ring of *files* rather than raw flash, the equivalent is a monotonically
+increasing lap or session counter written into each file when it is opened — a record type
+with its own `FMT`, so it stays `DFReader`-visible — and a boot that reads the four
+counters and picks the highest. That satisfies the existing requirement (*The log occupies
+a bounded amount of the card*: "The position within that set SHALL survive a power cycle")
+without a side-car file that can desynchronise.
 
-In flight `begin()` is called exactly once, from `TaskSdWrite`, so nothing is broken
-today. It becomes real the moment anything restarts the logger: a card remount, an
-error-recovery path, or the SD failure handling of *[SD logging failure is silent]*.
+**That side-car argument is the whole case, and it is a thin one.** This entry first
+claimed a second benefit — that a counter in the file is also how a reader finds the end of
+a file written over on a later lap — and that benefit does not exist. Rotation deletes the
+next slot before opening it, so a file never contains records from a previous lap and there
+is no end to find. Do not pick this up expecting it to solve a parsing problem; it solves
+exactly one thing, which is `index.bin` being a separate file that has to stay in agreement
+with the data and can be lost or torn on its own.
 
-To decide: whether `begin()` closes and reopens unconditionally, or gains an `end()`
-and the tests call it; and whether `cleanSdFiles()` should refuse to remove a file the
-object still holds, which would have made this visible immediately.
-
-Found by Copilot reviewing the pull request that split `test/` into `test_libs` and
-`test_hil`. It is not a regression of that change: the code is untouched and only
-moved.
-
+Note also that ArduPilot's *file* backend does **not** do this — page headers exist because
+raw flash has no filesystem, where there is genuinely nothing else to hold the position. So
+this is a borrowed idea, not a copied one, and whether a side-car file is actually worse
+than a counter in every file is the thing to settle before writing any code.
 
 ### Decide whether `SYSTEM_TIME` deserves 1 Hz
 
@@ -909,14 +1133,14 @@ structure turn out to be, not against the bench UART.
 **Changing any of these rates alters the MAVLink surface.** It needs a spec delta —
 `openspec/specs/mavlink-link/spec.md` states the three rates twice, in the scenario at
 lines 20-21 and again at line 90 — and it touches whichever HIL cases assert them. It
-is deliberately not folded into
-`openspec/changes/fold-periodic-telemetry-into-mavlink-task/`, whose value rests on
-being invisible from the ground; once that change lands, the rate is one number in its
-schedule table.
+was deliberately not folded into
+`openspec/changes/archive/2026-09-18-fold-periodic-telemetry-into-mavlink-task/`, whose
+value rested on being invisible from the ground. That change has landed, so the rate is
+now one number in its schedule table in `src/mavlink.cpp`.
 
-Related: `openspec/changes/improve-clock-synchronisation/` covers the quality of the
-timestamp — resolution, provenance and time base — not how often it is sent. The two are
-independent, so that change landing does not answer this question.
+Related: `openspec/changes/archive/2026-09-19-improve-clock-synchronisation/` covered the
+quality of the timestamp — resolution, provenance and time base — not how often it is
+sent. The two are independent, so that change landing did not answer this question.
 
 ### Fix the pointer arithmetic in the unknown-message `STATUSTEXT`
 
@@ -952,45 +1176,6 @@ Worth reviewing together with *[Debug and release builds...]*: if the protocol t
 ends up printing the `msgid` to the console, formatting the number should be solved
 once and not in two places.
 
-### `TaskLogger`'s stack margin is razor-thin
-
-**Status:** defined
-**Scope:** `src/logger.cpp`, `src/main.cpp`
-
-`openspec/changes/add-console-cli` gave the firmware a `ps` command, and the first
-live reading it produced showed `TaskLogger`'s unused stack at **5 of 96 words** —
-20 bytes of headroom, tighter than every other task by a wide margin. The
-next-tightest was `TaskHeartbeat` (128 words) at 28 free; everything else had more
-room than that. `TaskHeartbeat` no longer exists as its own task
-(`fold-periodic-telemetry-into-mavlink-task` folded it, and
-`TaskMavlinkBatteryStatus`, into `TaskMavlink`'s schedule), so this comparison
-point is gone. That change's task 5.10 re-read `TaskLogger`'s own margin on the
-board: **6 of 96 words free**, up from 5 — the small improvement `include/Data.h`'s
-`Tasks` losing two fields predicted, confirmed rather than assumed. Still the
-tightest margin in the project by a wide one-word difference from what used to be
-the next-tightest task, and still worth watching after any further change to
-`Data`'s size or to `src/logger.cpp`'s body.
-
-Nothing here is new to `add-console-cli`: `src/logger.cpp`'s task body is untouched
-by it, and the 96-word size predates it too — the entry about the log never storing the
-battery data, now absorbed into
-`openspec/changes/replace-messagepack-log-with-dataflash/`, already flagged the size as
-"among the tightest" without a live figure.
-`ps` is simply the first tool able to show the number without pulling the SD card
-and reading a housekeeping record's `System` block by hand.
-
-`configCHECK_FOR_STACK_OVERFLOW=2` is the only thing standing between this and a
-silent corruption if the margin is ever crossed — see `src/hooks.cpp`'s overflow
-hook and *[The stack overflow hook hangs before it warns]*, below, for what happens
-if it is.
-
-To decide: whether 96 words is still enough, or whether the size should grow — and
-if it does, that it is verified back down with the SD log's own recorded figure or
-`ps`'s live one, not assumed. Re-check after any change to `src/logger.cpp`'s body,
-`include/Data.h`'s size, or `lib/SdData`'s JSON conversion, since any of the three
-changes how much stack one `TaskLogger` cycle needs.
-
-
 ### The stack overflow hook hangs before it warns
 
 **Status:** defined
@@ -1013,9 +1198,9 @@ pin register manipulation and a busy-wait delay, depending on nothing that needs
 interrupts. `ARCHITECTURE.md` describes this hook as trapping an overflow into a slow
 blink; once the behaviour is fixed, state the real period there.
 
-Overlaps with `openspec/changes/add-degraded-mode` (formerly *Add a watchdog* and
-*`setup()` asserts on the RTC before the console exists*, both consumed by that
-change): with a watchdog, sitting here blinking forever stops being the obvious
+Overlaps with `openspec/changes/archive/2026-09-13-add-degraded-mode` (formerly *Add a
+watchdog* and *`setup()` asserts on the RTC before the console exists*, both consumed
+by that change): with a watchdog, sitting here blinking forever stops being the obvious
 answer to an overflow, and that change's own review (`review.md` finding 9)
 already names the fix this entry describes — writing the phase marker first and
 resetting immediately, no blink — as not yet folded in.
@@ -1032,8 +1217,9 @@ If `SD.open` fails in `SdData::begin()`, the object is left with no file and
 away".
 
 Result: the entire mission log can be lost without a single warning over the link.
-`setup()` reports a missing card at boot (`openspec/changes/add-degraded-mode`
-turned the old `configASSERT(SD.begin(9))` into a degradation), but that only
+`setup()` reports a missing card at boot
+(`openspec/changes/archive/2026-09-13-add-degraded-mode` turned the old
+`configASSERT(SD.begin(9))` into a degradation), but that only
 covers boot; a card that fails or is unmounted later still goes unnoticed.
 
 To decide: having `begin()`/`write()` return a result and `TaskSdWrite` propagate
@@ -1041,6 +1227,12 @@ it; and how the ground finds out — a `STATUSTEXT`, a field in the heartbeat (w
 `custom_mode` bytes `add-degraded-mode` already spent on the boot-time state — see
 *Emit `SYS_STATUS`* above), or both. Be careful not to flood the link by repeating
 the warning at 1 Hz.
+
+Note that `openspec/changes/make-sddata-begin-idempotent/` is touching `begin()` now and
+deliberately does **not** change its `void` return — it says so in its own Non-Goals. So
+the signature question is still entirely open here, and that change also gives the error
+path a new reason to exist: recovering from a card failure means reopening the log, which
+is the case that change makes work.
 
 
 ### `TaskSerialRead` polls the port instead of waiting
@@ -1143,7 +1335,8 @@ verified; the uploader half is not, and it is the one that blocks every `[board]
 Whoever picks this up: moving the compiler re-bases every RAM figure in
 `ARCHITECTURE.md` and in any change then in flight, so do it when nothing else is
 mid-flight, and re-read the high-water marks on the board — a new compiler changes
-stack frame sizes, and `TaskLogger` has 20 bytes of margin.
+stack frame sizes, and the tightest margin in the fleet is `UartRead` at 41 words
+free of 96.
 
 ### The CI PlatformIO cache key hashes a file that does not exist
 
@@ -1173,65 +1366,64 @@ The four messages the satellite emits today go out with empty, constant or outri
 misleading fields. No new hardware is needed to fix a good part of it:
 
 - **`STATUSTEXT` is misused, not just badly formatted.** Beyond the bug in *[Fix the
-  pointer arithmetic...]*, the design problem is that the `default` branch of the
-  switch answers the ground with a text message **for every inbound message not
-  covered**. A talkative GCS continuously sends things the switch does not cover
-  (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the
-  satellite spends its time flooding a narrow link with complaints. Take it out of
-  there and reserve `STATUSTEXT` for what deserves a warning: an SD failure, and —
-  since `openspec/changes/add-degraded-mode` — the cause of the last reset, already
-  emitted once per boot.
+  pointer arithmetic...]*, the design problem is that the `default` branch of the switch
+  answers the ground with a text message **for every inbound message not covered**. A
+  talkative GCS continuously sends things the switch does not cover
+  (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the satellite
+  spends its time flooding a narrow link with complaints. Take it out of there and
+  reserve `STATUSTEXT` for what deserves a warning: an SD failure, and — since
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` — the cause of the last reset,
+  already emitted once per boot.
 - **`BATTERY_STATUS` goes out nearly empty:** `current_battery`, `current_consumed`
-  and `energy_consumed` at `-1`, `time_remaining` at `0`, `temperature` at
-  `INT16_MAX` and `charge_state` at `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Two of
-  them can be filled with no additional hardware as soon as *[Add the GY-87 IMU]*
-  (temperature) and *[Detect when the battery is charging]* (charge state) land.
-  `time_remaining` requires measuring current.
+  and `energy_consumed` at `-1`, `time_remaining` at `0`, `temperature` at `INT16_MAX`
+  and `charge_state` at `MAV_BATTERY_CHARGE_STATE_UNDEFINED`. Two of them can be filled
+  with no additional hardware as soon as *[Add the GY-87 IMU]* (temperature) and
+  *[Detect when the battery is charging]* (charge state) land. `time_remaining` requires
+  measuring current.
 - **`HEARTBEAT` used to declare things that were not so.**
-  `openspec/changes/add-degraded-mode` (which consumed *Report the satellite's real
-  state in the heartbeat*) makes `custom_mode` carry the reset reason, the boot
-  phase and both fault counters, and drops `MAV_MODE_FLAG_AUTO_ENABLED` in the
+  `openspec/changes/archive/2026-09-13-add-degraded-mode` (which consumed *Report the
+  satellite's real state in the heartbeat*) makes `custom_mode` carry the reset reason,
+  the boot phase and both fault counters, and drops `MAV_MODE_FLAG_AUTO_ENABLED` in the
   reduced configuration. `MAV_MODE_FLAG_SAFETY_ARMED` stays fixed regardless — that
   remains a separate decision.
 - **`MAV_TYPE_ROCKET` is debatable.** There is no `MAV_TYPE_SATELLITE`, but
-  `MAV_TYPE_GENERIC` describes a CubeSat better than a rocket does, and it changes
-  how the GCS draws it. Worth deciding soon: `ARCHITECTURE.md` fixes it as the bus
-  identity and the more code assumes it, the more it costs to change.
+  `MAV_TYPE_GENERIC` describes a CubeSat better than a rocket does, and it changes how
+  the GCS draws it. Worth deciding soon: `ARCHITECTURE.md` fixes it as the bus identity
+  and the more code assumes it, the more it costs to change.
 - **`SYSTEM_TIME` at 1 Hz is a lot** for something that hardly ever changes in an
-  interesting way. If `MAV_CMD_SET_MESSAGE_INTERVAL` lands in *[Answer the GCS
-  messages that are ignored today]*, this solves itself.
+  interesting way. If `MAV_CMD_SET_MESSAGE_INTERVAL` lands in *[Answer the GCS messages
+  that are ignored today]*, this solves itself.
 
 
 ### Minor leftovers cleanup
 
 **Status:** defined
-**Scope:** `src/mavlink.cpp`, `src/logger.cpp`, `src/hooks.cpp`,
-`test/test_main.cpp`
+**Scope:** `src/mavlink.cpp`, `src/hooks.cpp`, `test/test_libs/test_main.cpp`
 
 Small, unrelated things worth getting out of the way in one go:
 
 - `src/mavlink.cpp` declares `extern RTC_DS1307 rtc;`, a global that exists nowhere.
   It does not fail to link only because nobody uses it.
-- `src/logger.cpp` initialises `Data` with the GNU label syntax (`unixtime: ...`),
-  an extension that recent GCC versions reject in C++. The C++20 designated
-  initialisers (`.unixtime = ...`) are the standard equivalent.
-- `src/mavlink.cpp:175` declares `mavlink_command_long_t command;` inside a `case`
+- `src/mavlink.cpp` declares `mavlink_command_long_t command;` inside a `case`
   with no braces of its own, which puts a declaration in the scope of the rest of
   the switch. It compiles because it has no initialiser. Note that cppcheck does
   **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
-  actually reports, and this is not in it. It does report the GCC initialiser syntax
-  above, as three `unusedLabel` findings in `src/logger.cpp`.
-- `test/test_main.cpp` uses `StaticJsonDocument`, deprecated in ArduinoJson 7, while
-  `src/sdwrite.cpp` already uses `JsonDocument`.
+  actually reports, and this is not in it.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
   the name misleads about what is really being tested. See *[The default SD ring is
   4 GiB and never rotates]*.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
+Two items left this list on 2026-09-20 without anyone doing them:
+`src/logger.cpp`'s GNU label initialiser (`unixtime: ...`) and the test's
+`StaticJsonDocument`. `replace-messagepack-log-with-dataflash` rewrote the logger and
+dropped ArduinoJson as a dependency entirely, which also took cppcheck's three
+`unusedLabel` findings in `src/logger.cpp` with it.
+
 ### The tests do not link FreeRTOS, so nothing covers the tasks
 
 **Status:** defined
-**Scope:** `platformio.ini`, `test/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
+**Scope:** `platformio.ini`, `test/test_libs/test_main.cpp`, `CLAUDE.md`, `ARCHITECTURE.md`
 
 `test_build_src` defaults to `False` in PlatformIO, and `platformio.ini` does not
 set it. `src/` is therefore not compiled into the test binary: no `main.cpp`, no
@@ -1294,13 +1486,13 @@ To decide:
 
 - Whether anything should be added so this cannot recur silently. `VBTBKR[4..511]`,
   the RA4M1's battery-backed registers, survive any reset and are free once the
-  bootloader's own 32-bit double-tap magic at `VBTBKR[0..3]` is left alone. That
-  boot counter is now `openspec/changes/add-degraded-mode`, which selects a reduced
-  task set on repeated failure but deliberately does not park the board in DFU —
-  see that change's design for why. It is not part of recovering *this* board:
-  the change still needs the board reachable before it can be flashed.
-- Whether the SWD pads are worth wiring for a probe, which would make this
-  recoverable without the enclosure open.
+  bootloader's own 32-bit double-tap magic at `VBTBKR[0..3]` is left alone. That boot
+  counter is now `openspec/changes/archive/2026-09-13-add-degraded-mode`, which selects
+  a reduced task set on repeated failure but deliberately does not park the board in DFU
+  — see that change's design for why. It is not part of recovering *this* board: the
+  change still needs the board reachable before it can be flashed.
+- Whether the SWD pads are worth wiring for a probe, which would make this recoverable
+  without the enclosure open.
 
 
 ### Gate the watchdog refresh on the link still emitting

@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-20
+# No spec delta: this makes the implementation satisfy a requirement flight-log
+# already states -- see proposal.md's Capabilities section for why each candidate
+# requirement was rejected as already covered.
+skip_specs: true

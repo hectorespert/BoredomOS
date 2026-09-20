@@ -218,9 +218,15 @@ configuration (see §5.1), so no task decides that at creation time any more.
 `TaskMavlink` also carries the two mechanisms that get the board back out, since it
 is the only task that runs in every configuration: it clears the consecutive
 counter once the firmware has run for the 5-minute stability window, and, while
-reduced, retries the normal configuration every 30 minutes. Both figures are
-derived in `openspec/changes/add-degraded-mode/design.md`
-from the heap's worst-case leak rate, not guessed. An independent watchdog,
+reduced, retries the normal configuration every 30 minutes. Both figures were
+derived in `openspec/changes/archive/2026-09-13-add-degraded-mode/design.md`
+from the worst-case leak rate of the FreeRTOS heap that existed then — a derivation
+that is **historical, not a current justification**: `replace-messagepack-log-with-dataflash`
+moved the last queue off the heap and the allocator is no longer in the image at all
+(§4), so the quantity those figures were computed from does not exist any more. They
+have not been re-derived against anything the firmware does today, and nothing has
+shown them to be wrong either; treat them as inherited constants with a recorded
+provenance rather than as numbers this design still stands behind. An independent watchdog,
 refreshed only from the idle hook, turns a task that stops yielding into a
 watchdog reset within `WDT_TIMEOUT_MS`. `include/Recovery.h` and `src/recovery.cpp`
 own the register layout and the `PRCR`-unlocked access to it; `src/main.cpp` is
@@ -648,7 +654,7 @@ than staying silent about it. `configASSERT` remains on each queue creation and
 each task creation — with `configSUPPORT_STATIC_ALLOCATION` these cannot fail
 for want of memory, so a `NULL` handle there is a programming error, not a
 hardware fault, and stopping on it is still correct. See
-`openspec/changes/add-degraded-mode/` for the reasoning and
+`openspec/changes/archive/2026-09-13-add-degraded-mode/` for the reasoning and
 `specs/fault-recovery/spec.md` for what a degraded board must still do.
 
 ## 8. Build, flash and test
