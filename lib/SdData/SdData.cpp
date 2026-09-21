@@ -55,6 +55,7 @@ void SdData::begin()
     _fileIdx = readLogIndex();
     String logFileName = getLogFileName();
     _dataFile = SD.open(logFileName.c_str(), FILE_WRITE);
+    _sinceFlush = 0;
     if (!_dataFile) {
         return;
     }
@@ -65,6 +66,7 @@ void SdData::end()
 {
     if (_dataFile) {
         _dataFile.close();
+        _sinceFlush = 0;
     }
 }
 
@@ -80,28 +82,61 @@ void SdData::writeLogIndex() {
     idxFile.close();
 }
 
-void SdData::writeRaw(const uint8_t *data, size_t length)
+void SdData::appendBytes(const uint8_t *data, size_t length)
 {
     if (!_dataFile || data == nullptr || length == 0) {
         return;
     }
 
     _dataFile.write(data, length);
-    _dataFile.flush();
+}
+
+// Syncs every call. See the header for why this path is not batched: it carries the
+// format preamble, and a preamble that does not reach the card costs the whole file
+// rather than its tail.
+void SdData::writeRaw(const uint8_t *data, size_t length)
+{
+    appendBytes(data, length);
+
+    if (_dataFile) {
+        _dataFile.flush();
+        _sinceFlush = 0;
+    }
 }
 
 void SdData::write(const uint8_t *data, size_t length)
 {
-    if (!_dataFile) {
+    // The argument guard is repeated here even though appendBytes() has it, and the
+    // duplication is the point: appendBytes() returning early is silent, while the
+    // accounting below would still advance _sinceFlush by bytes that were never
+    // written -- moving the sync point, and with it the bound this class promises on
+    // what power loss costs. write() used to be null-safe by delegating to writeRaw();
+    // splitting the append out took that away, and this puts it back.
+    if (!_dataFile || data == nullptr || length == 0) {
         return;
     }
 
-    writeRaw(data, length);
+    appendBytes(data, length);
+
+    // Accumulate rather than sync. SdFile::write() has already updated the in-memory
+    // fileSize_, so size() below is correct whether or not this synced -- rotation
+    // still triggers on the right byte.
+    _sinceFlush += length;
+    if (_sinceFlush >= FLUSH_INTERVAL_BYTES) {
+        _dataFile.flush();
+        _sinceFlush = 0;
+    }
 
     size_t fileSize = _dataFile.size();
 
     if (fileSize >= _size ) {
+        // close() syncs, so nothing accumulated is lost at a rotation boundary --
+        // but the counter is reset explicitly rather than relying on that, because
+        // an interval that straddled two files would make the bound wrong for the
+        // new one.
         _dataFile.close();
+        _sinceFlush = 0;
+
         _fileIdx = (_fileIdx + 1) % _files;
         writeLogIndex();
         String newLogFileName = getLogFileName();
@@ -110,6 +145,7 @@ void SdData::write(const uint8_t *data, size_t length)
         }
 
         _dataFile = SD.open(newLogFileName.c_str(), FILE_WRITE);
+        _sinceFlush = 0;
         notifyOpened();
     }
 }
