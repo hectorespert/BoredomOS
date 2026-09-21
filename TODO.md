@@ -944,16 +944,38 @@ first would ship a buffering scheme whose interaction with rotation cannot be ob
 where it matters. Shrinking the files first, with today's simple flush-per-record, puts
 rotation on the flight path and makes that change verifiable.
 
-**A latent watchdog reset lives on this path, and this entry is what wakes it.** Rotation
-does `SD.remove()` on the next file and then `SD.open()`. On a 1 GiB file with 32 KiB
-clusters that walks ~32 768 FAT entries. `WDT_TIMEOUT_MS` is **1398**, and the failure
-mode is a reset with no trace — indistinguishable from a mystery. The Unity coverage does
-not touch this at all: it deletes 1024-byte files, where the FAT walk is a handful of
-entries, so a rotation that passes there says nothing about one on a file three orders of
-magnitude larger. Measure a rotation's duration on the board before reducing the size, not
-after. If it does not fit, the options are pre-allocation (see *[Replace
-`arduino-libraries/SD` with `greiman/SdFat`]*), doing the remove in pieces across several
-`write()` calls, or accepting a larger file.
+**A latent watchdog reset lives on this path, and it belongs to the CURRENT size, not to
+shrinking it.** `SdVolume::freeChain()` walks a deleted file's cluster chain one cluster at
+a time — `fatGet()` then `fatPut()` each, and `fatPut()` dirties the mirror FAT too — so
+`SD.remove()` costs about one sector read and `fatCount()` sector writes per FAT sector the
+chain spans, **proportional to the file size**:
+
+| bytes per cluster | deleting 1 GiB | deleting 1 MiB |
+|---|---|---|
+| 4 KiB | ~6 144 sector ops | ~6 |
+| 8 KiB | ~3 072 | ~3 |
+| 32 KiB | ~768 | ~3 |
+| 64 KiB | ~384 | ~3 |
+
+`WDT_TIMEOUT_MS` is **1398**, and the failure mode is a reset with no trace —
+indistinguishable from a mystery. At the shipped 1 GiB, a card formatted with small
+clusters does not fit; at a megabyte nothing fits badly. **So the two goals of this entry
+are aligned rather than in tension: making rotation happen also makes it cheap.** What is
+armed today is the 1 GiB configuration, disarmed only by needing about a year to reach its
+first rotation.
+
+The figure that decides which column applies is the card's cluster size, and
+`test_report_sd_volume_geometry` in `test/test_libs/test_main.cpp` now reports it, together
+with this same arithmetic for both sizes, from whatever card is in the board. `diskutil
+info /dev/diskNsM` on a Mac gives the same number under *Allocation Block Size* without
+flashing anything.
+
+The Unity rotation coverage says nothing about any of this: it deletes 1024-byte files,
+where the FAT walk is a handful of entries. Still measure a rotation's duration on the
+board — the arithmetic above bounds the FAT work, not the card's own write latency, which
+varies by an order of magnitude between cards. If it does not fit, the options are
+pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
+remove in pieces across several `write()` calls, or accepting a larger file.
 
 **A reader does not have to find the end of a rewritten file, and it is worth knowing
 why.** Rotation does not overwrite in place: it deletes the next slot before opening it

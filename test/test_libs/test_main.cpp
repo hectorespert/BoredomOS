@@ -480,6 +480,80 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
                               "writes still went to the file begin() left behind");
 }
 
+// Reports the FAT geometry of whatever card is in the board, because one figure in it
+// -- the cluster size -- decides whether a log rotation fits inside WDT_TIMEOUT_MS, and
+// nothing in the firmware or the tests had ever read it. Same shape as
+// test_report_r64cnt_range above: report the numbers, assert only what the design needs
+// to be true of them.
+//
+// Why rotation cares. SdVolume::freeChain() walks a deleted file's cluster chain one
+// cluster at a time, fatGet() then fatPut() each, and fatPut() dirties the mirror FAT as
+// well. So SD.remove() costs roughly one sector read and fatCount() sector writes per
+// FAT sector the chain spans, and that is proportional to the FILE SIZE. At the shipped
+// 1 GiB it can be thousands of operations; at a megabyte it is a handful. The figures
+// below are what turns that from an argument into a number.
+//
+// This builds its OWN Sd2Card and SdVolume, because SDClass keeps both private and
+// befriends only File. Two consequences, both deliberate and both reasons this belongs
+// in the test suite and not in the flight image:
+//
+//   * SdVolume's cache members are static, so a second volume SHARES the one 512 B cache
+//     block with the one inside SD. Initialising it evicts whatever was cached. That is
+//     safe -- it goes through cacheRawBlock(), which flushes first -- but it is rude.
+//   * Sd2Card::init() resets the card over SPI. sdData.end() below closes the log file
+//     first so no handle is open across that reset; setUp() reopens on the next case.
+void test_report_sd_volume_geometry(void) {
+    sdData.end();
+
+    Sd2Card card;
+    TEST_ASSERT_TRUE_MESSAGE(card.init(SPI_HALF_SPEED, 9), "Sd2Card::init failed on CS 9");
+    SdVolume vol;
+    TEST_ASSERT_TRUE_MESSAGE(vol.init(&card), "SdVolume::init failed: not a FAT volume?");
+
+    uint32_t clusterBytes = (uint32_t)vol.blocksPerCluster() * 512UL;
+    uint8_t fatType = vol.fatType();
+    uint32_t entriesPerFatSector = 512UL / (fatType == 32 ? 4UL : 2UL);
+
+    char message[128];
+    snprintf(message, sizeof(message),
+             "FAT%u: cluster=%lu B (%u blocks) clusters=%lu fatBlocks=%lu fats=%u",
+             (unsigned)fatType, (unsigned long)clusterBytes,
+             (unsigned)vol.blocksPerCluster(), (unsigned long)vol.clusterCount(),
+             (unsigned long)vol.blocksPerFat(), (unsigned)vol.fatCount());
+    TEST_MESSAGE(message);
+
+    snprintf(message, sizeof(message), "card=%lu blocks (%lu MiB)",
+             (unsigned long)card.cardSize(),
+             (unsigned long)(card.cardSize() / 2048UL));
+    TEST_MESSAGE(message);
+
+    // The number the ring-size decision actually needs: what deleting one file costs at
+    // the shipped size and at the proposed one. Reported for both so the comparison does
+    // not have to be done by hand later.
+    const uint32_t sizes[] = {1024UL * 1024UL * 1024UL, 1024UL * 1024UL};
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t clusters = (sizes[i] + clusterBytes - 1UL) / clusterBytes;
+        uint32_t fatSectors = (clusters + entriesPerFatSector - 1UL) / entriesPerFatSector;
+        uint32_t ops = fatSectors * (1UL + (uint32_t)vol.fatCount());
+        snprintf(message, sizeof(message),
+                 "deleting %lu KiB: %lu clusters, %lu FAT sectors, ~%lu sector ops",
+                 (unsigned long)(sizes[i] / 1024UL), (unsigned long)clusters,
+                 (unsigned long)fatSectors, (unsigned long)ops);
+        TEST_MESSAGE(message);
+    }
+
+    // A FAT volume this library mounted cannot have a cluster smaller than one block, and
+    // blocksPerCluster is a power of two by the format's own definition. Asserting that
+    // much guards against reading a plausible-looking number out of an uninitialised
+    // volume, which is the failure this case would otherwise hide.
+    TEST_ASSERT_TRUE_MESSAGE(fatType == 16 || fatType == 32, "unexpected FAT type");
+    TEST_ASSERT_TRUE_MESSAGE(clusterBytes >= 512UL, "cluster smaller than a block");
+    TEST_ASSERT_EQUAL_MESSAGE(0, vol.blocksPerCluster() & (vol.blocksPerCluster() - 1),
+                              "blocksPerCluster is not a power of two");
+    TEST_ASSERT_TRUE_MESSAGE(vol.clusterCount() > 0, "volume reports no clusters");
+    TEST_ASSERT_TRUE_MESSAGE(card.cardSize() > 0, "card reports zero size");
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_voltaje_should_return_battery_voltage);
@@ -499,6 +573,7 @@ int runUnityTests(void) {
     RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
     RUN_TEST(test_sddata_on_open_fires_on_begin);
     RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
+    RUN_TEST(test_report_sd_volume_geometry);
     return UNITY_END();
 }
 
