@@ -1313,9 +1313,10 @@ dropped ArduinoJson as a dependency entirely, which also took cppcheck's three
 A third left on 2026-09-21, this one actually done: `TEST_FILE_SIZE_MB` is now
 `TEST_FILE_SIZE_BYTES`, renamed by
 `openspec/changes/size-the-log-ring-and-batch-its-flushes/` because that change had to
-alter the value anyway — and it had to raise it from 1024 to 8192, since at a 1 KiB file
-size a rotation always beat the 4 KiB flush interval and the suite could not exercise
-batching at all.
+alter the value anyway — and it had to raise it from 1024 to **6144**, a value constrained
+from both sides: larger than the 4 KiB flush interval, or a rotation always beats it and
+`close()` syncs so the suite cannot exercise batching at all; and not a multiple of it, or
+the rotation lands straight after a sync with no unsynced tail to lose.
 
 ### The tests do not link FreeRTOS, so nothing covers the tasks
 

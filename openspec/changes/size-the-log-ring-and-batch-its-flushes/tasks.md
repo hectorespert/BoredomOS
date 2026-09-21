@@ -146,8 +146,12 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
   19 cases passed. With the batching restored: 20/20.
 ## 4. Run what can be run
 
-- [x] 4.1 `pio run` and `pio run -e libs` succeed and headroom is unchanged at 3184 B.
-  **Both SUCCESS. Headroom 3180 B, which is the 4 bytes accounted for in 2.3.**
+- [x] 4.1 `pio run` and `pio run -e libs` succeed and headroom is **3180 B** — the task was
+  written expecting 3184 unchanged, and the measured figure is four bytes lower.
+  **Both SUCCESS. The four bytes are `_sinceFlush` and nothing else; see 2.3.** The
+  acceptance text is corrected here rather than left as written, because a checked-off task
+  stating a figure the build does not produce is the same defect this project has been
+  clearing out of its documentation all week.
 - [x] 4.2 `pio test -e libs --without-uploading --without-testing` links the Unity binary,
   confirmed with `nm` on `.pio/build/libs/firmware.elf`. This catches the link-failure class
   `pio run -e libs` misses and costs no flash.
