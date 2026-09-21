@@ -556,6 +556,19 @@ void test_report_sd_volume_geometry(void) {
     uint32_t clusterBytes = (uint32_t)blocksPerCluster * 512UL;
     uint32_t entriesPerFatSector = 512UL / (fatType == 32 ? 4UL : 2UL);
 
+    // Asserted HERE, before the arithmetic below divides by clusterBytes, and not at the
+    // end with the rest. A mounted FAT volume cannot have a cluster smaller than one
+    // block and blocksPerCluster is a power of two by the format's own definition, so
+    // these hold or the volume was not really read -- which is the failure a report-only
+    // case would otherwise hide. Putting them after the division would mean the guard
+    // runs only if the thing it guards against did not happen.
+    TEST_ASSERT_TRUE_MESSAGE(fatType == 16 || fatType == 32, "unexpected FAT type");
+    TEST_ASSERT_TRUE_MESSAGE(clusterBytes >= 512UL, "cluster smaller than a block");
+    TEST_ASSERT_EQUAL_MESSAGE(0, blocksPerCluster & (blocksPerCluster - 1),
+                              "blocksPerCluster is not a power of two");
+    TEST_ASSERT_TRUE_MESSAGE(clusterCount > 0, "volume reports no clusters");
+    TEST_ASSERT_TRUE_MESSAGE(cardBlocks > 0, "card reports zero size");
+
     char message[128];
     snprintf(message, sizeof(message),
              "FAT%u: cluster=%lu B (%u blocks) clusters=%lu fatBlocks=%lu fats=%u",
@@ -590,16 +603,6 @@ void test_report_sd_volume_geometry(void) {
         TEST_MESSAGE(message);
     }
 
-    // A FAT volume this library mounted cannot have a cluster smaller than one block, and
-    // blocksPerCluster is a power of two by the format's own definition. Asserting that
-    // much guards against reading a plausible-looking number out of an uninitialised
-    // volume, which is the failure this case would otherwise hide.
-    TEST_ASSERT_TRUE_MESSAGE(fatType == 16 || fatType == 32, "unexpected FAT type");
-    TEST_ASSERT_TRUE_MESSAGE(clusterBytes >= 512UL, "cluster smaller than a block");
-    TEST_ASSERT_EQUAL_MESSAGE(0, blocksPerCluster & (blocksPerCluster - 1),
-                              "blocksPerCluster is not a power of two");
-    TEST_ASSERT_TRUE_MESSAGE(clusterCount > 0, "volume reports no clusters");
-    TEST_ASSERT_TRUE_MESSAGE(cardBlocks > 0, "card reports zero size");
 }
 
 int runUnityTests(void) {
