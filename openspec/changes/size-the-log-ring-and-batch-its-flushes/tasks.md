@@ -80,10 +80,12 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
   default. The constant is `1024UL` and means bytes, which is listed in *Minor leftovers
   cleanup*; decide whether this change fixes the name or leaves it, and say which in the
   commit. Verify the rotation case still rotates.
-  **Renamed to `TEST_FILE_SIZE_BYTES` and raised to 8192, and the raise was forced rather
-  than chosen.** At the old 1024 bytes a rotation always arrived before the 4 KiB flush
-  interval and `close()` synced, so **the suite could not exercise the batching path at
-  all**. A file twice the interval lets both be seen. The two rotation loops now derive
+  **Renamed to `TEST_FILE_SIZE_BYTES` and raised to 6144, and the value is constrained from
+  two sides rather than chosen.** It must be LARGER than the 4 KiB flush interval or a
+  rotation always arrives first and `close()` syncs, so **the suite cannot exercise the
+  batching path at all** — which is what the old 1024 did. And it must NOT be a MULTIPLE of
+  the interval or the rotation lands straight after a sync with no pending tail, which is
+  what 8192 did and is recorded under 3.3. 1.5x satisfies both. The two rotation loops now derive
   their count from the constant (`TEST_FILE_SIZE_BYTES / sizeof(payload)` per outer
   iteration), so they still cross every file of the ring. The rename closes the
   `TEST_FILE_SIZE_MB` item in *Minor leftovers cleanup*; 6.2 removes it there.

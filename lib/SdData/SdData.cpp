@@ -106,7 +106,13 @@ void SdData::writeRaw(const uint8_t *data, size_t length)
 
 void SdData::write(const uint8_t *data, size_t length)
 {
-    if (!_dataFile) {
+    // The argument guard is repeated here even though appendBytes() has it, and the
+    // duplication is the point: appendBytes() returning early is silent, while the
+    // accounting below would still advance _sinceFlush by bytes that were never
+    // written -- moving the sync point, and with it the bound this class promises on
+    // what power loss costs. write() used to be null-safe by delegating to writeRaw();
+    // splitting the append out took that away, and this puts it back.
+    if (!_dataFile || data == nullptr || length == 0) {
         return;
     }
 
