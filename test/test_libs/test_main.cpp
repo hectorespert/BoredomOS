@@ -480,6 +480,131 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
                               "writes still went to the file begin() left behind");
 }
 
+// Reports the FAT geometry of whatever card is in the board, because one figure in it
+// -- the cluster size -- decides whether a log rotation fits inside WDT_TIMEOUT_MS, and
+// nothing in the firmware or the tests had ever read it. Same shape as
+// test_report_r64cnt_range above: report the numbers, assert only what the design needs
+// to be true of them.
+//
+// Why rotation cares. SdVolume::freeChain() walks a deleted file's cluster chain one
+// cluster at a time, fatGet() then fatPut() each, and fatPut() dirties the mirror FAT as
+// well. So SD.remove() costs roughly one sector read and fatCount() sector writes per
+// FAT sector the chain spans, and that is proportional to the FILE SIZE. At the shipped
+// 1 GiB it can be thousands of operations; at a megabyte it is a handful. The figures
+// below are what turns that from an argument into a number.
+//
+// This builds its OWN Sd2Card and SdVolume, because SDClass keeps both private and
+// befriends only File. That is not merely rude -- doing it naively corrupts the rest of
+// the suite -- so the shape below is deliberate in three ways:
+//
+//   * SdVolume::sdCard_ is STATIC (SdFat.h), and SdVolume::init() assigns it. So
+//     vol.init(&probeCard) repoints the card pointer that the SdVolume INSIDE SD uses as
+//     well, and it keeps pointing there until something reassigns it. The probe card
+//     therefore has STATIC STORAGE: a local would be destroyed on return and every later
+//     SD access would dereference a dead stack object -- and write to the card through it.
+//     Static storage makes that impossible to get wrong, including on the paths below
+//     where the restore does not happen.
+//   * SD.begin() puts the pointer back where it belongs -- SDClass::begin() re-runs
+//     card.init(), volume.init() and openRoot() on its own members -- but it can FAIL, and
+//     the assertion reporting that failure longjmps straight into tearDown(). That is why
+//     the pointer must be left somewhere valid rather than merely restored: on the failure
+//     path cleanSdFiles() runs through probeCard, which is alive and initialised on the
+//     same CS, instead of through a corpse.
+//   * Every assertion is still deferred until after the restore attempt, so the ordinary
+//     failure of a probe cannot skip it.
+//   * SdVolume's cache members are static too, so this evicts whatever the log had
+//     cached. Harmless -- it goes through cacheRawBlock(), which flushes first -- and
+//     sdData.end() closes the log file so no handle is open across Sd2Card::init()'s
+//     card reset. setUp() reopens on the next case.
+void test_report_sd_volume_geometry(void) {
+    sdData.end();
+
+    // Static, not local: see the third point above. Costs sizeof(Sd2Card) in the test
+    // binary's .bss and nothing at all in the flight image.
+    static Sd2Card probeCard;
+
+    bool cardOk = probeCard.init(SPI_HALF_SPEED, 9);
+    bool volumeOk = false;
+    uint8_t fatType = 0;
+    uint8_t blocksPerCluster = 0;
+    uint8_t fatCount = 0;
+    uint32_t clusterCount = 0;
+    uint32_t blocksPerFat = 0;
+    uint32_t cardBlocks = 0;
+
+    if (cardOk) {
+        SdVolume vol;
+        volumeOk = vol.init(&probeCard);
+        if (volumeOk) {
+            fatType = vol.fatType();
+            blocksPerCluster = vol.blocksPerCluster();
+            fatCount = vol.fatCount();
+            clusterCount = vol.clusterCount();
+            blocksPerFat = vol.blocksPerFat();
+            cardBlocks = probeCard.cardSize();
+        }
+    }
+
+    // vol is gone, which is safe -- nothing stores a pointer to an SdVolume. probeCard is
+    // not gone, which is the point.
+    bool restored = SD.begin(9);
+
+    TEST_ASSERT_TRUE_MESSAGE(restored, "could not restore SD's own card/volume association");
+    TEST_ASSERT_TRUE_MESSAGE(cardOk, "Sd2Card::init failed on CS 9");
+    TEST_ASSERT_TRUE_MESSAGE(volumeOk, "SdVolume::init failed: not a FAT volume?");
+
+    uint32_t clusterBytes = (uint32_t)blocksPerCluster * 512UL;
+    uint32_t entriesPerFatSector = 512UL / (fatType == 32 ? 4UL : 2UL);
+
+    // Asserted HERE, before the arithmetic below divides by clusterBytes, and not at the
+    // end with the rest. A mounted FAT volume cannot have a cluster smaller than one
+    // block and blocksPerCluster is a power of two by the format's own definition, so
+    // these hold or the volume was not really read -- which is the failure a report-only
+    // case would otherwise hide. Putting them after the division would mean the guard
+    // runs only if the thing it guards against did not happen.
+    TEST_ASSERT_TRUE_MESSAGE(fatType == 16 || fatType == 32, "unexpected FAT type");
+    TEST_ASSERT_TRUE_MESSAGE(clusterBytes >= 512UL, "cluster smaller than a block");
+    TEST_ASSERT_EQUAL_MESSAGE(0, blocksPerCluster & (blocksPerCluster - 1),
+                              "blocksPerCluster is not a power of two");
+    TEST_ASSERT_TRUE_MESSAGE(clusterCount > 0, "volume reports no clusters");
+    TEST_ASSERT_TRUE_MESSAGE(cardBlocks > 0, "card reports zero size");
+
+    char message[128];
+    snprintf(message, sizeof(message),
+             "FAT%u: cluster=%lu B (%u blocks) clusters=%lu fatBlocks=%lu fats=%u",
+             (unsigned)fatType, (unsigned long)clusterBytes,
+             (unsigned)blocksPerCluster, (unsigned long)clusterCount,
+             (unsigned long)blocksPerFat, (unsigned)fatCount);
+    TEST_MESSAGE(message);
+
+    snprintf(message, sizeof(message), "card=%lu blocks (%lu MiB)",
+             (unsigned long)cardBlocks, (unsigned long)(cardBlocks / 2048UL));
+    TEST_MESSAGE(message);
+
+    // What deleting one file costs at the shipped size and at the proposed one, reported
+    // for both so the comparison does not have to be done by hand later.
+    //
+    // These are CONTIGUOUS-CHAIN estimates and the worst case is reported beside them.
+    // freeChain() follows the chain wherever it leads, so a fragmented file can visit a
+    // separate FAT sector per cluster; the floor assumes consecutive entries sharing a
+    // sector, the ceiling assumes none do. A log file written straight through in one
+    // pass is near the floor, but nothing enforces that.
+    const uint32_t sizes[] = {1024UL * 1024UL * 1024UL, 1024UL * 1024UL};
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t clusters = (sizes[i] + clusterBytes - 1UL) / clusterBytes;
+        uint32_t fatSectors = (clusters + entriesPerFatSector - 1UL) / entriesPerFatSector;
+        uint32_t best = fatSectors * (1UL + (uint32_t)fatCount);
+        uint32_t worst = clusters * (1UL + (uint32_t)fatCount);
+        snprintf(message, sizeof(message),
+                 "deleting %lu KiB: %lu clusters, %lu FAT sectors, ~%lu ops contiguous, "
+                 "<=%lu fragmented",
+                 (unsigned long)(sizes[i] / 1024UL), (unsigned long)clusters,
+                 (unsigned long)fatSectors, (unsigned long)best, (unsigned long)worst);
+        TEST_MESSAGE(message);
+    }
+
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_voltaje_should_return_battery_voltage);
@@ -499,6 +624,7 @@ int runUnityTests(void) {
     RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
     RUN_TEST(test_sddata_on_open_fires_on_begin);
     RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
+    RUN_TEST(test_report_sd_volume_geometry);
     return UNITY_END();
 }
 
