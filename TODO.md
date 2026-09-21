@@ -1302,11 +1302,6 @@ Small, unrelated things worth getting out of the way in one go:
   the switch. It compiles because it has no initialiser. Note that cppcheck does
   **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
   actually reports, and this is not in it.
-- The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
-  the name misleads about what is really being tested.
-  `openspec/changes/size-the-log-ring-and-batch-its-flushes/` has a task
-  deciding whether to fix the name, since it is changing the ring's defaults anyway — check
-  there before doing it here.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
 Two items left this list on 2026-09-20 without anyone doing them:
@@ -1314,6 +1309,13 @@ Two items left this list on 2026-09-20 without anyone doing them:
 `StaticJsonDocument`. `replace-messagepack-log-with-dataflash` rewrote the logger and
 dropped ArduinoJson as a dependency entirely, which also took cppcheck's three
 `unusedLabel` findings in `src/logger.cpp` with it.
+
+A third left on 2026-09-21, this one actually done: `TEST_FILE_SIZE_MB` is now
+`TEST_FILE_SIZE_BYTES`, renamed by
+`openspec/changes/size-the-log-ring-and-batch-its-flushes/` because that change had to
+alter the value anyway — and it had to raise it from 1024 to 8192, since at a 1 KiB file
+size a rotation always beat the 4 KiB flush interval and the suite could not exercise
+batching at all.
 
 ### The tests do not link FreeRTOS, so nothing covers the tasks
 

@@ -7,11 +7,20 @@
 #include <SdData.h>
 
 #define TEST_FILE_COUNT 4
-#define TEST_FILE_SIZE_MB 1024UL
+
+// Bytes, and now named so. It was TEST_FILE_SIZE_MB with the same 1024 value, which is
+// listed in TODO.md's "Minor leftovers cleanup" -- renamed here rather than there because
+// this change had to touch the value anyway.
+//
+// 8 KiB, not 1 KiB, and the reason is coverage rather than taste: SdData syncs every
+// FLUSH_INTERVAL_BYTES (4 KiB), so at a 1 KiB file size a rotation always arrived first
+// and close() synced, and the batching path could not be exercised by this suite at all.
+// A file twice the interval lets both be seen.
+#define TEST_FILE_SIZE_BYTES 8192UL
 
 Battery battery;
 SystemTime systemTime;
-SdData sdData(TEST_FILE_COUNT, TEST_FILE_SIZE_MB);
+SdData sdData(TEST_FILE_COUNT, TEST_FILE_SIZE_BYTES);
 
 void cleanSdFiles() {
     for (int i = 0; i < TEST_FILE_COUNT; ++i) {
@@ -253,8 +262,10 @@ void test_sddata_write_and_rotate(void) {
     for (size_t i = 0; i < sizeof(payload); ++i) {
         payload[i] = (uint8_t)i;
     }
+    // One outer iteration is one file's worth at the new size, so this still crosses
+    // every file of the ring and then some.
     for (int i = 0; i < TEST_FILE_COUNT + 2; ++i) {
-        for (int j = 0; j < 100; ++j) {
+        for (int j = 0; j < (int)(TEST_FILE_SIZE_BYTES / sizeof(payload)); ++j) {
           sdData.write(payload, sizeof(payload));
         }
     }
@@ -352,7 +363,7 @@ void test_sddata_on_open_fires_on_rotation_without_re_entering(void) {
     }
     // Enough to cross every file of the ring several times.
     for (int i = 0; i < TEST_FILE_COUNT + 2; ++i) {
-        for (int j = 0; j < 100; ++j) {
+        for (int j = 0; j < (int)(TEST_FILE_SIZE_BYTES / sizeof(payload)); ++j) {
             sdData.write(payload, sizeof(payload));
         }
     }
@@ -478,6 +489,75 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
                              "writes did not follow begin() to the new file");
     TEST_ASSERT_EQUAL_MESSAGE(zeroAfterBegin, fileSizeOf("data0.BIN"),
                               "writes still went to the file begin() left behind");
+}
+
+// write() accumulates and syncs once per FLUSH_INTERVAL_BYTES instead of syncing every
+// record. What a reader sees is the DIRECTORY ENTRY, which only a sync updates, so the
+// observable consequence is that a file reports less than what has been handed to it
+// until the interval is reached. That is also exactly the bound the spec declares on what
+// power loss costs, which is why it is worth a case of its own.
+//
+// Note that reading the size is not free of side effects: SD.open() for reading walks the
+// directory, which evicts the dirty data block and therefore writes it. The DATA reaches
+// the card; the recorded size does not. That is the distinction being asserted.
+void test_sddata_write_batches_its_flushes(void) {
+    sdData.setOnOpen(nullptr);
+
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
+
+    // Under the interval.
+    const uint32_t under = 2048;
+    for (uint32_t n = 0; n < under; n += sizeof(payload)) {
+        sdData.write(payload, sizeof(payload));
+    }
+    uint32_t visibleUnder = fileSizeOf("data0.BIN");
+
+    // Past it.
+    const uint32_t past = 5120;
+    for (uint32_t n = under; n < past; n += sizeof(payload)) {
+        sdData.write(payload, sizeof(payload));
+    }
+    uint32_t visiblePast = fileSizeOf("data0.BIN");
+
+    // Against the old per-record flush the first assertion fails: every record synced, so
+    // the recorded size kept pace with what was written and visibleUnder was 2048.
+    TEST_ASSERT_TRUE_MESSAGE(visibleUnder < under,
+                             "write() synced before reaching its interval");
+    TEST_ASSERT_TRUE_MESSAGE(visiblePast >= 4096,
+                             "write() did not sync on reaching its interval");
+}
+
+// A rotation must not lose what has been accumulated but not yet synced. close() syncs,
+// so this passes by construction today -- but "by construction" is the claim being
+// checked, and it is the one thing about batching that could silently drop data.
+//
+// This is NOT a test that the byte counter is reset at a rotation. That was the original
+// intent and it turned out to be untestable, because carrying the counter across a
+// rotation would only make the new file's first interval SHORTER -- a smaller bound, not a
+// violated one, and nothing observable. The reset is still done, and is still right, but
+// the thing worth asserting here is that the tail survives.
+void test_sddata_rotation_does_not_lose_unsynced_bytes(void) {
+    sdData.setOnOpen(nullptr);
+
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
+
+    // Exactly one file's worth, so data0.BIN fills and rotation closes it.
+    for (uint32_t n = 0; n < TEST_FILE_SIZE_BYTES; n += sizeof(payload)) {
+        sdData.write(payload, sizeof(payload));
+    }
+
+    // The closed file must report everything written to it, not merely everything that
+    // had been synced when the last interval elapsed.
+    uint32_t closed = fileSizeOf("data0.BIN");
+    TEST_ASSERT_EQUAL_MESSAGE(TEST_FILE_SIZE_BYTES, closed,
+                              "rotation lost the bytes written since the last sync");
+    TEST_ASSERT_TRUE_MESSAGE(SD.exists("data1.BIN"), "rotation did not open the next file");
 }
 
 // Reports the FAT geometry of whatever card is in the board, because one figure in it
@@ -624,6 +704,8 @@ int runUnityTests(void) {
     RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
     RUN_TEST(test_sddata_on_open_fires_on_begin);
     RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
+    RUN_TEST(test_sddata_write_batches_its_flushes);
+    RUN_TEST(test_sddata_rotation_does_not_lose_unsynced_bytes);
     RUN_TEST(test_report_sd_volume_geometry);
     return UNITY_END();
 }

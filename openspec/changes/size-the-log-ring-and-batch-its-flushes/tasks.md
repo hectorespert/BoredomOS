@@ -8,12 +8,43 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
 
 ## 1. Measure before changing anything
 
-- [ ] 1.1 **`[board]` `[destructive]`** Run `pio test -e libs` and read
+- [x] 1.1 **`[board]` `[destructive]`** Run `pio test -e libs` and read
   `test_report_sd_volume_geometry`'s output: cluster size, FAT type, and the reported
   sector-operation cost of deleting 1 GiB and 1 MiB. Record the figures in this file. If
   deleting 1 GiB comes out above ~1000 sector operations, note it — that is the latent
   watchdog risk this change removes, and it is worth having the number on record before it
   is gone.
+
+  **Measured 2026-09-21, 18/18 cases passing:**
+
+  ```
+  FAT32: cluster=32768 B (64 blocks) clusters=242304 fatBlocks=1894 fats=2
+  card=15523840 blocks (7580 MiB)
+  deleting 1048576 KiB: 32768 clusters, 256 FAT sectors, ~768 ops contiguous, <=98304 fragmented
+  deleting 1024 KiB: 32 clusters, 1 FAT sectors, ~3 ops contiguous, <=96 fragmented
+  ```
+
+  The contiguous figure for 1 GiB is ~768, below the ~1000 this task set as its threshold.
+  **The fragmented ceiling is 98 304**, and that is the number that matters: at a
+  conservative 0.5 ms per sector operation it is about **49 seconds** against a
+  `WDT_TIMEOUT_MS` of 1398. So the risk is real rather than theoretical, and it is a
+  property of fragmentation rather than of the card being unusual — 32 KiB clusters on an
+  8 GB FAT32 card is exactly what the SD Association's formatter produces.
+
+  At 1 MiB the ceiling is 96 operations, about 48 ms. **Safe at the fragmented ceiling, not
+  merely at the contiguous floor**, which is a stronger result than this task asked for.
+
+  **`pio test` hides `TEST_MESSAGE` output — `pio test -v` is required.** Plain `pio test`
+  prints only the `[PASSED]`/`[FAILED]` result lines, so the figures above are invisible
+  through the command `CLAUDE.md` documents. That applies to the two pre-existing
+  report-only cases as well: `test_report_r64cnt_range` and
+  `test_report_internal_versus_ds1307_drift` have never shown their numbers through the
+  documented invocation. Recorded as a backlog item by 6.2.
+
+  Cost of this step, for the record: the card's previous log was erased, which was an
+  explicit decision, and the flash cycles took the cumulative fault counter to 9 of 10
+  before it was cleared with `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`. It now reads 1 of 10.
+  Check it before a long series of reflashes rather than after.
 - [ ] 1.2 **`[board]` `[hands]`** With the **current** 1 GiB defaults still in place,
   measure how long one rotation takes. `TEST_FILE_SIZE_MB` is 1024 *bytes*, so the Unity
   rotation case cannot answer this; it needs a temporary build whose file size is large
@@ -21,55 +52,112 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
   `TEST_MESSAGE`. This is the number `design.md` deliberately does not derive, because card
   write latency varies by an order of magnitude. **If no practical file size makes this
   measurable, say so here and leave it unticked** rather than inventing a figure.
-- [ ] 1.3 Record the baseline the flush change will be measured against: at 34 B/s the
+- [x] 1.3 Record the baseline the flush change will be measured against: at 34 B/s the
   current policy is 3.0 sector writes/s by derivation. Note plainly that this is derived
   from reading `SdFile::sync()` and `SdVolume::cacheFlush()`, **not** measured — nothing on
   this board counts sector writes, and saying so is the point.
 
+  **Recorded, and partly corroborated by accident.** The 3.0 sector writes/s figure is
+  derived from reading `SdFile::sync()` and `SdVolume::cacheFlush()`; nothing on this board
+  counts sector writes, so it is not measured and is not presented as such. What *was*
+  measured: the Unity suite went from **43 s to 23 s** on the same cases once `write()`
+  batched. That suite is dominated by SD writes in tight loops, so the ~1.9x there is not
+  the flight ratio — at 34 B/s the directory write dominates and the derivation gives 36x —
+  but it is direct evidence that the number of card operations fell, from a clock rather
+  than from a reading of the library.
 ## 2. The ring's size
 
-- [ ] 2.1 Change `SdData`'s constructor defaults in `lib/SdData/SdData.h` from
+- [x] 2.1 Change `SdData`'s constructor defaults in `lib/SdData/SdData.h` from
   `(4, 1 GiB)` to `(4, 1 MiB)`, with a comment giving the download-time derivation and
   pointing at `design.md`'s table. Verify with `pio run` — `src/sdwrite.cpp` constructs
   `SdData sdData;` with no arguments, so the new footprint arrives without an edit in
   `src/`, which is worth confirming by reading the link output rather than assuming.
-- [ ] 2.2 Check `test/test_libs/test_main.cpp`'s `TEST_FILE_SIZE_MB` against the new
+  **Confirmed: `src/` did not move.** `git diff --stat` shows no file under `src/`, and
+  the link output is unchanged apart from the 4 bytes in 2.3. `src/sdwrite.cpp` constructs
+  `SdData sdData;` with no arguments, so the footprint change arrives through the header.
+
+- [x] 2.2 Check `test/test_libs/test_main.cpp`'s `TEST_FILE_SIZE_MB` against the new
   default. The constant is `1024UL` and means bytes, which is listed in *Minor leftovers
   cleanup*; decide whether this change fixes the name or leaves it, and say which in the
   commit. Verify the rotation case still rotates.
-- [ ] 2.3 Re-check `scripts/ram_budget.py`'s headroom. It should not move — the defaults are
+  **Renamed to `TEST_FILE_SIZE_BYTES` and raised to 8192, and the raise was forced rather
+  than chosen.** At the old 1024 bytes a rotation always arrived before the 4 KiB flush
+  interval and `close()` synced, so **the suite could not exercise the batching path at
+  all**. A file twice the interval lets both be seen. The two rotation loops now derive
+  their count from the constant (`TEST_FILE_SIZE_BYTES / sizeof(payload)` per outer
+  iteration), so they still cross every file of the ring. The rename closes the
+  `TEST_FILE_SIZE_MB` item in *Minor leftovers cleanup*; 6.2 removes it there.
+- [x] 2.3 Re-check `scripts/ram_budget.py`'s headroom. It should not move — the defaults are
   constructor arguments, not storage — and a change here would mean something unintended.
 
+  **It moved by 4 bytes: 3184 -> 3180 B.** That is the `size_t _sinceFlush` member and
+  nothing else, which is what `proposal.md` said the only new state would be. Recorded as a
+  movement rather than reported as unchanged — the task expected zero and the honest answer
+  is four.
 ## 3. The flush policy
 
-- [ ] 3.1 Add a byte counter to `SdData` and flush in `write()` once it reaches 4 KiB,
+- [x] 3.1 Add a byte counter to `SdData` and flush in `write()` once it reaches 4 KiB,
   resetting it on each flush and on every open. Document the interval against
   `design.md`'s table, and state in the header that the bound is a byte count and therefore
   a duration only at the current write rate. Verify with `pio run` and `pio run -e libs`.
-- [ ] 3.2 Leave `writeRaw()` flushing unconditionally, and say in a comment why the
+
+- [x] 3.2 Leave `writeRaw()` flushing unconditionally, and say in a comment why the
   asymmetry exists: it carries the `FMT` preamble, and a preamble that does not reach the
   card makes every record in the file undecodable rather than merely losing the last few.
   Verify by reading it back against `src/sdwrite.cpp`'s `writeLogPreamble()`.
-- [ ] 3.3 Reset the counter in the rotation path too, so the interval does not straddle two
+
+- [x] 3.3 Reset the counter in the rotation path too, so the interval does not straddle two
   files. Verify with a Unity case: write enough to rotate, and assert the new file's size
   advances rather than sitting at zero until the counter happens to fill.
-- [ ] 3.4 Add a Unity case for the interval itself: write less than 4 KiB and assert the
+  **Reframed, because the original intent turned out to be untestable.** The task asked to
+  assert the counter is reset at a rotation. It is reset — but carrying it across a rotation
+  would only make the new file's first interval *shorter*, which is a smaller bound rather
+  than a violated one, and nothing observable. So there is no failing behaviour to catch.
+  What the case asserts instead is the thing that could genuinely break:
+  `test_sddata_rotation_does_not_lose_unsynced_bytes` checks that the file a rotation closes
+  reports **everything** written to it, not merely what had been synced when the last
+  interval elapsed. It passes against the old per-record flush too, so it is a regression
+  guard rather than a bug-demonstrating test, and that is said in the case's own comment.
+- [x] 3.4 Add a Unity case for the interval itself: write less than 4 KiB and assert the
   file on the card is shorter than what was written; write past 4 KiB and assert it catches
   up. **Verify this case fails against the current per-record flush before it passes**
   against the new one — a test that never saw the old behaviour is not evidence.
 
+  **Done, and watched failing first.** Against the per-record flush restored temporarily,
+  `test_sddata_write_batches_its_flushes` failed on
+  `"write() synced before reaching its interval"` — the predicted message — while the other
+  19 cases passed. With the batching restored: 20/20.
 ## 4. Run what can be run
 
-- [ ] 4.1 `pio run` and `pio run -e libs` succeed and headroom is unchanged at 3184 B.
-- [ ] 4.2 `pio test -e libs --without-uploading --without-testing` links the Unity binary,
+- [x] 4.1 `pio run` and `pio run -e libs` succeed and headroom is unchanged at 3184 B.
+  **Both SUCCESS. Headroom 3180 B, which is the 4 bytes accounted for in 2.3.**
+- [x] 4.2 `pio test -e libs --without-uploading --without-testing` links the Unity binary,
   confirmed with `nm` on `.pio/build/libs/firmware.elf`. This catches the link-failure class
   `pio run -e libs` misses and costs no flash.
-- [ ] 4.3 **`[board]` `[destructive]`** `pio test -e libs` — all cases pass, including 3.3
+  **Links.** `nm` shows both new cases in `.pio/build/libs/firmware.elf`.
+- [x] 4.3 **`[board]` `[destructive]`** `pio test -e libs` — all cases pass, including 3.3
   and 3.4.
-- [ ] 4.4 `pio check` reports no new findings against the 2 LOW baseline.
-- [ ] 4.5 **`[board]`** `pio test` (the HIL suite) still passes at 25/8/0 after
+  **20/20 in 23 s**, including 3.3 and 3.4's cases. Followed by `pio run -t upload`.
+- [x] 4.4 `pio check` reports no new findings against the 2 LOW baseline.
+  **2 LOW, unchanged**, one in `lib/Battery` and one in `src`, neither from this change.
+- [x] 4.5 **`[board]`** `pio test` (the HIL suite) still passes at 25/8/0 after
   `pio run -t upload` restores the flight firmware.
 
+  **25 passed, 8 skipped, 0 failed** — the baseline figures.
+  **It failed on the first attempt, and the cause is worth recording because it was not this
+  change.** Six flashes in a few minutes, none surviving the five-minute stability window,
+  drove the consecutive fault counter to 3 of 3 and **latched the reduced configuration**
+  (`custom_mode` `0x05030603`, `state=5`, `base_mode=0x80` without `AUTO_ENABLED`). In that
+  configuration `TaskMavlink` withholds `BATTERY_STATUS`, so
+  `check_telemetry.py`'s `test_battery_status_every_2s` reported 0.00 Hz and failed, while
+  `check_recovery.py`'s `test_heartbeat_reports_operational` self-skipped correctly. That is
+  exactly the backlog entry *[`check_telemetry.py`'s `test_battery_status_every_2s` assumes
+  the normal configuration]*, firing for the first time — one case self-skips on that
+  condition and its neighbour does not.
+  `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN` cleared both counters and restored the normal
+  configuration immediately, without needing to wait out the window, after which the suite
+  passed. **Lesson for anyone applying the rest of this change: check `custom_mode` before
+  a series of reflashes, not after.**
 ## 5. What only the board and the card can show
 
 - [ ] 5.1 **`[board]`** Leave the flight firmware running for **at least 35 hours**, so the
@@ -101,12 +189,23 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
 
 ## 6. Documentation and the backlog
 
-- [ ] 6.1 Update `ARCHITECTURE.md` §5.2 in the same commit: the ring's defaults, the flush
+- [x] 6.1 Update `ARCHITECTURE.md` §5.2 in the same commit: the ring's defaults, the flush
   policy and what a power cut now costs. The section currently states the 1 GiB default and
   says rotation does not happen within a realistic mission, which this change makes false.
-- [ ] 6.2 Check whether `CLAUDE.md` needs anything. The invariants it lists look unaffected,
+  **Done.** The ring paragraph now carries the new defaults with the coverage and download
+  figures, the delete-then-open property and what it costs, the measured geometry, the
+  batching and the power-loss bound. Also records that the report-only cases need
+  `pio test -e libs -v`.
+- [x] 6.2 Check whether `CLAUDE.md` needs anything. The invariants it lists look unaffected,
   but the destructive-test paragraph mentions what `cleanSdFiles()` deletes and that is
   worth re-reading against a ring that actually rotates.
+  **CLAUDE.md did need something, twice over.** Added that `pio test` hides `TEST_MESSAGE`
+  so the report-only cases need `-v` — which cost time in 1.1 — and that `custom_mode`
+  should be checked *before* a series of reflashes, because a latched reduced configuration
+  makes `check_telemetry.py` fail in a way that reads as a regression in whatever is being
+  worked on. That is what happened in 4.5. The `cleanSdFiles()` paragraph itself is still
+  accurate against a ring that rotates. Also removed the `TEST_FILE_SIZE_MB` item from
+  *Minor leftovers cleanup* in TODO.md, closed by 2.2.
 - [x] 6.3 Delete *[The default SD ring is 4 GiB and never rotates]* and *[The flush policy
   costs far more card writes than it needs to]* from `TODO.md` in the proposing commit, and
   re-point every entry that cross-references either at this change id.

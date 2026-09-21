@@ -490,8 +490,34 @@ limit, then closes it, advances `i` modulo the file count, deletes whatever was
 there and opens the next one. The current index is persisted in `index.bin`, so a
 power cycle resumes where it left off instead of overwriting from zero. The
 footprint is fixed by the two constructor arguments — file count and size per file,
-defaulting to 4 files of 1 GiB, at which rotation does not happen within a realistic
-mission.
+defaulting to **4 files of 1 MiB**, so 4 MiB of card in total. At ~34 B/s a file
+covers about 8.6 h and the whole ring about 34 h, which puts rotation several times a
+day and each file under four minutes down a 57 600 baud link.
+
+Note what the delete-then-open gives the reader: a file always starts empty, so it
+never holds records from an earlier lap after the write cursor, and the ambiguity a
+circular log usually has does not arise. The price is that the delete walks a FAT
+chain proportional to the file size. On the card measured on 2026-09-21 — FAT32,
+32 KiB clusters, two FATs — deleting a megabyte is about 3 sector operations if the
+chain is contiguous and at most 96 if it is fully fragmented. At the 1 GiB default
+this replaced, those figures were 768 and **98 304**, the latter tens of seconds
+against a `WDT_TIMEOUT_MS` of 1398. That risk was unarmed only because filling a
+gigabyte at this rate takes about a year; the small files remove it rather than
+expose it. `test_report_sd_volume_geometry` in the Unity suite reports all of these
+for whatever card is fitted — **run it with `pio test -e libs -v`, because plain
+`pio test` prints only pass/fail and hides `TEST_MESSAGE` output entirely.**
+
+**Writes are batched, and that is what a power cut costs.** `write()` appends and
+syncs once per 4 KiB rather than once per record. A per-record sync cost two sector
+writes and two reads for a 27-byte record — `SdVolume`'s single shared 512 B cache
+block is evicted by the `sync()` that just filled it, so the next record read it back,
+and the directory entry was rewritten every time, about 129 600 times a day onto the
+same sector. Batching lets the block fill and be written once, for roughly 36× fewer
+sector writes. `writeRaw()` still syncs on every call, because it carries the `FMT`
+preamble and a preamble that does not reach the card costs the whole file rather than
+its tail. The consequence — power loss costs at most the log written since the last
+sync, about two minutes at the current rate — is a requirement in
+`openspec/specs/flight-log/spec.md`, not an implementation detail.
 
 Older cards may still hold `data<i>.mpk` files in the retired MessagePack format, in
 any of three incompatible record shapes. Nothing converts or reclaims them: the
