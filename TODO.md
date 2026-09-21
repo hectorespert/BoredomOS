@@ -576,8 +576,9 @@ Points to resolve before implementing:
   and after.
 - **Download time.** `LOG_DATA` moves 90 useful bytes in a 111-byte frame, ~4,6 KB/s
   at `LINK_BAUD`. Whether a whole file is viable is set by the ring default, which is
-  where the size criterion lives — see *[The default SD ring is 4 GiB and never
-  rotates]*. Serving by offset is supported by the protocol (`LOG_REQUEST_DATA` takes
+  where the size criterion lives — `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  derives it from download time and sets the default to 4 x 1 MiB, which is what makes a
+  whole file viable here at all. Serving by offset is supported by the protocol (`LOG_REQUEST_DATA` takes
   `ofs` and `count`) and is worth implementing regardless.
 - **Consistency of what is downloaded.** The active file is being written while it is
   read. Define whether it is served as is — the DataFlash `0xA3 0x95` header means a
@@ -635,8 +636,8 @@ Points to resolve before implementing:
   and after. FTP's session state is the larger of the two features, so if both land,
   measure with both present.
 - **Download time.** Each FTP packet moves ~239 useful bytes, so a whole ring file is
-  only viable once the ring has a sane default — see *[The default SD ring is 4 GiB
-  and never rotates]*, which derives the size from download time. Reads by offset are
+  only viable once the ring has a sane default, which `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  supplies: 4 x 1 MiB, derived from this very figure. Reads by offset are
   part of the protocol and let the ground fetch only the stretch of interest.
 - **Consistency of what is served.** The active file is being written while it is
   read. Define whether it is served as is or whether only the closed files of the ring
@@ -876,136 +877,6 @@ configuration first and self-skip (`NoLinkError`) when its assumption does not
 hold — it should, the same way `check_housekeeping.py`'s cases already do (read the
 next `HEARTBEAT`'s `system_status`).
 
-### The default SD ring is 4 GiB and never rotates
-
-**Status:** defined
-**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `test/test_libs/test_main.cpp`
-
-`SdData`'s default constructor is `SdData(int files = 4, size_t size = 1024UL *
-1024UL * 1024UL)`: four files of 1 GiB each, 4 GiB of card. The design intent is a
-fixed-footprint ring so the card can never fill, but with these defaults the
-opposite holds:
-
-- The ring needs a card with 4 GiB free. On a smaller one, the first file simply
-  grows until `SD.open` or the write fails, and that failure is silent — see *[SD
-  logging failure is silent]*.
-- The log now writes about 34 B/s — a 27-byte `SYS` record once a second from
-  `src/logger.cpp`, a 14-byte `PWR` every two seconds from `TaskMavlink`, and a
-  16-byte `TIME` only when the clock moves. Filling 1 GiB at that rate takes about a
-  year, so rotation never actually happens in any realistic mission:
-  `writeLogIndex()`, `index.bin` and the whole resume-after-power-cycle mechanism are
-  effectively dead code that has never run in flight. This got **worse**, not better,
-  when `replace-messagepack-log-with-dataflash` cut the rate from 254 B/s: the smaller
-  the record, the longer the file takes to fill and the further away rotation moves.
-- It also makes both download paths impractical — *[Download the flight log over the
-  MAVLink log protocol]* and *[Serve the SD card over MAVLink FTP]*: nothing that size
-  comes down a telemetry radio.
-
-**A criterion for the size.** Either download path moves roughly the same order of
-bytes: ~4,6 KB/s at `LINK_BAUD` for the log protocol (90 useful bytes in a 111-byte
-`LOG_DATA` frame at 57 600), and ~239 useful bytes per packet for FTP. So the file
-size can be derived from how long a download may take rather than picked round. At the
-34 B/s the DataFlash format delivers, using the log protocol's rate:
-
-| file size | covers | download |
-|---|---|---|
-| 1 GiB (today) | ~365 days | ~67 hours |
-| 4 MiB | ~34 h | ~15 min |
-| **1 MiB** | **~8,6 h** | **~3,7 min** |
-| 256 KiB | ~2,1 h | ~56 s |
-
-Four files of 1 MiB give ~34 h of continuous log, rotate several times a day — so
-`index.bin` stops being dead code — and each comes down in under four minutes. **The
-dependency this entry used to carry is discharged:** the sizing only made sense once
-the format shrank, which it did on 2026-09-20, so this is actionable now in a way it
-was not when it was written.
-
-Related: `test/test_libs/test_main.cpp` constructs `SdData(TEST_FILE_COUNT,
-TEST_FILE_SIZE_MB)` with `TEST_FILE_SIZE_MB = 1024UL`, which is bytes, not
-megabytes — so the only place rotation is ever exercised is the test, by accident of
-a misleading constant name. That constant is also listed in *[Minor leftovers
-cleanup]*.
-
-To decide: a default file size that actually rotates within a mission (a few
-hundred kilobytes to a few megabytes puts rotation at hours or days), and whether
-the size is a compile-time constant or a ground-settable parameter under *[Implement
-the MAVLink parameter protocol]*.
-
-**Do this one BEFORE *[The flush policy costs far more card writes than it needs to]*,
-not after.** Rotation has never executed **in the shipped flight configuration** — at
-4 × 1 GiB it would take about a year — so `writeLogIndex()`, `index.bin` and the whole
-resume-after-power-cycle mechanism have never run on a board doing its actual job. The
-only place they run at all is `test_sddata_write_and_rotate` in the Unity suite, and only
-because `TEST_FILE_SIZE_MB` is 1024 *bytes*, as the paragraph above says. That is coverage
-of the mechanism, not evidence about flight: the suite writes a fixed 32-byte payload in a
-tight loop with no scheduler, no watchdog and no other task, so it says nothing about how
-long a rotation takes or what else is waiting while it happens. Changing the write policy
-first would ship a buffering scheme whose interaction with rotation cannot be observed
-where it matters. Shrinking the files first, with today's simple flush-per-record, puts
-rotation on the flight path and makes that change verifiable.
-
-**A latent watchdog reset lives on this path, and it belongs to the CURRENT size, not to
-shrinking it.** `SdVolume::freeChain()` walks a deleted file's cluster chain one cluster at
-a time — `fatGet()` then `fatPut()` each, and `fatPut()` dirties the mirror FAT too — so
-`SD.remove()` costs about one sector read and `fatCount()` sector writes per FAT sector the
-chain spans, **proportional to the file size**:
-
-| bytes per cluster | deleting 1 GiB | deleting 1 MiB |
-|---|---|---|
-| 4 KiB | ~6 144 sector ops | ~6 |
-| 8 KiB | ~3 072 | ~3 |
-| 32 KiB | ~768 | ~3 |
-| 64 KiB | ~384 | ~3 |
-
-**Those are contiguous-chain figures and they are a floor, not a bound.** `freeChain()`
-follows the chain wherever it leads, so it visits one FAT sector per *run* of consecutive
-clusters, not per cluster — the table assumes 128 consecutive entries share a sector. A
-fragmented file can visit a separate sector per cluster, which multiplies the 1 GiB column
-by up to 128 and leaves the 1 MiB column at a few dozen operations. A log file written
-straight through in one pass sits near the floor, but nothing enforces that, and a card
-that has held other files will not oblige. The Unity case below reports both the floor and
-the fragmented ceiling for exactly this reason.
-
-`WDT_TIMEOUT_MS` is **1398**, and the failure mode is a reset with no trace —
-indistinguishable from a mystery. At the shipped 1 GiB, a card formatted with small
-clusters does not fit; at a megabyte nothing fits badly. **So the two goals of this entry
-are aligned rather than in tension: making rotation happen also makes it cheap.** What is
-armed today is the 1 GiB configuration, disarmed only by needing about a year to reach its
-first rotation.
-
-The figure that decides which column applies is the card's cluster size, and
-`test_report_sd_volume_geometry` in `test/test_libs/test_main.cpp` now reports it, together
-with this same arithmetic for both sizes, from whatever card is in the board. `diskutil
-info /dev/diskNsM` on a Mac gives the same number under *Allocation Block Size* without
-flashing anything.
-
-The Unity rotation coverage says nothing about any of this: it deletes 1024-byte files,
-where the FAT walk is a handful of entries. Still measure a rotation's duration on the
-board rather than deriving it — the arithmetic above estimates the FAT sector count for a
-contiguous chain, and says nothing about fragmentation or about the card's own write
-latency, which varies by an order of magnitude between cards. If it does not fit, the options are
-pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
-remove in pieces across several `write()` calls, or accepting a larger file.
-
-**A reader does not have to find the end of a rewritten file, and it is worth knowing
-why.** Rotation does not overwrite in place: it deletes the next slot before opening it
-(`lib/SdData/SdData.cpp`, the `SD.remove()` ahead of the `SD.open()`), so a file always
-starts empty and never holds records from a previous lap after the write cursor. The
-problem that a circular log usually has — complete, valid, older records sitting past the
-end, which `DFReader` would resynchronise on and parse as real data — **does not exist
-here**.
-
-That has a price and a consequence, and they pull in opposite directions:
-
-- The price is the `SD.remove()` in the paragraph above. Deleting is what walks the FAT,
-  so the property that makes files honest is the same thing that puts the watchdog at
-  risk. Any scheme that stops deleting — pre-allocation, in particular — buys back that
-  time and hands back the stale-record problem with it.
-- The consequence is that a lap counter in the file is **not** needed for readability.
-  *[Put the ring's position in the log data instead of `index.bin`]* therefore stands or
-  falls on `index.bin` being a side-car that can desynchronise, which is its own
-  argument, and not on anything about parsing.
-
 ### `memory-budget`'s queue requirements still describe the heap
 
 **Status:** defined
@@ -1043,69 +914,6 @@ requirements are removed outright as describing a facility the firmware no longe
 needs a change with a MODIFIED delta either way; a live spec is not hand-edited outside
 one.
 
-### The flush policy costs far more card writes than it needs to
-
-**Status:** defined
-**Scope:** `lib/SdData`, `openspec/specs/flight-log/spec.md`
-
-`SdData::writeRaw()` calls `_dataFile.flush()` after **every record**. Nobody chose that;
-it has been there since the log existed. Traced through `SdFile::sync()` and
-`SdVolume::cacheFlush()` in `.pio/libdeps/uno_r4_minima/SD/`, one 27-byte `SYS` record
-costs **two sector writes and two sector reads**:
-
-- the data block is not in cache (the previous `sync()` evicted it) → **read** it
-- copy 27 B in; the file grew, so `F_FILE_DIR_DIRTY` is set
-- `sync()` needs the directory block, which is not in cache → `cacheFlush()` **writes**
-  the data block, then **reads** the directory block
-- `sync()` writes `d->fileSize` and `cacheFlush()` **writes** the directory block
-
-`SdVolume` has a single 512 B cache block, so the `sync()` evicts the very block the next
-record needs. The `flush()` is paid twice.
-
-Without the per-record flush, `SdFile::write` takes a different branch entirely: when
-`blockOffset == 0` and the write is at the end of the file it does not even read the
-block, it marks it dirty and fills it, and the block is written **once, when full**.
-
-| | sector writes/s | factor | lost on a power cut |
-|---|---|---|---|
-| today, flush per record | 3,00 | 1× | one record |
-| flush per sector | 0,13 | 23× | ~15 s |
-| flush per 32 sectors | 0,068 | 44× | ~8 min |
-
-**Most of the win is in not flushing per record; per-sector is the right choice here.**
-madflight uses 32 sectors (16 kB) because at a drone's data rate a sector fills in
-milliseconds. At our 34 B/s a sector is fifteen seconds, so copying that constant would be
-copying the answer to a different question.
-
-**Where the wear actually lands.** Half of those writes go to the *same* directory sector,
-about 129 600 times a day, 47 million times a year. Card wear levelling should spread it,
-but the FAT and directory region is the known death zone of cheap cards — what is at risk
-is not the log, it is the filesystem that indexes it, and with it the other three files.
-
-**This modifies a live requirement, and that is the real cost.**
-`openspec/specs/flight-log/spec.md`'s *A truncated record costs only that record* says
-"the incomplete tail is the only data lost". Buffering breaks that literally: completed
-records in the unflushed block are lost too. The change has to carry a MODIFIED delta
-stating the new bound honestly, not slip the trade past the spec. Per-sector flushing makes
-that bound ~15 s, which is defensible; 16 kB would make it ~8 minutes, which is a different
-argument.
-
-Two things the change has to handle:
-
-- **Pad the unfilled tail with `0xFF`, not zeros.** This is what madflight does
-  (`memset(wbuf, 0xff, sizeof(wbuf))`), and it makes a half-filled sector
-  **self-terminating**: DataFlash readers skip `0xFF`, so the file ends where it should
-  without anyone having recorded its length.
-- **Recover the true end on reopen.** After a power cut the directory entry's `fileSize`
-  is stale and short, while the bytes past it are physically on the card. Appending from
-  the stale offset would overwrite data that survived. Scanning forward from `fileSize`
-  for the real end is a bounded read — at most one flush interval — and turns an accepted
-  loss into no loss at all.
-
-No new RAM: **the 512 B `SdVolume` cache already is the buffer**, and today we throw it
-away on every record. That is the difference from madflight, which needs its own
-`wbuf[512]` on top of SdFat.
-
 ### Replace `arduino-libraries/SD` with `greiman/SdFat`
 
 **Status:** defined
@@ -1120,9 +928,10 @@ What that unlocks, in order of value:
 
 - **`preAllocate()` reserves clusters in the FAT without writing a byte of data.** It is a
   metadata operation, cheap. A file that never grows never sets `F_FILE_DIR_DIRTY`, so its
-  directory entry is **never touched in flight** — which removes the wear target described
-  in *[The flush policy costs far more card writes than it needs to]* rather than merely
-  reducing it. madflight pre-allocates 100 MB and calls `truncate()` on close to give back
+  directory entry is **never touched in flight** — which **removes** the wear target rather
+  than merely reducing it. `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  cuts the directory writes by about 36x by batching the flush; pre-allocation is what would
+  take them to zero, and that is the whole remaining value of this entry. madflight pre-allocates 100 MB and calls `truncate()` on close to give back
   what it did not use.
 - **It removes the rotation watchdog risk.** If the next file is already allocated there is
   no FAT walk on the flight path.
@@ -1135,7 +944,9 @@ dependency: measure SdFat's `.bss` and flash against the headroom `scripts/ram_b
 reports (3184 B as of 2026-09-20) before committing to anything. SdFat is configurable
 (`SdFatConfig.h`) and has a reduced mode, so the first question is what the smallest
 useful configuration costs. If it does not fit, this entry closes as "does not fit" and
-*[The flush policy...]* stands on its own, which it can.
+`openspec/changes/size-the-log-ring-and-batch-its-flushes/` stands on its own, which it
+can: batching the flush gets about 36x without any new dependency, and pre-allocation is
+what would take the directory writes to zero.
 
 ### Put the ring's position in the log data instead of `index.bin`
 
@@ -1492,8 +1303,10 @@ Small, unrelated things worth getting out of the way in one go:
   **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
   actually reports, and this is not in it.
 - The test constant `TEST_FILE_SIZE_MB` is `1024UL`, which is bytes, not megabytes:
-  the name misleads about what is really being tested. See *[The default SD ring is
-  4 GiB and never rotates]*.
+  the name misleads about what is really being tested.
+  `openspec/changes/size-the-log-ring-and-batch-its-flushes/` has a task
+  deciding whether to fix the name, since it is changing the ring's defaults anyway — check
+  there before doing it here.
 - A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
 Two items left this list on 2026-09-20 without anyone doing them:

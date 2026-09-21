@@ -498,14 +498,20 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
 // the suite -- so the shape below is deliberate in three ways:
 //
 //   * SdVolume::sdCard_ is STATIC (SdFat.h), and SdVolume::init() assigns it. So
-//     vol.init(&card) repoints the card pointer that the SdVolume INSIDE SD uses as
-//     well. Let the local card die and every later SD access dereferences a destroyed
-//     stack object -- and writes to the card through it. Hence the nested scope and the
-//     SD.begin() that follows it: SDClass::begin() re-runs card.init(), volume.init() and
-//     openRoot(), which puts the static pointer back at SD's own card.
-//   * Every assertion is DEFERRED until after that restore. Unity's assertions longjmp
-//     out of the test on failure, so an assertion inside the scope would skip the restore
-//     and leave tearDown() writing through a dangling pointer. Flags in, asserts out.
+//     vol.init(&probeCard) repoints the card pointer that the SdVolume INSIDE SD uses as
+//     well, and it keeps pointing there until something reassigns it. The probe card
+//     therefore has STATIC STORAGE: a local would be destroyed on return and every later
+//     SD access would dereference a dead stack object -- and write to the card through it.
+//     Static storage makes that impossible to get wrong, including on the paths below
+//     where the restore does not happen.
+//   * SD.begin() puts the pointer back where it belongs -- SDClass::begin() re-runs
+//     card.init(), volume.init() and openRoot() on its own members -- but it can FAIL, and
+//     the assertion reporting that failure longjmps straight into tearDown(). That is why
+//     the pointer must be left somewhere valid rather than merely restored: on the failure
+//     path cleanSdFiles() runs through probeCard, which is alive and initialised on the
+//     same CS, instead of through a corpse.
+//   * Every assertion is still deferred until after the restore attempt, so the ordinary
+//     failure of a probe cannot skip it.
 //   * SdVolume's cache members are static too, so this evicts whatever the log had
 //     cached. Harmless -- it goes through cacheRawBlock(), which flushes first -- and
 //     sdData.end() closes the log file so no handle is open across Sd2Card::init()'s
@@ -513,7 +519,11 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
 void test_report_sd_volume_geometry(void) {
     sdData.end();
 
-    bool cardOk = false;
+    // Static, not local: see the third point above. Costs sizeof(Sd2Card) in the test
+    // binary's .bss and nothing at all in the flight image.
+    static Sd2Card probeCard;
+
+    bool cardOk = probeCard.init(SPI_HALF_SPEED, 9);
     bool volumeOk = false;
     uint8_t fatType = 0;
     uint8_t blocksPerCluster = 0;
@@ -522,22 +532,21 @@ void test_report_sd_volume_geometry(void) {
     uint32_t blocksPerFat = 0;
     uint32_t cardBlocks = 0;
 
-    {
-        Sd2Card card;
-        cardOk = card.init(SPI_HALF_SPEED, 9);
+    if (cardOk) {
         SdVolume vol;
-        volumeOk = cardOk && vol.init(&card);
+        volumeOk = vol.init(&probeCard);
         if (volumeOk) {
             fatType = vol.fatType();
             blocksPerCluster = vol.blocksPerCluster();
             fatCount = vol.fatCount();
             clusterCount = vol.clusterCount();
             blocksPerFat = vol.blocksPerFat();
-            cardBlocks = card.cardSize();
+            cardBlocks = probeCard.cardSize();
         }
     }
 
-    // Before anything else touches the card, and before any assertion can leave.
+    // vol is gone, which is safe -- nothing stores a pointer to an SdVolume. probeCard is
+    // not gone, which is the point.
     bool restored = SD.begin(9);
 
     TEST_ASSERT_TRUE_MESSAGE(restored, "could not restore SD's own card/volume association");
