@@ -19,7 +19,8 @@ writes, two reads, and the flush paid twice.
 **`SD.remove()` is proportional to file size.** `SdVolume::freeChain()` walks the cluster
 chain one cluster at a time — `fatGet()` then `fatPut()` each — and `fatPut()` dirties the
 mirror FAT as well. So a delete costs about one sector read and `fatCount()` sector writes
-per FAT sector the chain spans.
+per FAT sector the chain *visits*, which is one per run of consecutive clusters rather than
+one per cluster: contiguity is what keeps the count down, and nothing guarantees it.
 
 **One owner, unchanged.** `lib/SdData` owns `_dataFile`, the ring, the index and rotation.
 `src/sdwrite.cpp` owns the card and the meaning of the bytes and is the only caller.
@@ -131,13 +132,17 @@ design has to measure.
 
 ## Risks / Trade-offs
 
-**Rotation now happens, and its duration is set by the card** → The FAT work is bounded by
-arithmetic: clusters = file size / cluster size, FAT sectors = clusters ÷ (128 for FAT32),
-and about `1 + fatCount()` sector operations each. At 1 MiB that is single digits for any
-cluster size. What the arithmetic does **not** bound is the card's own write latency, which
-varies by an order of magnitude between cards, so `tasks.md` measures a rotation rather
-than deriving it. `test_report_sd_volume_geometry` in the Unity suite reports the cluster
-size and this same arithmetic.
+**Rotation now happens, and its duration is set by the card** → The FAT work can be
+estimated — clusters = file size / cluster size, FAT sectors = clusters ÷ 128 for FAT32, and
+about `1 + fatCount()` sector operations each — which at 1 MiB is single digits for any
+cluster size. But that is a **floor, not a bound**, twice over. It assumes the chain's
+entries sit in consecutive FAT sectors, and a fragmented file can visit one sector per
+cluster; and it says nothing about the card's own write latency, which varies by an order of
+magnitude between cards. Both are why `tasks.md` measures a rotation rather than deriving
+one. `test_report_sd_volume_geometry` in the Unity suite reports the cluster size, the
+contiguous estimate and the fragmented ceiling, so the gap between the last two is visible
+rather than assumed away. At 1 MiB even the ceiling is a few dozen operations, which is the
+reason this risk is acceptable at the new size and was not at the old one.
 
 **Shrinking the files makes rotation cheaper, not dearer** → Worth stating because the
 backlog entry this change comes from once claimed the opposite. The latent watchdog risk

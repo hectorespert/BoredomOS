@@ -107,12 +107,18 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
 - [ ] 6.2 Check whether `CLAUDE.md` needs anything. The invariants it lists look unaffected,
   but the destructive-test paragraph mentions what `cleanSdFiles()` deletes and that is
   worth re-reading against a ring that actually rotates.
-- [ ] 6.3 Delete *[The default SD ring is 4 GiB and never rotates]* and *[The flush policy
+- [x] 6.3 Delete *[The default SD ring is 4 GiB and never rotates]* and *[The flush policy
   costs far more card writes than it needs to]* from `TODO.md` in the proposing commit, and
-  re-point every entry that cross-references either at this change id. At least *[Download
-  the flight log over the MAVLink log protocol]*, *[Serve the SD card over MAVLink FTP]*,
-  *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*, *[Put the ring's position in the
-  log data instead of `index.bin`]* and *[Minor leftovers cleanup]* refer to one or both.
+  re-point every entry that cross-references either at this change id.
+  **Done in the proposing commit**, which is what the project's rule asks for — the entries
+  are deleted so nothing is described twice, and five entries were re-pointed here:
+  *[Download the flight log over the MAVLink log protocol]*, *[Serve the SD card over
+  MAVLink FTP]*, *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*, *[Put the ring's
+  position in the log data instead of `index.bin`]* and *[Minor leftovers cleanup]*. Two of
+  those five were wrapped across lines and a first pass missed them; all 22 cross-references
+  in the file now resolve. Ticked here rather than left open because leaving it unticked
+  would read as pending work at archive time, when the only thing it could mean is that the
+  proposing commit had not happened.
 - [ ] 6.4 At archive time, carry anything left unticked into `TODO.md` naming this change.
   5.1 through 5.5 are the likely ones: they need 35 hours of uptime and two power cuts, and
   **if 5.4 and 5.5 are not done, the requirement this change modified has no evidence at
