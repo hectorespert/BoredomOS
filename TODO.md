@@ -957,6 +957,15 @@ chain spans, **proportional to the file size**:
 | 32 KiB | ~768 | ~3 |
 | 64 KiB | ~384 | ~3 |
 
+**Those are contiguous-chain figures and they are a floor, not a bound.** `freeChain()`
+follows the chain wherever it leads, so it visits one FAT sector per *run* of consecutive
+clusters, not per cluster — the table assumes 128 consecutive entries share a sector. A
+fragmented file can visit a separate sector per cluster, which multiplies the 1 GiB column
+by up to 128 and leaves the 1 MiB column at a few dozen operations. A log file written
+straight through in one pass sits near the floor, but nothing enforces that, and a card
+that has held other files will not oblige. The Unity case below reports both the floor and
+the fragmented ceiling for exactly this reason.
+
 `WDT_TIMEOUT_MS` is **1398**, and the failure mode is a reset with no trace —
 indistinguishable from a mystery. At the shipped 1 GiB, a card formatted with small
 clusters does not fit; at a megabyte nothing fits badly. **So the two goals of this entry
@@ -972,8 +981,9 @@ flashing anything.
 
 The Unity rotation coverage says nothing about any of this: it deletes 1024-byte files,
 where the FAT walk is a handful of entries. Still measure a rotation's duration on the
-board — the arithmetic above bounds the FAT work, not the card's own write latency, which
-varies by an order of magnitude between cards. If it does not fit, the options are
+board rather than deriving it — the arithmetic above estimates the FAT sector count for a
+contiguous chain, and says nothing about fragmentation or about the card's own write
+latency, which varies by an order of magnitude between cards. If it does not fit, the options are
 pre-allocation (see *[Replace `arduino-libraries/SD` with `greiman/SdFat`]*), doing the
 remove in pieces across several `write()` calls, or accepting a larger file.
 

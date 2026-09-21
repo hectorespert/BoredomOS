@@ -494,51 +494,90 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
 // below are what turns that from an argument into a number.
 //
 // This builds its OWN Sd2Card and SdVolume, because SDClass keeps both private and
-// befriends only File. Two consequences, both deliberate and both reasons this belongs
-// in the test suite and not in the flight image:
+// befriends only File. That is not merely rude -- doing it naively corrupts the rest of
+// the suite -- so the shape below is deliberate in three ways:
 //
-//   * SdVolume's cache members are static, so a second volume SHARES the one 512 B cache
-//     block with the one inside SD. Initialising it evicts whatever was cached. That is
-//     safe -- it goes through cacheRawBlock(), which flushes first -- but it is rude.
-//   * Sd2Card::init() resets the card over SPI. sdData.end() below closes the log file
-//     first so no handle is open across that reset; setUp() reopens on the next case.
+//   * SdVolume::sdCard_ is STATIC (SdFat.h), and SdVolume::init() assigns it. So
+//     vol.init(&card) repoints the card pointer that the SdVolume INSIDE SD uses as
+//     well. Let the local card die and every later SD access dereferences a destroyed
+//     stack object -- and writes to the card through it. Hence the nested scope and the
+//     SD.begin() that follows it: SDClass::begin() re-runs card.init(), volume.init() and
+//     openRoot(), which puts the static pointer back at SD's own card.
+//   * Every assertion is DEFERRED until after that restore. Unity's assertions longjmp
+//     out of the test on failure, so an assertion inside the scope would skip the restore
+//     and leave tearDown() writing through a dangling pointer. Flags in, asserts out.
+//   * SdVolume's cache members are static too, so this evicts whatever the log had
+//     cached. Harmless -- it goes through cacheRawBlock(), which flushes first -- and
+//     sdData.end() closes the log file so no handle is open across Sd2Card::init()'s
+//     card reset. setUp() reopens on the next case.
 void test_report_sd_volume_geometry(void) {
     sdData.end();
 
-    Sd2Card card;
-    TEST_ASSERT_TRUE_MESSAGE(card.init(SPI_HALF_SPEED, 9), "Sd2Card::init failed on CS 9");
-    SdVolume vol;
-    TEST_ASSERT_TRUE_MESSAGE(vol.init(&card), "SdVolume::init failed: not a FAT volume?");
+    bool cardOk = false;
+    bool volumeOk = false;
+    uint8_t fatType = 0;
+    uint8_t blocksPerCluster = 0;
+    uint8_t fatCount = 0;
+    uint32_t clusterCount = 0;
+    uint32_t blocksPerFat = 0;
+    uint32_t cardBlocks = 0;
 
-    uint32_t clusterBytes = (uint32_t)vol.blocksPerCluster() * 512UL;
-    uint8_t fatType = vol.fatType();
+    {
+        Sd2Card card;
+        cardOk = card.init(SPI_HALF_SPEED, 9);
+        SdVolume vol;
+        volumeOk = cardOk && vol.init(&card);
+        if (volumeOk) {
+            fatType = vol.fatType();
+            blocksPerCluster = vol.blocksPerCluster();
+            fatCount = vol.fatCount();
+            clusterCount = vol.clusterCount();
+            blocksPerFat = vol.blocksPerFat();
+            cardBlocks = card.cardSize();
+        }
+    }
+
+    // Before anything else touches the card, and before any assertion can leave.
+    bool restored = SD.begin(9);
+
+    TEST_ASSERT_TRUE_MESSAGE(restored, "could not restore SD's own card/volume association");
+    TEST_ASSERT_TRUE_MESSAGE(cardOk, "Sd2Card::init failed on CS 9");
+    TEST_ASSERT_TRUE_MESSAGE(volumeOk, "SdVolume::init failed: not a FAT volume?");
+
+    uint32_t clusterBytes = (uint32_t)blocksPerCluster * 512UL;
     uint32_t entriesPerFatSector = 512UL / (fatType == 32 ? 4UL : 2UL);
 
     char message[128];
     snprintf(message, sizeof(message),
              "FAT%u: cluster=%lu B (%u blocks) clusters=%lu fatBlocks=%lu fats=%u",
              (unsigned)fatType, (unsigned long)clusterBytes,
-             (unsigned)vol.blocksPerCluster(), (unsigned long)vol.clusterCount(),
-             (unsigned long)vol.blocksPerFat(), (unsigned)vol.fatCount());
+             (unsigned)blocksPerCluster, (unsigned long)clusterCount,
+             (unsigned long)blocksPerFat, (unsigned)fatCount);
     TEST_MESSAGE(message);
 
     snprintf(message, sizeof(message), "card=%lu blocks (%lu MiB)",
-             (unsigned long)card.cardSize(),
-             (unsigned long)(card.cardSize() / 2048UL));
+             (unsigned long)cardBlocks, (unsigned long)(cardBlocks / 2048UL));
     TEST_MESSAGE(message);
 
-    // The number the ring-size decision actually needs: what deleting one file costs at
-    // the shipped size and at the proposed one. Reported for both so the comparison does
-    // not have to be done by hand later.
+    // What deleting one file costs at the shipped size and at the proposed one, reported
+    // for both so the comparison does not have to be done by hand later.
+    //
+    // These are CONTIGUOUS-CHAIN estimates and the worst case is reported beside them.
+    // freeChain() follows the chain wherever it leads, so a fragmented file can visit a
+    // separate FAT sector per cluster; the floor assumes consecutive entries sharing a
+    // sector, the ceiling assumes none do. A log file written straight through in one
+    // pass is near the floor, but nothing enforces that.
     const uint32_t sizes[] = {1024UL * 1024UL * 1024UL, 1024UL * 1024UL};
     for (unsigned i = 0; i < 2; ++i) {
         uint32_t clusters = (sizes[i] + clusterBytes - 1UL) / clusterBytes;
         uint32_t fatSectors = (clusters + entriesPerFatSector - 1UL) / entriesPerFatSector;
-        uint32_t ops = fatSectors * (1UL + (uint32_t)vol.fatCount());
+        uint32_t best = fatSectors * (1UL + (uint32_t)fatCount);
+        uint32_t worst = clusters * (1UL + (uint32_t)fatCount);
         snprintf(message, sizeof(message),
-                 "deleting %lu KiB: %lu clusters, %lu FAT sectors, ~%lu sector ops",
+                 "deleting %lu KiB: %lu clusters, %lu FAT sectors, ~%lu ops contiguous, "
+                 "<=%lu fragmented",
                  (unsigned long)(sizes[i] / 1024UL), (unsigned long)clusters,
-                 (unsigned long)fatSectors, (unsigned long)ops);
+                 (unsigned long)fatSectors, (unsigned long)best, (unsigned long)worst);
         TEST_MESSAGE(message);
     }
 
@@ -548,10 +587,10 @@ void test_report_sd_volume_geometry(void) {
     // volume, which is the failure this case would otherwise hide.
     TEST_ASSERT_TRUE_MESSAGE(fatType == 16 || fatType == 32, "unexpected FAT type");
     TEST_ASSERT_TRUE_MESSAGE(clusterBytes >= 512UL, "cluster smaller than a block");
-    TEST_ASSERT_EQUAL_MESSAGE(0, vol.blocksPerCluster() & (vol.blocksPerCluster() - 1),
+    TEST_ASSERT_EQUAL_MESSAGE(0, blocksPerCluster & (blocksPerCluster - 1),
                               "blocksPerCluster is not a power of two");
-    TEST_ASSERT_TRUE_MESSAGE(vol.clusterCount() > 0, "volume reports no clusters");
-    TEST_ASSERT_TRUE_MESSAGE(card.cardSize() > 0, "card reports zero size");
+    TEST_ASSERT_TRUE_MESSAGE(clusterCount > 0, "volume reports no clusters");
+    TEST_ASSERT_TRUE_MESSAGE(cardBlocks > 0, "card reports zero size");
 }
 
 int runUnityTests(void) {
