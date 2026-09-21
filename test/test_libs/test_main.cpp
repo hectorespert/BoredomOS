@@ -12,11 +12,14 @@
 // listed in TODO.md's "Minor leftovers cleanup" -- renamed here rather than there because
 // this change had to touch the value anyway.
 //
-// 8 KiB, not 1 KiB, and the reason is coverage rather than taste: SdData syncs every
-// FLUSH_INTERVAL_BYTES (4 KiB), so at a 1 KiB file size a rotation always arrived first
-// and close() synced, and the batching path could not be exercised by this suite at all.
-// A file twice the interval lets both be seen.
-#define TEST_FILE_SIZE_BYTES 8192UL
+// 6 KiB, and the value is chosen twice over rather than picked round. It has to be LARGER
+// than SdData's FLUSH_INTERVAL_BYTES (4 KiB) or a rotation always arrives first and
+// close() syncs, and the batching path cannot be exercised by this suite at all -- which
+// is what the old 1 KiB did. And it must not be a MULTIPLE of the interval, or the
+// rotation lands immediately after a sync with no unsynced tail, which made
+// test_sddata_rotation_does_not_lose_unsynced_bytes vacuous at 8 KiB. 1.5x the interval
+// leaves 2 KiB pending when the rotation trips.
+#define TEST_FILE_SIZE_BYTES 6144UL
 
 Battery battery;
 SystemTime systemTime;
@@ -547,15 +550,29 @@ void test_sddata_rotation_does_not_lose_unsynced_bytes(void) {
         payload[i] = (uint8_t)i;
     }
 
-    // Exactly one file's worth, so data0.BIN fills and rotation closes it.
-    for (uint32_t n = 0; n < TEST_FILE_SIZE_BYTES; n += sizeof(payload)) {
+    // Up to one record short of the rotation point.
+    uint32_t written = 0;
+    while (written + sizeof(payload) < TEST_FILE_SIZE_BYTES) {
         sdData.write(payload, sizeof(payload));
+        written += sizeof(payload);
     }
+
+    // There has to BE an unsynced tail here or the rest of this case proves nothing --
+    // which is exactly what happened while TEST_FILE_SIZE_BYTES was a multiple of the
+    // flush interval: the rotation landed straight after a sync with zero bytes pending.
+    // Asserting the tail exists is what keeps the case honest if either constant moves.
+    uint32_t visibleBefore = fileSizeOf("data0.BIN");
+    TEST_ASSERT_TRUE_MESSAGE(visibleBefore < written,
+                             "no unsynced tail at the rotation point: this case is vacuous");
+
+    // The record that trips the rotation.
+    sdData.write(payload, sizeof(payload));
+    written += sizeof(payload);
 
     // The closed file must report everything written to it, not merely everything that
     // had been synced when the last interval elapsed.
     uint32_t closed = fileSizeOf("data0.BIN");
-    TEST_ASSERT_EQUAL_MESSAGE(TEST_FILE_SIZE_BYTES, closed,
+    TEST_ASSERT_EQUAL_MESSAGE(written, closed,
                               "rotation lost the bytes written since the last sync");
     TEST_ASSERT_TRUE_MESSAGE(SD.exists("data1.BIN"), "rotation did not open the next file");
 }

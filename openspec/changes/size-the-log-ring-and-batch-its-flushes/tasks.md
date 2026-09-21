@@ -118,6 +118,21 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
   reports **everything** written to it, not merely what had been synced when the last
   interval elapsed. It passes against the old per-record flush too, so it is a regression
   guard rather than a bug-demonstrating test, and that is said in the case's own comment.
+
+  **And the first version of it was vacuous — found by Copilot, confirmed by arithmetic.**
+  `TEST_FILE_SIZE_BYTES` was 8192, an exact multiple of the 4096-byte interval, so the
+  rotation landed immediately after a sync with **zero** bytes pending: the case asserted a
+  tail survived when there was no tail. Simulating both sizes:
+
+  ```
+  file=8192: at rotation fileSize=8192 lastSync=8192 pending=0
+  file=6144: at rotation fileSize=6144 lastSync=4096 pending=2048
+  ```
+
+  The constant is 6144 now — 1.5x the interval, so larger than it *and* not a multiple of
+  it, which are two separate requirements the comment on the constant now states. The case
+  also asserts the tail exists before relying on it (`visibleBefore < written`), so it
+  fails loudly rather than silently proving nothing if either constant moves again.
 - [x] 3.4 Add a Unity case for the interval itself: write less than 4 KiB and assert the
   file on the card is shorter than what was written; write past 4 KiB and assert it catches
   up. **Verify this case fails against the current per-record flush before it passes**
