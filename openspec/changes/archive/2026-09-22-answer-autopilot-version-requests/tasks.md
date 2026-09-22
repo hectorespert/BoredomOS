@@ -67,6 +67,12 @@ Markers: **`[board]`** the assembled board must be attached.
   `HIL_UART_PORT` like every other case in that file. `run.py` discovers both by its
   `check_*.py` glob; no registration needed. Verified with `python3 -m py_compile` on both
   files — the board-run confirmation is 3.2.
+  **Amended after Copilot's review of PR #47**: the dual-link case originally asserted only
+  `AUTOPILOT_VERSION`'s isolation, not its `COMMAND_ACK`'s — a regression that routed the ACK
+  alone to the wrong port would have passed. Now collects and asserts both reply types on
+  each port, and the ACK's `result` on the port that asked. Still self-skips without
+  `HIL_UART_PORT`, so this fix is unverified on the board like the rest of that file —
+  `python3 -m py_compile` only.
 - [x] 3.2 **`[board]`** `pio test` (the HIL suite) passes with the new module included,
   and the existing suite's pass/skip counts otherwise unchanged from the current baseline
   (25/8/0 as of `size-the-log-ring-and-batch-its-flushes`'s tasks.md — re-check `custom_mode`
