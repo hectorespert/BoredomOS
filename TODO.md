@@ -834,11 +834,20 @@ The bare minimum is to always answer something. A `COMMAND_ACK` with
 **`AUTOPILOT_VERSION` (148), in response to `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES`
 (520), is answered as of `answer-autopilot-version-requests`** — `capabilities` reports
 only `MAV_PROTOCOL_CAPABILITY_MAVLINK2`, the one true capability this firmware has today.
-The rest of this entry is still open.
+
+**The bare minimum above — always answering something — is closed for `COMMAND_LONG`
+as of `answer-unsupported-command-long-requests`**: every `command.command` this
+firmware does not otherwise handle, including `MAV_CMD_GET_HOME_POSITION`, now gets
+`COMMAND_ACK` / `MAV_RESULT_UNSUPPORTED`, and `MAV_CMD_SET_MESSAGE_INTERVAL` naming a
+message id other than `NAMED_VALUE_INT` (252) gets `COMMAND_ACK` / `MAV_RESULT_DENIED`.
+`PARAM_REQUEST_LIST` and `REQUEST_DATA_STREAM` are untouched — they are not
+`COMMAND_LONG` sub-commands, so that change did not reach them. The rest of this entry
+is still open.
 
 To decide:
 
-- Which commands are really supported and which are explicitly rejected.
+- Which commands, beyond the four already handled, are really supported and which
+  stay explicitly rejected with `MAV_RESULT_UNSUPPORTED`.
 - **Telemetry rates from the ground.** Today they are hard-wired in `TaskMavlink`'s
   schedule table (`fold-periodic-telemetry-into-mavlink-task`). Rather than
   implementing `REQUEST_DATA_STREAM`,
