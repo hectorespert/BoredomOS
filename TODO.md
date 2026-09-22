@@ -432,10 +432,17 @@ To decide before implementing:
 
 - **Which sensor.** If the IMU of *[Add the GY-87 IMU]* lands, the module already
   brings two temperature sources — the BMP180 and the MPU-6050 die — and this entry
-  reduces to exposing that value, with no extra hardware or dependencies. The
-  alternatives are the RA4M1 internal sensor, which needs nothing but measures the
-  MCU die rather than the environment, or a dedicated I2C part. Better decided
-  **after** the GY-87.
+  reduces to exposing that value, with no extra hardware or dependencies. Otherwise
+  the alternative is a dedicated I2C part. Better decided **after** the GY-87.
+
+  **The RA4M1 internal sensor is ruled out**, for three reasons found researching it:
+  it reads the MCU die, not the environment, which is the wrong quantity for a LiPo/SD
+  operating-range check; the Arduino core exposes no API for it, so reading it means
+  raw register access to `ADC140`/`TSN_TSCDRH`/`TSN_TSCDRL` with no library, in this
+  project or upstream; and it shares the `ADC140` peripheral that `lib/Battery` owns
+  exclusively on `A0` (`CLAUDE.md`'s "only the owning file touches its resource"),
+  which the other two options do not — they answer on their own I2C address instead of
+  contending for a peripheral this project already assigned a single owner.
 - **How many measurement points.** A single sensor, or several (battery, exterior)
   changes the shape of the data in `Data`.
 - **Rate and caching.** `lib/Battery` caches for 125 ms; temperature changes far
@@ -778,13 +785,14 @@ needed that command to actually do something; every other branch here is unaffec
 The bare minimum is to always answer something. A `COMMAND_ACK` with
 `MAV_RESULT_UNSUPPORTED` is an honest answer and stops the retry; silence is not.
 
+**`AUTOPILOT_VERSION` (148), in response to `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES`
+(520), is answered as of `answer-autopilot-version-requests`** — `capabilities` reports
+only `MAV_PROTOCOL_CAPABILITY_MAVLINK2`, the one true capability this firmware has today.
+The rest of this entry is still open.
+
 To decide:
 
 - Which commands are really supported and which are explicitly rejected.
-- **`AUTOPILOT_VERSION` (148)**, in response to
-  `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES` (520). It is what the GCS asks as soon as
-  it connects, to know what the vehicle can do; with no answer it treats you as a
-  minimal node. Cheap to implement and it improves everything else.
 - **Telemetry rates from the ground.** Today they are hard-wired in `TaskMavlink`'s
   schedule table (`fold-periodic-telemetry-into-mavlink-task`). Rather than
   implementing `REQUEST_DATA_STREAM`,

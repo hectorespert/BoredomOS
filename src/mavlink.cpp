@@ -1,6 +1,17 @@
 #include <Arduino.h>
 #include <Arduino_FreeRTOS.h>
 #include <MAVLink.h>
+// AUTOPILOT_VERSION (148) was moved into standard.xml, and this vendored
+// copy of the common dialect (<MAVLink.h> -> mavlink/common/mavlink.h ->
+// common/common.h) was never regenerated to pull it back in: common/ has
+// no mavlink_msg_autopilot_version.h at all. This narrow, self-contained
+// header is safe to add directly -- it defines nothing common/ already
+// does. Do not include mavlink/standard/standard.h instead: it is a whole
+// second dialect that re-defines HEARTBEAT, COMMAND_ACK and everything
+// else common/ already provides, from its own files, which fails to
+// build on redefinition (design.md, answer-autopilot-version-requests,
+// Decision 1a).
+#include <mavlink/standard/mavlink_msg_autopilot_version.h>
 #include <Battery.h>
 #include <SystemTime.h>
 #include <Recovery.h>
@@ -25,6 +36,17 @@ extern LinkPort linkPorts[2];
 constexpr uint8_t kPortCount = 2;
 static_assert(LINK_CHAN_UART == 0, "linkPorts is indexed by channel number");
 static_assert(LINK_CHAN_USB == 1, "linkPorts is indexed by channel number");
+
+// MAV_PROTOCOL_CAPABILITY_MAVLINK2, from the MAV_PROTOCOL_CAPABILITY enum --
+// defined only in mavlink/standard/standard.h, which this project does not
+// include (see the top-of-file comment on mavlink_msg_autopilot_version.h):
+// that file also redefines every message common/ already provides, so
+// pulling it in just for this one enum is not an option. The value is fixed
+// by the MAVLink wire protocol, not by this project or by codegen choices.
+// This is the only bit AUTOPILOT_VERSION.capabilities reports -- true
+// because nothing in this firmware ever calls mavlink_set_proto_version(),
+// so both ports emit MAVLink 2 unconditionally (design.md Decision 2).
+constexpr uint64_t kCapabilityMavlink2 = 8192;
 
 extern SystemTime systemTime;
 
@@ -190,6 +212,13 @@ static void sendCommandAck(uint8_t port, uint16_t command, uint8_t result)
     intent.kind = LinkMsgKind::CommandAck;
     intent.command_ack.command = command;
     intent.command_ack.result = result;
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+}
+
+static void sendAutopilotVersion(uint8_t port)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::AutopilotVersion;
     xQueueSend(linkPorts[port].writeQueue, &intent, 0);
 }
 
@@ -423,6 +452,33 @@ void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
                 baseMode,
                 packCustomMode(),
                 reducedConfiguration ? MAV_STATE_CRITICAL : MAV_STATE_ACTIVE
+            );
+            break;
+        }
+
+        case LinkMsgKind::AutopilotVersion: {
+            // Every field this firmware can honestly fill is a compile-time
+            // constant -- see design.md Decisions 1 and 2 -- so, like
+            // Heartbeat, nothing is read from `intent`.
+            const uint8_t zero8[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            const uint8_t zero18[18] = {0};
+            mavlink_msg_autopilot_version_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                kCapabilityMavlink2,
+                0, // flight_sw_version
+                0, // middleware_sw_version
+                0, // os_sw_version
+                0, // board_version
+                zero8, // flight_custom_version
+                zero8, // middleware_custom_version
+                zero8, // os_custom_version
+                0, // vendor_id
+                0, // product_id
+                0, // uid
+                zero18 // uid2
             );
             break;
         }
@@ -703,6 +759,18 @@ struct ScheduleEntry {
                     mavlink_msg_command_long_decode(&msg, &command);
 
                     if (command.command == MAV_CMD_GET_HOME_POSITION) {
+                        break;
+                    }
+
+                    if (command.command == MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES) {
+                        // The substantive answer first, so a GCS that does not
+                        // wait for the ACK still has the data it asked for --
+                        // design.md Decision 3. Both share the same
+                        // non-blocking, drop-on-full xQueueSend every other
+                        // reply in this file already uses (design.md
+                        // Decision 4 on why the queue does not need to grow).
+                        sendAutopilotVersion(port);
+                        sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
                         break;
                     }
 
