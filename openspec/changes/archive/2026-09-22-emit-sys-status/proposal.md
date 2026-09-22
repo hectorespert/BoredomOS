@@ -47,7 +47,10 @@ card was never found" beyond the one-shot boot `STATUSTEXT`.
 
 - `mavlink-link`: adds `SYS_STATUS` as a periodic outbound message on both ports,
   at a fixed 1000 ms rate, unconditional on configuration — a new requirement
-  alongside the existing per-port cadence guarantees.
+  alongside the existing per-port cadence guarantees. Also updates "MAVLink is
+  carried on both the UART and the USB CDC port"'s two per-port scenarios,
+  which enumerate the exact telemetry set a ground station receives, to
+  include `SYS_STATUS` alongside `HEARTBEAT`/`SYSTEM_TIME`/`BATTERY_STATUS`.
 - `fault-recovery`: the SD card's absence, already required to be reported
   ("Absent hardware degrades rather than halts"), becomes visible to a ground
   station that connects after the boot `STATUSTEXT` has already gone by, the same
