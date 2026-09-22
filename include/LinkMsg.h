@@ -21,6 +21,7 @@ enum class LinkMsgKind : uint8_t {
     // firmware can honestly fill is a compile-time constant, so mavlinkPack()
     // builds the whole message itself rather than reading one from `intent`.
     AutopilotVersion,
+    SysStatus,
 };
 
 struct LinkMsg {
@@ -44,6 +45,12 @@ struct LinkMsg {
         // tables -- program-lifetime storage, so a pointer is safe to carry
         // through the queue rather than copying up to 10 bytes.
         struct { const char *name; int32_t value; } named_value_int;
+        // sensors carries the one bitmap value this firmware reports for
+        // present/enabled/health alike -- see design.md, emit-sys-status.
+        // load, drop_rate_comm, errors_count2..4 and the *_extended bitmaps
+        // are always 0 and are not carried through the queue; mavlinkPack()
+        // fills them directly.
+        struct { uint32_t sensors; uint16_t voltage_mv; int8_t battery_remaining; uint16_t errors_comm; uint16_t errors_count1; } sys_status;
     };
 };
 

@@ -76,8 +76,10 @@ def test_observed_message_set_is_closed(link):
     which this case has no way to know happened. BAD_DATA is allowed too --
     check_telemetry.py's test_link_carries_no_garbage already bounds how much
     of it is tolerated; this case only cares which types appear, not how many.
+    SYS_STATUS joined the unconditional set in emit-sys-status: like HEARTBEAT
+    and SYSTEM_TIME, it is not gated by the reduced configuration.
     """
-    expected = {"HEARTBEAT", "SYSTEM_TIME", "BATTERY_STATUS", "COMMAND_ACK", "BAD_DATA"}
+    expected = {"HEARTBEAT", "SYSTEM_TIME", "BATTERY_STATUS", "SYS_STATUS", "COMMAND_ACK", "BAD_DATA"}
     seen = set(link.sample().counts.keys())
     unexpected = seen - expected
     assert not unexpected, f"unexpected message types on the link: {sorted(unexpected)}"

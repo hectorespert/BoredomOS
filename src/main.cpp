@@ -147,20 +147,27 @@ uint8_t sdWriteQueueStorage[4 * sizeof(SdRecord)];
 StaticQueue_t linkReadQueueBuffer;
 uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 
-// Depth 6, re-derived for improve-clock-synchronisation rather than carried
-// over. The five that came before: heartbeat, SYSTEM_TIME, battery status and
-// housekeeping -- four independently-clocked TaskMavlink schedule entries that
-// nothing in the schedule stops from coinciding on one pass -- plus a TIMESYNC
-// reply, which an inbound request can make due at any moment.
+// Depth 7, re-derived for emit-sys-status rather than carried over. The six
+// that came before (re-derived for improve-clock-synchronisation): heartbeat,
+// SYSTEM_TIME, battery status and housekeeping -- four independently-clocked
+// TaskMavlink schedule entries that nothing in the schedule stops from
+// coinciding on one pass -- plus a TIMESYNC reply, which an inbound request
+// can make due at any moment, plus the clock report: TaskMavlink posts TWO
+// texts back to back at boot (the reset reason and the clock's origin) before
+// its schedule has fired anything, and one more later whenever the origin
+// changes.
 //
-// The sixth is the clock report. TaskMavlink now posts TWO texts back to back at
-// boot (the reset reason and the clock's origin) before its schedule has fired
-// anything, and one more later whenever the origin changes. At depth 5 a clock
-// report landing on a pass where all four periodic entries are due, with a
-// TIMESYNC request arriving, made the sixth item a silent drop -- a lost
-// STATUSTEXT at best, a lost telemetry frame at worst, which would break
-// specs/mavlink-link/spec.md's cadence guarantee. Found by Copilot's review of
-// that change.
+// The seventh is SYS_STATUS: a fifth independently-clocked periodic entry
+// (src/mavlink.cpp's schedule table) that the same "nothing stops it
+// coinciding with the rest" reasoning applies to -- it is unconditional, like
+// HEARTBEAT and SYSTEM_TIME, so it cannot be excluded from the worst case the
+// way BATTERY_STATUS's reduced-configuration gating lets that one be. At
+// depth 6 a pass where all five periodic entries are due, with a TIMESYNC
+// request arriving, would make the seventh item a silent drop -- exactly the
+// write-queue drop emit-sys-status's own `errors_count1` exists to count, so
+// shipping it without this would let the counter observe drops it could have
+// prevented. Found while writing this change's own tasks.md documentation
+// step, not by a separate review pass.
 //
 // Costs 2 * sizeof(LinkMsg) = 128 B of .bss across the two ports, against the
 // headroom scripts/ram_budget.py prints. Re-derived, not assumed, per CLAUDE.md's
@@ -168,10 +175,10 @@ uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 // This depth and the housekeeping cycle length both follow the task count in this
 // file -- a new task needs both re-checked.
 StaticQueue_t uartWriteQueueBuffer;
-uint8_t uartWriteQueueStorage[6 * sizeof(LinkMsg)];
+uint8_t uartWriteQueueStorage[7 * sizeof(LinkMsg)];
 
 StaticQueue_t usbWriteQueueBuffer;
-uint8_t usbWriteQueueStorage[6 * sizeof(LinkMsg)];
+uint8_t usbWriteQueueStorage[7 * sizeof(LinkMsg)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
@@ -394,10 +401,10 @@ void setup()
   linkReadQueue = xQueueCreateStatic(8, sizeof(InboundMsg), linkReadQueueStorage, &linkReadQueueBuffer);
   configASSERT(linkReadQueue != NULL);
 
-  uartWriteQueue = xQueueCreateStatic(6, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
+  uartWriteQueue = xQueueCreateStatic(7, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
   configASSERT(uartWriteQueue != NULL);
 
-  usbWriteQueue = xQueueCreateStatic(6, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
+  usbWriteQueue = xQueueCreateStatic(7, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
   configASSERT(usbWriteQueue != NULL);
 
   // Binds each descriptor to its concrete port and its write queue. Must run
