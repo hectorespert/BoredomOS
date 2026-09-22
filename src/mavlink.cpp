@@ -758,10 +758,12 @@ struct ScheduleEntry {
                     mavlink_command_long_t command;
                     mavlink_msg_command_long_decode(&msg, &command);
 
-                    if (command.command == MAV_CMD_GET_HOME_POSITION) {
-                        break;
-                    }
-
+                    // An else-if chain, not independent ifs, so there is one
+                    // place to attach "none of the above" -- the four
+                    // conditions are mutually exclusive on a single uint16_t
+                    // equality each, so this changes nothing about which
+                    // branch a given command reaches (design.md's "the four
+                    // if blocks become an if/else if/else chain").
                     if (command.command == MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES) {
                         // The substantive answer first, so a GCS that does not
                         // wait for the ACK still has the data it asked for --
@@ -771,10 +773,7 @@ struct ScheduleEntry {
                         // Decision 4 on why the queue does not need to grow).
                         sendAutopilotVersion(port);
                         sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
-                        break;
-                    }
-
-                    if (command.command == MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN) {
+                    } else if (command.command == MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN) {
                         // Acknowledged rather than silently handled -- review.md
                         // finding 17. This is a new message on the wire; the
                         // closed-set HIL case (test/test_hil/check_recovery.py,
@@ -796,43 +795,58 @@ struct ScheduleEntry {
                         vTaskDelay(pdMS_TO_TICKS(50));
 
                         NVIC_SystemReset();
-                    }
+                    } else if (command.command == MAV_CMD_SET_MESSAGE_INTERVAL) {
+                        if ((uint16_t)command.param1 == MAVLINK_MSG_ID_NAMED_VALUE_INT) {
+                            // param2 is microseconds (matching MESSAGE_INTERVAL's own
+                            // interval_us field), not milliseconds -- converted before
+                            // it is compared against or stored in interval_ms
+                            // (design.md's Context; an earlier version of this task
+                            // stored it unconverted, which Copilot's review caught:
+                            // a 1 Hz request would have run at 1000 seconds).
+                            ScheduleEntry &housekeeping = schedule[port][kHousekeepingScheduleIndex];
+                            int32_t requestedUs = (int32_t)command.param2;
 
-                    if (command.command == MAV_CMD_SET_MESSAGE_INTERVAL
-                        && (uint16_t)command.param1 == MAVLINK_MSG_ID_NAMED_VALUE_INT) {
-                        // param2 is microseconds (matching MESSAGE_INTERVAL's own
-                        // interval_us field), not milliseconds -- converted before
-                        // it is compared against or stored in interval_ms
-                        // (design.md's Context; an earlier version of this task
-                        // stored it unconverted, which Copilot's review caught:
-                        // a 1 Hz request would have run at 1000 seconds).
-                        ScheduleEntry &housekeeping = schedule[port][kHousekeepingScheduleIndex];
-                        int32_t requestedUs = (int32_t)command.param2;
-
-                        if (requestedUs <= 0) {
-                            // -1 disables. 0 asks for "the default rate", and
-                            // that default is off -- both in the clean-boot
-                            // case and stopping an already-armed stream
-                            // (specs/mavlink-link/spec.md, "asks for the
-                            // default rate").
-                            housekeeping.enabled = false;
-                            sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
-                        } else {
-                            uint32_t requestedMs = (uint32_t)requestedUs / 1000u;
-                            if (requestedMs < 1000u) {
-                                // Below the floor -- denied, not silently
-                                // clamped (design.md's "Converting the
-                                // command's interval, and rejecting one that
-                                // is too fast"). Publishing state is left
-                                // exactly as it was.
-                                sendCommandAck(port, command.command, MAV_RESULT_DENIED);
-                            } else {
-                                housekeeping.interval_ms = requestedMs;
-                                housekeeping.last_ms = now;
-                                housekeeping.enabled = true;
+                            if (requestedUs <= 0) {
+                                // -1 disables. 0 asks for "the default rate", and
+                                // that default is off -- both in the clean-boot
+                                // case and stopping an already-armed stream
+                                // (specs/mavlink-link/spec.md, "asks for the
+                                // default rate").
+                                housekeeping.enabled = false;
                                 sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
+                            } else {
+                                uint32_t requestedMs = (uint32_t)requestedUs / 1000u;
+                                if (requestedMs < 1000u) {
+                                    // Below the floor -- denied, not silently
+                                    // clamped (design.md's "Converting the
+                                    // command's interval, and rejecting one that
+                                    // is too fast"). Publishing state is left
+                                    // exactly as it was.
+                                    sendCommandAck(port, command.command, MAV_RESULT_DENIED);
+                                } else {
+                                    housekeeping.interval_ms = requestedMs;
+                                    housekeeping.last_ms = now;
+                                    housekeeping.enabled = true;
+                                    sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
+                                }
                             }
+                        } else {
+                            // The command is recognised and valid; this
+                            // firmware just has no publisher for this
+                            // particular message id, which is DENIED's own
+                            // definition ("supported but ... not supported by
+                            // flight stack") rather than UNSUPPORTED's
+                            // (design.md's SET_MESSAGE_INTERVAL decision).
+                            sendCommandAck(port, command.command, MAV_RESULT_DENIED);
                         }
+                    } else {
+                        // Every command this switch does not recognise at
+                        // all -- including MAV_CMD_GET_HOME_POSITION, which
+                        // the firmware implements no home position for --
+                        // falls here (design.md's GET_HOME_POSITION
+                        // decision; specs/mavlink-link/spec.md, "Every
+                        // COMMAND_LONG receives a COMMAND_ACK").
+                        sendCommandAck(port, command.command, MAV_RESULT_UNSUPPORTED);
                     }
 
                     break;

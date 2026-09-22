@@ -378,9 +378,14 @@ silently select the per-byte fallback.
   `COMMAND_LONG` is no longer one of them: its own sub-switch on `command.command`
   answers `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, `MAV_CMD_SET_MESSAGE_INTERVAL` and, since
   `answer-autopilot-version-requests`, `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES` with
-  `AUTOPILOT_VERSION` followed by `COMMAND_ACK` — every other command it receives still
-  falls through unanswered. Anything else falls to `default` and produces a `STATUSTEXT`
-  warning.
+  `AUTOPILOT_VERSION` followed by `COMMAND_ACK`. Since
+  `answer-unsupported-command-long-requests`, every other `command.command` — including
+  `MAV_CMD_GET_HOME_POSITION`, for which the firmware holds no home position — is answered
+  `COMMAND_ACK` / `MAV_RESULT_UNSUPPORTED` instead of falling through unanswered, and a
+  `MAV_CMD_SET_MESSAGE_INTERVAL` naming a message id other than `NAMED_VALUE_INT` (252) is
+  answered `COMMAND_ACK` / `MAV_RESULT_DENIED` for the same reason: no `COMMAND_LONG`
+  leaves this sub-switch unacknowledged. Anything else — a `msgid` this outer switch does
+  not recognise at all — falls to `default` and produces a `STATUSTEXT` warning.
 - The same task also carries the periodic telemetry that used to run as two
   separate tasks (folded in by `fold-periodic-telemetry-into-mavlink-task`, since
   both did nothing but pack a message and post it on a timer). A
