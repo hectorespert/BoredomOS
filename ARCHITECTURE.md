@@ -371,12 +371,16 @@ silently select the per-byte fallback.
 - `Mavlink` — one instance for both ports — consumes `linkReadQueue` (an
   `InboundMsg` by value, not a pointer) and dispatches on `msg.msgid`, replying on
   the port the item's `chan` names and never the other. Two
-  messages are acted upon: `SYSTEM_TIME` sets the clock from the ground, and
-  `TIMESYNC` with `tc1 == 0` is answered with the satellite's timestamp. Several
-  more (`HEARTBEAT`, `PARAM_REQUEST_LIST`, `COMMAND_LONG`, `REQUEST_DATA_STREAM`,
-  `FILE_TRANSFER_PROTOCOL`) have explicit cases that are deliberately empty — they
-  are the reserved slots for the features in `TODO.md`. Anything else falls to
-  `default` and produces a `STATUSTEXT` warning.
+  messages are acted upon directly: `SYSTEM_TIME` sets the clock from the ground, and
+  `TIMESYNC` with `tc1 == 0` is answered with the satellite's timestamp. `HEARTBEAT`,
+  `PARAM_REQUEST_LIST`, `REQUEST_DATA_STREAM` and `FILE_TRANSFER_PROTOCOL` have explicit
+  cases that are deliberately empty — reserved slots for the features in `TODO.md`.
+  `COMMAND_LONG` is no longer one of them: its own sub-switch on `command.command`
+  answers `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, `MAV_CMD_SET_MESSAGE_INTERVAL` and, since
+  `answer-autopilot-version-requests`, `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES` with
+  `AUTOPILOT_VERSION` followed by `COMMAND_ACK` — every other command it receives still
+  falls through unanswered. Anything else falls to `default` and produces a `STATUSTEXT`
+  warning.
 - The same task also carries the periodic telemetry that used to run as two
   separate tasks (folded in by `fold-periodic-telemetry-into-mavlink-task`, since
   both did nothing but pack a message and post it on a timer). A

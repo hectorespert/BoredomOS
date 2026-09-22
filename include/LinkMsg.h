@@ -17,6 +17,10 @@ enum class LinkMsgKind : uint8_t {
     StatusText,
     CommandAck,
     NamedValueInt,
+    // Carries no payload, like Heartbeat: every AUTOPILOT_VERSION field this
+    // firmware can honestly fill is a compile-time constant, so mavlinkPack()
+    // builds the whole message itself rather than reading one from `intent`.
+    AutopilotVersion,
 };
 
 struct LinkMsg {

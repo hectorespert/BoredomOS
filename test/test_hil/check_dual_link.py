@@ -168,6 +168,39 @@ def test_reply_goes_out_the_port_it_arrived_on(link):
     )
 
 
+def test_autopilot_version_goes_out_the_port_it_arrived_on(link):
+    """An AUTOPILOT_VERSION reply to MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES is
+    not echoed on the other port -- the same claim
+    test_reply_goes_out_the_port_it_arrived_on makes for TIMESYNC, for the
+    mavlink-link requirement answer-autopilot-version-requests adds.
+    """
+    from pymavlink import mavutil
+
+    usb, uart = _both_ports()
+    a, b = _connect(usb, 115200), _connect(uart, DEFAULT_BAUD)
+    try:
+        _collect(a, 1.0)
+        _collect(b, 1.0)
+
+        a.mav.command_long_send(
+            1, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+            mavutil.mavlink.MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES, 0,
+            1, 0, 0, 0, 0, 0, 0,
+        )
+
+        got_a = _collect(a, 5.0, want=["AUTOPILOT_VERSION"])
+        got_b = _collect(b, 5.0, want=["AUTOPILOT_VERSION"])
+    finally:
+        a.close()
+        b.close()
+
+    assert "AUTOPILOT_VERSION" in got_a, "the port that asked did not get AUTOPILOT_VERSION"
+    assert "AUTOPILOT_VERSION" not in got_b, (
+        "the UART received AUTOPILOT_VERSION for a request that arrived on USB; "
+        "replies must leave by the port they came in on"
+    )
+
+
 def test_housekeeping_arming_is_per_port(link):
     """Arming NAMED_VALUE_INT on one port does not arm the other."""
     from pymavlink import mavutil
