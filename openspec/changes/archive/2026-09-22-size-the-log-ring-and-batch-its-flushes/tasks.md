@@ -239,7 +239,13 @@ landed: task 1.1 reads its output, and without it the cluster size is unknown.
   in the file now resolve. Ticked here rather than left open because leaving it unticked
   would read as pending work at archive time, when the only thing it could mean is that the
   proposing commit had not happened.
-- [ ] 6.4 At archive time, carry anything left unticked into `TODO.md` naming this change.
+- [x] 6.4 At archive time, carry anything left unticked into `TODO.md` naming this change.
   5.1 through 5.5 are the likely ones: they need 35 hours of uptime and two power cuts, and
   **if 5.4 and 5.5 are not done, the requirement this change modified has no evidence at
   all** — the entry must say that in those words.
+
+  **Done in the archiving commit.** *Finish what size-the-log-ring-and-batch-its-flushes
+  left open* in `TODO.md` carries all seven: 1.2 (left unmeasured, as the task allowed),
+  and 5.1–5.6, with 5.4 stated in those words — no script observes the loss-bound cut and
+  until it runs the modified requirement has no supporting evidence at all. 5.6 also notes
+  its own dependency on *make-sddata-begin-idempotent*'s 4.3 for a usable baseline.

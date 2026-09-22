@@ -346,6 +346,52 @@ but note the mechanism behind the second half is gone: there is no heap to find 
 in any more, so a deeper queue now costs depth times item size in `.bss`, every byte
 of it.
 
+### Finish what size-the-log-ring-and-batch-its-flushes left open
+
+**Status:** defined
+**Scope:** hands at the board and at the SD card
+
+`openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/` shipped 18
+of its 25 tasks. Everything code-side landed and is verified: `pio run`, `pio run -e libs`,
+`pio test -e libs` (20/20), and `pio test` HIL (25/8/0) all pass with the new 4×1 MiB ring
+and the batched flush. The seven that remain all need the board running unattended for a
+long stretch, or a card pulled, or power physically cut — none of which the implementing
+session had time for. Numbers below are that change's own `tasks.md`.
+
+- **1.2 — how long one rotation took at the old 1 GiB default was never measured.** The
+  task allowed leaving it unticked with a note if no practical file size made it
+  measurable, and that is what happened: nothing was tried before the defaults changed
+  under 2.1, so the number is simply gone now. Not worth chasing on the current, already-
+  shrunk ring — the question was specific to the size being replaced.
+- **5.1 — the ring has never actually rotated on a board doing its job.** Needs at least
+  35 hours of continuous uptime so all four files are reused at least once; ~8.6 h only
+  reaches the first rotation. Everything below depends on this running first.
+- **5.2 — during and after 5.1, confirm rotation costs the board nothing.** The reset
+  reason in the heartbeat's `custom_mode` unchanged, `time_boot_ms` monotonic across every
+  rotation, fault counters no higher than they started. This is the check for the new
+  requirement this change added, *Maintaining the log never resets the board* — a watchdog
+  reset during a rotation would look like a mystery without it.
+- **5.3 — pull the card and confirm the ring for real.** Four files of about 1 MiB each,
+  `index.bin` present and naming one of them, each file parseable on its own with
+  `DFReader` (`ARCHITECTURE.md` §5.2). Also the first evidence `index.bin` is written
+  correctly by a rotation that actually happened, rather than by the Unity suite's
+  1024-byte files.
+- **5.4 — cut power mid-write and confirm the loss bound.** The proposal's BREAKING change
+  is the spec's guarantee moving from "only the incomplete tail is lost" to "no more than
+  one flush interval, about 4 KiB". **No script observes this, and until it is done the
+  modified requirement has no supporting evidence at all** — the same shape of gap
+  *[Finish what replace-messagepack-log-with-dataflash left open]*'s 9.5 left for the
+  requirement this one renamed.
+- **5.5 — repeat 5.4 on a board that has only just started logging.** Confirms the missing
+  stretch is of the same order as 5.4's, which is the spec's *The amount at risk does not
+  grow with uptime* scenario — the property that makes this a bounded policy rather than
+  one that only looks fine on a long run.
+- **5.6 — compare high-water marks against a baseline.** Blocked on more than board time:
+  *[Finish what make-sddata-begin-idempotent left open]*'s 4.3 already found the existing
+  reference figures are single samples, not a range, and therefore cannot support a claim
+  of "unchanged". If that entry's readings are not done first, this one has nothing solid
+  to compare against.
+
 ### Add the GY-87 IMU
 
 **Status:** proposed
@@ -583,7 +629,7 @@ Points to resolve before implementing:
   and after.
 - **Download time.** `LOG_DATA` moves 90 useful bytes in a 111-byte frame, ~4,6 KB/s
   at `LINK_BAUD`. Whether a whole file is viable is set by the ring default, which is
-  where the size criterion lives — `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  where the size criterion lives — `openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/`
   derives it from download time and sets the default to 4 x 1 MiB, which is what makes a
   whole file viable here at all. Serving by offset is supported by the protocol (`LOG_REQUEST_DATA` takes
   `ofs` and `count`) and is worth implementing regardless.
@@ -643,7 +689,7 @@ Points to resolve before implementing:
   and after. FTP's session state is the larger of the two features, so if both land,
   measure with both present.
 - **Download time.** Each FTP packet moves ~239 useful bytes, so a whole ring file is
-  only viable once the ring has a sane default, which `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  only viable once the ring has a sane default, which `openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/`
   supplies: 4 x 1 MiB, derived from this very figure. Reads by offset are
   part of the protocol and let the ground fetch only the stretch of interest.
 - **Consistency of what is served.** The active file is being written while it is
@@ -937,7 +983,7 @@ What that unlocks, in order of value:
 - **`preAllocate()` reserves clusters in the FAT without writing a byte of data.** It is a
   metadata operation, cheap. A file that never grows never sets `F_FILE_DIR_DIRTY`, so its
   directory entry is **never touched in flight** — which **removes** the wear target rather
-  than merely reducing it. `openspec/changes/size-the-log-ring-and-batch-its-flushes/`
+  than merely reducing it. `openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/`
   cuts the directory writes by about 36x by batching the flush; pre-allocation is what would
   take them to zero, and that is the whole remaining value of this entry. madflight pre-allocates 100 MB and calls `truncate()` on close to give back
   what it did not use.
@@ -952,9 +998,9 @@ dependency: measure SdFat's `.bss` and flash against the headroom `scripts/ram_b
 reports (3184 B as of 2026-09-20) before committing to anything. SdFat is configurable
 (`SdFatConfig.h`) and has a reduced mode, so the first question is what the smallest
 useful configuration costs. If it does not fit, this entry closes as "does not fit" and
-`openspec/changes/size-the-log-ring-and-batch-its-flushes/` stands on its own, which it
-can: batching the flush gets about 36x without any new dependency, and pre-allocation is
-what would take the directory writes to zero.
+`openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/` stands on
+its own, which it can: batching the flush gets about 36x without any new dependency, and
+pre-allocation is what would take the directory writes to zero.
 
 ### Put the ring's position in the log data instead of `index.bin`
 
@@ -1320,7 +1366,7 @@ dropped ArduinoJson as a dependency entirely, which also took cppcheck's three
 
 A third left on 2026-09-21, this one actually done: `TEST_FILE_SIZE_MB` is now
 `TEST_FILE_SIZE_BYTES`, renamed by
-`openspec/changes/size-the-log-ring-and-batch-its-flushes/` because that change had to
+`openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/` because that change had to
 alter the value anyway — and it had to raise it from 1024 to **6144**, a value constrained
 from both sides: larger than the 4 KiB flush interval, or a rotation always beats it and
 `close()` syncs so the suite cannot exercise batching at all; and not a multiple of it, or
