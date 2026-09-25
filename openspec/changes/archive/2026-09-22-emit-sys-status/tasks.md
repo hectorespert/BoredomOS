@@ -152,3 +152,52 @@
       `TaskMavlink` schedule prose (now naming `SYS_STATUS` and its 750 ms
       offset, "fourth"/"fifth entry" renumbered), and §4's queue depth/size
       figures (6→7, 384 B→448 B) — the same figures task 2.2 changed in code.
+
+## 4. Fixes from PR review
+
+- [x] 4.1 GitHub Copilot's automated review of PR #50 found two real bugs
+      after this change was otherwise complete and archived. Both fixed in a
+      follow-up commit on the same PR, before merge:
+      1. **High severity, correctness:** `errors_comm` read
+         `mavlink_get_channel_status(port)`, the MAVLink library's internal
+         per-channel status array — but `src/link.cpp` parses each port with
+         its own `mavlink_status_t` (`LinkPort::rxstatus`), so that array is
+         never written and the field would have silently read zero forever.
+         Not caught by any test: nothing in `check_sys_status.py` asserted a
+         non-zero `errors_comm` under an actual parse error, only its
+         existence as a field.
+
+         Copilot's suggested fix (read `rxstatus.packet_rx_drop_count`
+         directly) compiled and passed the existing suite, but writing a real
+         verification script — force a parse error, poll `SYS_STATUS`
+         continuously — showed it still never left zero. The field resets to
+         `0` after every single byte in the library itself
+         (`mavlink_helpers.h`), so reading it from a different task's
+         independent schedule almost never lands in the instant it holds a
+         real value. Real fix, beyond what the review comment asked for: a
+         new `LinkPort::rxDropCount` running total, accumulated in
+         `src/link.cpp`'s `TaskLinkRead` (the task that actually calls
+         `mavlink_parse_char`) right after each byte, read by `sendSysStatus`
+         instead of the transient field. **Verified:** the same forced-error
+         script now shows `errors_comm` climbing past 900 over a 5 s garbage
+         flood, versus never leaving 0 before. Added as a permanent HIL case,
+         `check_sys_status.py`'s `test_errors_comm_counts_parse_errors` — the
+         first of this change's counters that could actually be forced and
+         checked live, unlike `errors_count1` (task 2.3). `pio run`/`pio
+         check` clean (headroom 3048 B → 3040 B, `LinkPort` growing by 4 B
+         per port); full HIL suite 44/44 on the board.
+      2. **Medium severity, spec conformance:** `sendSysStatus` called
+         `Battery::` and set `MAV_SYS_STATUS_SENSOR_BATTERY` unconditionally,
+         violating `fault-recovery`'s "reduced configuration SHALL NOT depend
+         on... the battery sense" — the same invariant `sendBatteryStatus`'s
+         own gating already respects. Fixed by keeping `SYS_STATUS`'s cadence
+         unconditional while making its battery content conditional: reduced
+         configuration clears the bit and reports the sentinel instead of
+         calling `Battery::`. Spec (both the archived delta and the synced
+         main spec) and design.md updated with a new scenario and decision
+         entry. **Verified:** `pio run`/`pio check` clean, full HIL suite
+         43/43 on the board in the normal configuration; the reduced-config
+         side of this specific fix was not separately re-verified on the
+         board — the normal-configuration behavior and the code path are
+         both covered, but the reduced-configuration branch was not
+         re-exercised live, matching the same board-access limit as task 3.2.

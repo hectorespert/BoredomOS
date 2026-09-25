@@ -137,6 +137,48 @@ property of the schedule's interval numbers, not of nominal phase, since
 `TaskMavlink`'s own loop can still align any offsets under jitter) — it only
 avoids a routine, entirely avoidable doubling of traffic every second.
 
+**The reduced configuration does not report the battery sense.** Found by
+GitHub Copilot's PR review, not by this design: `sendSysStatus` was written to
+call `Battery::` and set `MAV_SYS_STATUS_SENSOR_BATTERY` unconditionally,
+which violates the standing `fault-recovery` invariant that the reduced
+configuration "SHALL NOT depend on... the battery sense" — the same reason
+`sendBatteryStatus`'s own schedule entry is disabled there. Fixed by keeping
+`SYS_STATUS`'s cadence unconditional (unlike `BATTERY_STATUS`, which is
+withheld entirely) while making its battery-related content conditional:
+reduced configuration clears the bit and reports the protocol's sentinel
+instead of calling `Battery::`. This preserves both goals rather than
+trading one for the other — the sensor-health bitmap and error counters
+this change is mainly for still reach the ground in reduced mode, without
+creating the dependency the invariant forbids.
+
+**`errors_comm` read from the wrong status object — and that fix alone was
+still not enough.** Also found by Copilot's review: `mavlink_get_channel_status(port)`
+reads the MAVLink library's internal per-channel array, but `src/link.cpp`
+parses each port with its own `mavlink_status_t` (`LinkPort::rxstatus`, passed
+explicitly to `mavlink_parse_char`), so that internal array is never written
+and the field would have silently read zero forever. Reading
+`linkPorts[port].rxstatus.packet_rx_drop_count` instead — the object the
+parser actually updates — was Copilot's suggested fix, but verifying it
+empirically (a HIL script forcing real parse errors while polling `SYS_STATUS`
+continuously) showed `errors_comm` still never left zero even under a
+sustained flood.
+
+The reason: `mavlink_helpers.h` copies `status->parse_error` into the
+caller-supplied `r_mavlink_status` on every single `mavlink_parse_char` call
+and then resets the source to `0` immediately after (`status->parse_error = 0;`),
+regardless of whether that particular byte erred. `rxstatus.packet_rx_drop_count`
+therefore holds a real value only in the microsecond window between an
+erroring byte and the next byte processed — reading it from `sendSysStatus`,
+on `TaskMavlink`'s independent 1 Hz schedule, essentially never lands in that
+window. `TaskLinkRead` (`src/link.cpp`) is the only task positioned to catch
+it: it calls `mavlink_parse_char` for every byte, so it accumulates
+`rxstatus.packet_rx_drop_count` into a new `LinkPort::rxDropCount` running
+total (saturating, single writer per port, read only by `sendSysStatus` — the
+same cross-task pattern already used elsewhere in this file) right after each
+call. `sendSysStatus` reads that instead. Re-verified with the same HIL
+script: `errors_comm` climbed past 900 under a 5 s garbage flood after this
+fix, versus never leaving 0 before it.
+
 ## Risks / Trade-offs
 
 - **The dropped-frame scenario is hard to trigger from the ground under normal

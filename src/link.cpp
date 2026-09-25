@@ -79,6 +79,17 @@ static constexpr int kMaxBytesPerPass = 128;
             if (mavlink_parse_char(port.rx.chan, receivedByte, &port.rx.msg, &port.rxstatus)) {
                 xQueueSend(linkReadQueue, &port.rx, 0);
             }
+
+            // rxstatus.packet_rx_drop_count is the library's own per-call value,
+            // reset to 0 after every mavlink_parse_char call whether or not this
+            // one erred -- accumulated here into a running total because nothing
+            // else ever reads it before it is overwritten. _mav_parse_error()
+            // (mavlink_helpers.h) is called at most once per mavlink_parse_char
+            // invocation, so this is always 0 or 1, never higher -- a plain
+            // saturating increment, not a saturating add, is exactly right.
+            if (port.rxstatus.packet_rx_drop_count > 0 && port.rxDropCount < UINT16_MAX) {
+                port.rxDropCount++;
+            }
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);

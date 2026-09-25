@@ -317,15 +317,35 @@ static void sendBatteryStatus(uint8_t port)
 // reports sensor presence..."). Battery is read here, in TaskMavlink, not in
 // mavlinkPack() -- see the comment on the `battery` extern above: a second
 // task reading lib/Battery would make its unguarded cache shared state.
+// Reduced configuration SHALL NOT depend on the battery sense
+// (specs/fault-recovery/spec.md, "The reduced configuration stays reachable
+// and commandable") -- the same reason sendBatteryStatus's own schedule entry
+// is disabled there. SYS_STATUS itself stays unconditional (the sensor bitmap
+// and error counters matter most exactly when degraded), but its battery
+// fields do not: reduced configuration reports the protocol's "not sent"
+// sentinel and clears MAV_SYS_STATUS_SENSOR_BATTERY instead of calling
+// Battery::.
 static void sendSysStatus(uint8_t port)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::SysStatus;
-    intent.sys_status.sensors = (sdCardAvailable ? MAV_SYS_STATUS_LOGGING : 0)
-        | MAV_SYS_STATUS_SENSOR_BATTERY;
-    intent.sys_status.voltage_mv = battery.millivolts();
-    intent.sys_status.battery_remaining = battery.remaining();
-    intent.sys_status.errors_comm = mavlink_get_channel_status(port)->packet_rx_drop_count;
+    intent.sys_status.sensors = sdCardAvailable ? MAV_SYS_STATUS_LOGGING : 0;
+    if (reducedConfiguration) {
+        intent.sys_status.voltage_mv = UINT16_MAX;
+        intent.sys_status.battery_remaining = -1;
+    } else {
+        intent.sys_status.sensors |= MAV_SYS_STATUS_SENSOR_BATTERY;
+        intent.sys_status.voltage_mv = battery.millivolts();
+        intent.sys_status.battery_remaining = battery.remaining();
+    }
+    // linkPorts[port].rxDropCount, not rxstatus.packet_rx_drop_count directly:
+    // the latter is the MAVLink library's own per-call value, which
+    // src/link.cpp's TaskLinkRead resets to 0 on every mavlink_parse_char call
+    // whether or not that call erred -- reading it here, from a different
+    // task's independent 1 Hz schedule, would see zero except in the
+    // microsecond window right after an erroring byte. rxDropCount is
+    // TaskLinkRead's own running total of the same field, read here instead.
+    intent.sys_status.errors_comm = linkPorts[port].rxDropCount;
     intent.sys_status.errors_count1 = writeDropCount[port];
     enqueueWrite(port, intent);
 }

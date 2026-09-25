@@ -2,10 +2,11 @@
 
 Covers the mavlink-link spec requirement "SYS_STATUS reports sensor
 presence, battery state and link error counters every second"
-(openspec/changes/emit-sys-status/specs/mavlink-link/spec.md) and the
-fault-recovery spec's "A ground station connects after the card was found
-absent" scenario, to the extent a bench with the SD card present can (the
-card-absent side needs the card physically pulled -- see tasks.md 3.2).
+(openspec/specs/mavlink-link/spec.md) and the fault-recovery spec's "A
+ground station connects after the card was found absent" scenario, to the
+extent a bench with the SD card present can (the card-absent side needs the
+card physically pulled -- see the archived
+openspec/changes/archive/2026-09-22-emit-sys-status/tasks.md, 3.2).
 
 Cadence uses link.sample()'s cached 12 s window, like check_telemetry.py.
 Field-content cases listen fresh, the same way check_capabilities.py does.
@@ -113,4 +114,42 @@ def test_battery_fields_match_battery_status(link):
         f"SYS_STATUS battery_remaining={sys_status.battery_remaining}% vs "
         f"BATTERY_STATUS battery_remaining={battery_status.battery_remaining}%, "
         f"{remaining_delta} points apart (tolerance {PERCENT_TOLERANCE} points)"
+    )
+
+
+def test_errors_comm_counts_parse_errors(link):
+    """errors_comm accumulates src/link.cpp's own running total
+    (LinkPort::rxDropCount), not the MAVLink library's per-call
+    rxstatus.packet_rx_drop_count directly -- that field resets to 0 after
+    every single byte, so reading it from SYS_STATUS's independent 1 Hz
+    schedule would almost never observe a nonzero value. Forcing a real
+    parse error (a valid STX followed by bytes that fail the CRC) is how
+    this is told apart from a counter that merely exists but never moves --
+    the same distinction that made the write-queue drop counter's own HIL
+    case (task 2.3, in the archived change) impossible to force convincingly.
+    """
+    def read_errors_comm(timeout=2.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = link.mav.recv_match(
+                type="SYS_STATUS", blocking=True, timeout=max(0.1, deadline - time.time())
+            )
+            if msg is not None:
+                return msg.errors_comm
+        return None
+
+    before = read_errors_comm()
+    assert before is not None, "no SYS_STATUS received"
+
+    garbage = bytes([0xFD] + [0x55] * 60)
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        link.mav.port.write(garbage)
+    link.mav.port.flush()
+
+    after = read_errors_comm()
+    assert after is not None, "no SYS_STATUS received after sending garbage"
+    assert after > before, (
+        f"errors_comm did not increase after forced parse errors: "
+        f"before={before}, after={after}"
     )

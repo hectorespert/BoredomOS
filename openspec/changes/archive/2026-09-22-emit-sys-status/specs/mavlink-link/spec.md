@@ -9,15 +9,21 @@ requirement that a message id other than `NAMED_VALUE_INT` (252) is denied.
 
 `onboard_control_sensors_present`, `_enabled` and `_health` SHALL carry the same
 value for each bit this firmware reports: the SD card's presence in
-`MAV_SYS_STATUS_LOGGING`, and the battery sense's presence, unconditionally set,
-in `MAV_SYS_STATUS_SENSOR_BATTERY`. The real-time clock's presence SHALL NOT be
-represented in these bitmaps; its absence remains reported only through
-`STATUSTEXT`.
+`MAV_SYS_STATUS_LOGGING`, and the battery sense's presence in
+`MAV_SYS_STATUS_SENSOR_BATTERY`, except as the reduced configuration modifies it
+below. The real-time clock's presence SHALL NOT be represented in these
+bitmaps; its absence remains reported only through `STATUSTEXT`.
 
 `voltage_battery` and `battery_remaining` SHALL report the same reading
 `BATTERY_STATUS` reports at that moment, rather than the protocol's "not sent"
 sentinel. `current_battery` SHALL report the protocol's "not sent" sentinel
 (`-1`): this firmware has no current sensor, only the voltage ADC.
+
+The reduced configuration SHALL NOT depend on the battery sense, per the
+`fault-recovery` capability. In that configuration, `MAV_SYS_STATUS_SENSOR_BATTERY`
+SHALL be clear in all three bitmaps, and `voltage_battery` and `battery_remaining`
+SHALL report the protocol's "not sent" sentinel rather than a reading — `SYS_STATUS`
+itself is not withheld the way `BATTERY_STATUS` is, only its battery fields.
 
 `errors_count1` SHALL count, per port and saturating rather than wrapping at its
 maximum, every MAVLink frame this firmware could not queue for transmission on
@@ -49,6 +55,14 @@ count, per port, MAVLink frames received on that port that failed to parse.
   port
 - **THEN** `voltage_battery` and `battery_remaining` report the same battery
   state `BATTERY_STATUS` reports
+
+#### Scenario: The reduced configuration does not report the battery sense
+
+- **WHEN** the firmware is in the reduced configuration
+- **THEN** `MAV_SYS_STATUS_SENSOR_BATTERY` is clear in `onboard_control_sensors_present`,
+  `_enabled` and `_health`
+- **AND** `voltage_battery` and `battery_remaining` report the protocol's "not
+  sent" sentinel rather than a reading
 
 #### Scenario: A dropped outbound frame is counted
 

@@ -64,6 +64,21 @@ struct LinkPort {
     // port's channel number -- mavlink_parse_char is called with it too.
     InboundMsg       rx;
     mavlink_status_t rxstatus;
+
+    // Accumulated separately from rxstatus.packet_rx_drop_count, which the
+    // library resets to 0 after every single byte (mavlink_helpers.h copies
+    // status->parse_error out and clears it on each mavlink_parse_char call) --
+    // reading it from a different task's independent schedule, as
+    // sendSysStatus does, would see zero except in the microsecond window
+    // right after an erroring byte. TaskLinkRead adds rxstatus's per-byte
+    // value in here after every mavlink_parse_char call, so it holds a real
+    // running total. Saturating like writeDropCount, for the same reason: a
+    // wrapped counter reads as 0 -- healthy -- right when it has the most to
+    // report. Written only by this port's own TaskLinkRead, read only by
+    // TaskMavlink's sendSysStatus -- single writer, atomic uint16_t reads, no
+    // mutex needed, same reasoning as every other cross-task flag in this
+    // firmware.
+    uint16_t rxDropCount;
 };
 
 #endif //BOREDOMOS_LINKPORT_H
