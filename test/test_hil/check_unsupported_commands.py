@@ -15,8 +15,9 @@ window, the same way check_capabilities.py does.
 import time
 
 # Any MAV_CMD this firmware's COMMAND_LONG sub-switch never checks against.
-# Deliberately not one of the four it does handle (REQUEST_AUTOPILOT_CAPABILITIES,
-# PREFLIGHT_REBOOT_SHUTDOWN, SET_MESSAGE_INTERVAL, GET_HOME_POSITION).
+# Deliberately not one it does handle (REQUEST_AUTOPILOT_CAPABILITIES,
+# PREFLIGHT_REBOOT_SHUTDOWN, SET_MESSAGE_INTERVAL, GET_MESSAGE_INTERVAL,
+# REQUEST_MESSAGE) or answers by name (GET_HOME_POSITION).
 UNRECOGNISED_COMMAND = "MAV_CMD_DO_SET_MODE"
 
 

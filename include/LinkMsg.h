@@ -22,6 +22,14 @@ enum class LinkMsgKind : uint8_t {
     // builds the whole message itself rather than reading one from `intent`.
     AutopilotVersion,
     SysStatus,
+    // Sent only in reply to MAV_CMD_GET_MESSAGE_INTERVAL.
+    MessageInterval,
+    // Sent only in reply to MISSION_REQUEST_LIST. This firmware holds no
+    // mission, so the count is always 0 and mavlinkPack() writes it itself.
+    MissionCount,
+    // Carries no payload, like AutopilotVersion: every PROTOCOL_VERSION field
+    // is a constant.
+    ProtocolVersion,
 };
 
 struct LinkMsg {
@@ -51,6 +59,8 @@ struct LinkMsg {
         // are always 0 and are not carried through the queue; mavlinkPack()
         // fills them directly.
         struct { uint32_t sensors; uint16_t voltage_mv; int8_t battery_remaining; uint16_t errors_comm; uint16_t errors_count1; } sys_status;
+        struct { int32_t interval_us; uint16_t message_id; } message_interval;
+        struct { uint8_t target_system; uint8_t target_component; uint8_t mission_type; } mission_count;
     };
 };
 

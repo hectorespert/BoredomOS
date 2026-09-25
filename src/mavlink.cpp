@@ -238,6 +238,33 @@ static void sendAutopilotVersion(uint8_t port)
     enqueueWrite(port, intent);
 }
 
+static void sendProtocolVersion(uint8_t port)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::ProtocolVersion;
+    enqueueWrite(port, intent);
+}
+
+static void sendMessageInterval(uint8_t port, uint16_t messageId, int32_t intervalUs)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::MessageInterval;
+    intent.message_interval.message_id = messageId;
+    intent.message_interval.interval_us = intervalUs;
+    enqueueWrite(port, intent);
+}
+
+static void sendMissionCount(uint8_t port, uint8_t targetSystem, uint8_t targetComponent,
+                             uint8_t missionType)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::MissionCount;
+    intent.mission_count.target_system = targetSystem;
+    intent.mission_count.target_component = targetComponent;
+    intent.mission_count.mission_type = missionType;
+    enqueueWrite(port, intent);
+}
+
 extern Battery battery;
 
 extern QueueHandle_t sdWriteQueue;
@@ -537,6 +564,56 @@ void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
             break;
         }
 
+        case LinkMsgKind::ProtocolVersion: {
+            // 200 is MAVLink 2.0 (version * 100). min and max are the same:
+            // this firmware transmits MAVLink 2 on both ports unconditionally,
+            // so it claims no lower version a MAVLink 1 peer could not follow.
+            // Both hashes are zero -- the firmware tracks neither, and a
+            // made-up one is worse than none (as AUTOPILOT_VERSION's unset
+            // fields). static so the arrays live in flash, not on the stack of
+            // the write task.
+            static const uint8_t zeroHash[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            mavlink_msg_protocol_version_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                200, // version
+                200, // min_version
+                200, // max_version
+                zeroHash, // spec_version_hash
+                zeroHash  // library_version_hash
+            );
+            break;
+        }
+
+        case LinkMsgKind::MessageInterval:
+            mavlink_msg_message_interval_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                intent.message_interval.message_id,
+                intent.message_interval.interval_us
+            );
+            break;
+
+        case LinkMsgKind::MissionCount:
+            // count and opaque_id are 0: no mission is held, and 0 is the
+            // field's own "plan ids are not supported".
+            mavlink_msg_mission_count_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                intent.mission_count.target_system,
+                intent.mission_count.target_component,
+                0, // count
+                intent.mission_count.mission_type,
+                0  // opaque_id
+            );
+            break;
+
         case LinkMsgKind::SystemTime:
             mavlink_msg_system_time_pack_chan(
                 1,
@@ -720,6 +797,69 @@ struct ScheduleEntry {
     bool enabled;
 };
 
+// The rows of each port's schedule table, by name, so anything that has to find
+// a message's stream indexes it by what it is and not by where it happens to
+// sit. The initialiser in TaskMavlink lists its entries in this order.
+constexpr uint8_t kHeartbeatScheduleIndex     = 0;
+constexpr uint8_t kSystemTimeScheduleIndex    = 1;
+constexpr uint8_t kBatteryScheduleIndex       = 2;
+constexpr uint8_t kHousekeepingScheduleIndex  = 3;
+constexpr uint8_t kSysStatusScheduleIndex     = 4;
+constexpr uint8_t kScheduleRows               = 5;
+constexpr uint8_t kNoScheduleRow              = 0xFF;
+
+// Which message ids this firmware can be asked about, whether it can send one
+// on request, and which schedule row (if any) streams it. One table for both
+// MAV_CMD_REQUEST_MESSAGE and MAV_CMD_GET_MESSAGE_INTERVAL, so the ids the two
+// commands know cannot drift apart or from the schedule
+// (specs/mavlink-link/spec.md).
+//
+// `send` is null for an id that cannot be sent once. NAMED_VALUE_INT is the
+// only one: housekeeping goes out one value per pass from a per-port cursor,
+// and a one-shot would advance that cursor as a side effect. It is listed all
+// the same because GET_MESSAGE_INTERVAL has to be able to report its armed
+// state.
+//
+// `const` with function pointers to static functions: the linker keeps the
+// whole table in flash, which is what lets this cost no RAM.
+struct MessageEntry {
+    uint16_t id;
+    void (*send)(uint8_t port);
+    uint8_t scheduleRow;
+};
+
+static const MessageEntry kMessages[] = {
+    { MAVLINK_MSG_ID_HEARTBEAT,         sendHeartbeat,        kHeartbeatScheduleIndex    },
+    { MAVLINK_MSG_ID_SYS_STATUS,        sendSysStatus,        kSysStatusScheduleIndex    },
+    { MAVLINK_MSG_ID_SYSTEM_TIME,       sendSystemTime,       kSystemTimeScheduleIndex   },
+    { MAVLINK_MSG_ID_BATTERY_STATUS,    sendBatteryStatus,    kBatteryScheduleIndex      },
+    { MAVLINK_MSG_ID_AUTOPILOT_VERSION, sendAutopilotVersion, kNoScheduleRow             },
+    { MAVLINK_MSG_ID_PROTOCOL_VERSION,  sendProtocolVersion,  kNoScheduleRow             },
+    { MAVLINK_MSG_ID_NAMED_VALUE_INT,   nullptr,              kHousekeepingScheduleIndex },
+};
+
+static const MessageEntry *findMessage(uint16_t id)
+{
+    const MessageEntry *found = nullptr;
+    for (uint8_t i = 0; i < sizeof(kMessages) / sizeof(kMessages[0]) && found == nullptr; ++i) {
+        if (kMessages[i].id == id) found = &kMessages[i];
+    }
+    return found;
+}
+
+// A COMMAND_LONG parameter is a float. Narrowing it straight to uint16_t would
+// read 65538 as 2, so a request for an id that does not exist would be answered
+// as one that does. Anything that is not a whole number in 0..65535 -- NaN
+// included, since every comparison with it is false -- is not an id.
+static bool messageIdFromParam(float param, uint16_t *id)
+{
+    if (!(param >= 0.0f && param <= 65535.0f)) return false;
+    uint16_t narrowed = (uint16_t)param;
+    if ((float)narrowed != param) return false;
+    *id = narrowed;
+    return true;
+}
+
 [[noreturn]] void TaskMavlink(void *pvParameters)
 {
     (void)pvParameters;
@@ -736,7 +876,7 @@ struct ScheduleEntry {
     // and enabled flag are both overwritten by MAV_CMD_SET_MESSAGE_INTERVAL
     // below; these are placeholder values for a disabled entry, not a rate
     // anything sends at. See specs/mavlink-link/spec.md, "off by default".
-    ScheduleEntry schedule[kPortCount][5] = {
+    ScheduleEntry schedule[kPortCount][kScheduleRows] = {
         {
             { sendHeartbeat,     1000, startMs - 1000u, true },
             { sendSystemTime,    1000, startMs - 500u,  true },
@@ -752,7 +892,10 @@ struct ScheduleEntry {
             { sendSysStatus,     1000, startMs - 250u,  true },
         },
     };
-    constexpr uint8_t kHousekeepingScheduleIndex = 3;
+    // Rows sit in the order the k*ScheduleIndex constants name. A reorder here
+    // has to change them too; the HIL cases for GET_MESSAGE_INTERVAL are what
+    // would catch one that did not, by reading a row's interval under the wrong
+    // message id.
 
     // Deliberately NOT an entry in the schedule above. That table is per port and
     // every entry in it emits a message; this emits nothing and is not per port,
@@ -938,6 +1081,66 @@ struct ScheduleEntry {
                             // (design.md's SET_MESSAGE_INTERVAL decision).
                             sendCommandAck(port, command.command, MAV_RESULT_DENIED);
                         }
+                    } else if (command.command == MAV_CMD_REQUEST_MESSAGE) {
+                        uint16_t requestedId;
+                        const MessageEntry *entry =
+                            messageIdFromParam(command.param1, &requestedId) ? findMessage(requestedId) : nullptr;
+
+                        if (entry == nullptr || entry->send == nullptr) {
+                            // Recognised command, valid parameter, but not a
+                            // message this firmware serves on request -- DENIED,
+                            // as SET_MESSAGE_INTERVAL does for an id it does not
+                            // serve. NAMED_VALUE_INT lands here on purpose: it
+                            // has no one-shot form (see kMessages).
+                            sendCommandAck(port, command.command, MAV_RESULT_DENIED);
+                        } else if (entry->scheduleRow != kNoScheduleRow &&
+                                   !schedule[port][entry->scheduleRow].enabled) {
+                            // The message exists but its stream is withheld in
+                            // this configuration -- BATTERY_STATUS in the reduced
+                            // one, where nothing reads the battery. A message of
+                            // zeros would be a false reading. The state can clear
+                            // (the once-only retry reboot), which is what this
+                            // result means.
+                            sendCommandAck(port, command.command, MAV_RESULT_TEMPORARILY_REJECTED);
+                        } else {
+                            // ACK first, then the message, the order
+                            // GET_MESSAGE_INTERVAL's definition gives and the one
+                            // this command takes too (design.md, "Reply order").
+                            // The REQUEST_AUTOPILOT_CAPABILITIES branch above
+                            // sends its data first and keeps doing so.
+                            sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
+                            entry->send(port);
+                        }
+                    } else if (command.command == MAV_CMD_GET_MESSAGE_INTERVAL) {
+                        uint16_t requestedId;
+                        if (!messageIdFromParam(command.param1, &requestedId)) {
+                            sendCommandAck(port, command.command, MAV_RESULT_DENIED);
+                        } else {
+                            // ACK, then MESSAGE_INTERVAL: the order the command's
+                            // own definition gives.
+                            sendCommandAck(port, command.command, MAV_RESULT_ACCEPTED);
+
+                            // 0 is the field's "not available": an id this
+                            // firmware neither streams nor serves on request.
+                            // -1 is "off": a message it can send but is not
+                            // streaming on this port now. The interval is read
+                            // from the entry that drives the emission, so the
+                            // value reported cannot differ from the one in use.
+                            // interval_ms is at most what a SET request's int32
+                            // microseconds allow, so *1000 stays inside int32.
+                            int32_t intervalUs = 0;
+                            const MessageEntry *entry = findMessage(requestedId);
+                            if (entry != nullptr) {
+                                intervalUs = -1;
+                                if (entry->scheduleRow != kNoScheduleRow) {
+                                    const ScheduleEntry &row = schedule[port][entry->scheduleRow];
+                                    if (row.enabled) {
+                                        intervalUs = (int32_t)(row.interval_ms * 1000u);
+                                    }
+                                }
+                            }
+                            sendMessageInterval(port, requestedId, intervalUs);
+                        }
                     } else {
                         // Every command this switch does not recognise at
                         // all -- including MAV_CMD_GET_HOME_POSITION, which
@@ -952,6 +1155,18 @@ struct ScheduleEntry {
 
                 case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
                     break;
+
+                case MAVLINK_MSG_ID_MISSION_REQUEST_LIST: {
+                    // No mission of any type is held, so the honest answer is a
+                    // count of zero, for the type asked about and to whoever
+                    // asked. This is not the mission protocol: nothing that
+                    // transfers an item is handled, and no capability bit says
+                    // otherwise.
+                    mavlink_mission_request_list_t request;
+                    mavlink_msg_mission_request_list_decode(&msg, &request);
+                    sendMissionCount(port, msg.sysid, msg.compid, request.mission_type);
+                    break;
+                }
 
                 case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
                     break;

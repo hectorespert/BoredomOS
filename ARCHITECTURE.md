@@ -384,8 +384,22 @@ silently select the per-byte fallback.
   `COMMAND_ACK` / `MAV_RESULT_UNSUPPORTED` instead of falling through unanswered, and a
   `MAV_CMD_SET_MESSAGE_INTERVAL` naming a message id other than `NAMED_VALUE_INT` (252) is
   answered `COMMAND_ACK` / `MAV_RESULT_DENIED` for the same reason: no `COMMAND_LONG`
-  leaves this sub-switch unacknowledged. Anything else — a `msgid` this outer switch does
-  not recognise at all — falls to `default` and produces a `STATUSTEXT` warning.
+  leaves this sub-switch unacknowledged. Since `answer-message-requests` the sub-switch
+  also answers `MAV_CMD_REQUEST_MESSAGE` (a one-shot of the requested message) and
+  `MAV_CMD_GET_MESSAGE_INTERVAL` (a `MESSAGE_INTERVAL` carrying the rate that message
+  really has on the port that asked), and the outer switch answers `MISSION_REQUEST_LIST`
+  with a `MISSION_COUNT` of zero — an answer, not a mission protocol: no item message is
+  handled and `AUTOPILOT_VERSION.capabilities` keeps every mission bit clear. Both commands
+  read one `const` table (`kMessages`, flash-resident) that maps a message id to its
+  one-shot sender and to its row in the schedule table below, so the ids they know and the
+  rates they report cannot drift from what is actually sent; a row that is disabled (the
+  battery's in the reduced configuration) reports `-1` and is refused with
+  `MAV_RESULT_TEMPORARILY_REJECTED`, `NAMED_VALUE_INT` has no one-shot form and is
+  `DENIED`, and a message-id parameter that is not a whole number in 0–65535 is `DENIED`
+  rather than narrowed to 16 bits. The reply to either command is the `COMMAND_ACK` first
+  and the message second, unlike `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES`, which sends its
+  data first. Anything else — a `msgid` this outer switch does not recognise at all — falls
+  to `default` and produces a `STATUSTEXT` warning.
 - The same task also carries the periodic telemetry that used to run as two
   separate tasks (folded in by `fold-periodic-telemetry-into-mavlink-task`, since
   both did nothing but pack a message and post it on a timer). A
