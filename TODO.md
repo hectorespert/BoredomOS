@@ -392,6 +392,43 @@ session had time for. Numbers below are that change's own `tasks.md`.
   of "unchanged". If that entry's readings are not done first, this one has nothing solid
   to compare against.
 
+### Finish what answer-message-requests left open
+
+**Status:** defined
+**Scope:** hands at the board, and a USB-TTL adapter on D0/D1
+
+`openspec/changes/archive/2026-09-25-answer-message-requests/` shipped 16 of its 18 tasks.
+The code, the HIL module `test/test_hil/check_message_requests.py` and the docs landed and
+are verified: `pio run` on both environments, `pio check` (no new finding) and the HIL suite
+(58 cases, 45 passing, the rest skipped as listed here) all pass. What remains is four spec
+scenarios whose HIL cases are written, load under `run.py --list` and **have never executed**,
+because each needs something the implementing session did not have. Until they run, the four
+read as contract in `openspec/specs/mavlink-link/spec.md` and are unproven. Numbers below are
+that change's own `tasks.md`.
+
+- **3.4, reduced configuration — `BATTERY_STATUS` requested with no battery reading, and
+  `GET_MESSAGE_INTERVAL` for id 147 reporting `-1` there.** The case is
+  `test_battery_status_requested_in_the_reduced_configuration`. It needs the board latched
+  into the reduced configuration (remove the SD card and reset, as
+  `check_housekeeping.py`'s reduced case describes) and the card put back afterwards. The
+  expected result is `MAV_RESULT_TEMPORARILY_REJECTED`, no `BATTERY_STATUS` on the link, and
+  `interval_us` of `-1`. Check `custom_mode` first: `check_telemetry.py`'s
+  `test_battery_status_every_2s` fails rather than skips in that state.
+- **3.4, two ports — a request with a broadcast target address answered on the requesting
+  port only, and the housekeeping interval reported per port.** The cases are
+  `test_requested_message_goes_out_the_port_it_was_requested_on` and
+  `test_message_interval_is_reported_per_port` in `check_dual_link.py`, which need
+  `HIL_UART_PORT` pointing at an adapter on D0/D1 with the board's USB port attached too.
+- **4.4 — the closing statement of what ran.** Its content is this entry: nothing else was
+  left out. Once the three cases above have run, record it against the archived change's
+  `tasks.md` and delete this entry.
+
+Not left open, though the same session's whole-suite runs were noisy: two full HIL runs
+reported cadence and clock failures ("4 messages in 1022 s" for a 12 s window) while the
+host slept mid-run, and those cases pass run alone. Worth running the suite under
+`caffeinate -i` from the start, or keeping the machine awake, so that a real regression is
+not read as that.
+
 ### Add the GY-87 IMU
 
 **Status:** proposed
@@ -841,20 +878,30 @@ firmware does not otherwise handle, including `MAV_CMD_GET_HOME_POSITION`, now g
 `COMMAND_ACK` / `MAV_RESULT_UNSUPPORTED`, and `MAV_CMD_SET_MESSAGE_INTERVAL` naming a
 message id other than `NAMED_VALUE_INT` (252) gets `COMMAND_ACK` / `MAV_RESULT_DENIED`.
 `PARAM_REQUEST_LIST` and `REQUEST_DATA_STREAM` are untouched — they are not
-`COMMAND_LONG` sub-commands, so that change did not reach them. The rest of this entry
-is still open.
+`COMMAND_LONG` sub-commands, so that change did not reach them.
+
+**`MAV_CMD_REQUEST_MESSAGE` (512), `MAV_CMD_GET_MESSAGE_INTERVAL` (510) with
+`MESSAGE_INTERVAL` (244), `PROTOCOL_VERSION` (300), and `MISSION_REQUEST_LIST` answered
+with an empty `MISSION_COUNT` are picked up by `answer-message-requests`.** What is
+still open here is the rest: `PARAM_REQUEST_LIST`, `REQUEST_DATA_STREAM`, the FTP case,
+and which commands beyond those handled deserve real support. `PARAM_REQUEST_LIST` cannot
+be answered "empty": the parameter protocol has no way to say zero parameters, and
+MAVProxy re-issues its fetch for as long as it holds none (`mavproxy_param.py`,
+`fetch_check`), so it stays deliberately empty until the parameter protocol below is
+picked up.
 
 To decide:
 
-- Which commands, beyond the four already handled, are really supported and which
+- Which commands, beyond those already handled, are really supported and which
   stay explicitly rejected with `MAV_RESULT_UNSUPPORTED`.
 - **Telemetry rates from the ground.** Today they are hard-wired in `TaskMavlink`'s
   schedule table (`fold-periodic-telemetry-into-mavlink-task`). Rather than
   implementing `REQUEST_DATA_STREAM`,
   which is deprecated, `MAV_CMD_SET_MESSAGE_INTERVAL` (511) with `MESSAGE_INTERVAL`
-  (244) is the current mechanism. It matters over a narrow radio link, and even more
-  so once *[Download the flight log over the MAVLink log protocol]* or *[Serve the SD
-  card over MAVLink FTP]* lands and competes for it.
+  (244) is the current mechanism; `answer-message-requests` lets the ground *read* an
+  interval back, but `SET` still accepts only message id 252. It matters over a narrow
+  radio link, and even more so once *[Download the flight log over the MAVLink log
+  protocol]* or *[Serve the SD card over MAVLink FTP]* lands and competes for it.
 - The parameter protocol has its own entry:
   *[Implement the MAVLink parameter protocol]*.
 
@@ -1295,7 +1342,8 @@ misleading fields. No new hardware is needed to fix a good part of it:
   pointer arithmetic...]*, the design problem is that the `default` branch of the switch
   answers the ground with a text message **for every inbound message not covered**. A
   talkative GCS continuously sends things the switch does not cover
-  (`MISSION_REQUEST_LIST`, `PARAM_REQUEST_READ`, `MISSION_COUNT`...), so the satellite
+  (`PARAM_REQUEST_READ`, `MISSION_COUNT`... — `MISSION_REQUEST_LIST` stopped being one
+  with `answer-message-requests`), so the satellite
   spends its time flooding a narrow link with complaints. Take it out of there and
   reserve `STATUSTEXT` for what deserves a warning: an SD failure, and — since
   `openspec/changes/archive/2026-09-13-add-degraded-mode` — the cause of the last reset,

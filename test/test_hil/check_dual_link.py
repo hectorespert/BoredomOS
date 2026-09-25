@@ -261,3 +261,98 @@ def test_housekeeping_arming_is_per_port(link):
     assert "NAMED_VALUE_INT" not in got_b, (
         "the unarmed port sent NAMED_VALUE_INT; arming must be per port"
     )
+
+
+def test_requested_message_goes_out_the_port_it_was_requested_on(link):
+    """MAV_CMD_REQUEST_MESSAGE with the target-address parameter set to broadcast (2)
+    is still answered on the requesting port only, for the mavlink-link requirement
+    answer-message-requests adds. AUTOPILOT_VERSION is used because it is never
+    periodic, so one on the other port could only be a stray reply."""
+    from pymavlink import mavutil
+
+    usb, uart = _both_ports()
+    a, b = _connect(usb, 115200), _connect(uart, DEFAULT_BAUD)
+    try:
+        _collect(a, 1.0)
+        _collect(b, 1.0)
+
+        a.mav.command_long_send(
+            1, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+            mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE, 0,
+            float(mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION), 0, 0, 0, 0, 0,
+            2,  # target address: broadcast
+        )
+
+        want = ["AUTOPILOT_VERSION", "COMMAND_ACK"]
+        got_a = _collect(a, 5.0, want=want)
+        got_b = _collect(b, 5.0)
+    finally:
+        a.close()
+        b.close()
+
+    assert "AUTOPILOT_VERSION" in got_a, "the port that asked did not get AUTOPILOT_VERSION"
+    acks = [
+        m for m in got_a.get("COMMAND_ACK", [])
+        if m.command == mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE
+    ]
+    assert acks and acks[0].result == mavutil.mavlink.MAV_RESULT_ACCEPTED, (
+        "the port that asked did not get an ACCEPTED COMMAND_ACK"
+    )
+    assert "AUTOPILOT_VERSION" not in got_b, (
+        "the UART received AUTOPILOT_VERSION for a request that arrived on USB, "
+        "despite a broadcast target address; replies leave by the port they came in on"
+    )
+    stray = [
+        m for m in got_b.get("COMMAND_ACK", [])
+        if m.command == mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE
+    ]
+    assert not stray, "the UART received a COMMAND_ACK for a request that arrived on USB"
+
+
+def test_message_interval_is_reported_per_port(link):
+    """The housekeeping interval one port armed is what that port reports, and the other
+    port, which nobody armed, reports the stream off."""
+    from pymavlink import mavutil
+
+    usb, uart = _both_ports()
+    a, b = _connect(usb, 115200), _connect(uart, DEFAULT_BAUD)
+    named = float(mavutil.mavlink.MAVLINK_MSG_ID_NAMED_VALUE_INT)
+
+    def interval_on(conn):
+        conn.mav.command_long_send(
+            1, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+            mavutil.mavlink.MAV_CMD_GET_MESSAGE_INTERVAL, 0, named, 0, 0, 0, 0, 0, 0,
+        )
+        got = _collect(conn, 3.0, want=["MESSAGE_INTERVAL"])
+        intervals = [m for m in got.get("MESSAGE_INTERVAL", []) if m.message_id == 252]
+        assert intervals, "no MESSAGE_INTERVAL for NAMED_VALUE_INT"
+        return intervals[0].interval_us
+
+    try:
+        _collect(a, 1.0)
+        _collect(b, 1.0)
+
+        a.mav.command_long_send(
+            1, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+            named, 2_000_000, 0, 0, 0, 0, 0,
+        )
+        _collect(a, 1.0)
+
+        on_a = interval_on(a)
+        on_b = interval_on(b)
+    finally:
+        try:
+            a.mav.command_long_send(
+                1, mavutil.mavlink.MAV_COMP_ID_AUTOPILOT1,
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                named, -1, 0, 0, 0, 0, 0,
+            )
+            _collect(a, 0.5)
+        except Exception:
+            pass
+        a.close()
+        b.close()
+
+    assert on_a == 2_000_000, f"the port that armed housekeeping reports {on_a}, expected 2000000"
+    assert on_b == -1, f"the port nobody armed reports {on_b}, expected -1"
