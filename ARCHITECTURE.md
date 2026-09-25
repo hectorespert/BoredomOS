@@ -44,8 +44,8 @@ flowchart LR
         SDW["TaskSdWrite<br/>LOWEST · 256 w"]
 
         RQ[["linkReadQueue<br/>8 × {chan, mavlink_message_t}"]]
-        UWQ[["uartWriteQueue<br/>6 × LinkMsg"]]
-        BWQ[["usbWriteQueue<br/>6 × LinkMsg"]]
+        UWQ[["uartWriteQueue<br/>7 × LinkMsg"]]
+        BWQ[["usbWriteQueue<br/>7 × LinkMsg"]]
         DQ[["sdWriteQueue<br/>4 × SdRecord"]]
 
         BAT["Battery<br/>(lib)"]
@@ -179,7 +179,7 @@ deleted `TaskCli`.
 | `UsbRead` | `src/link.cpp` | 128 w | HIGH | polls every 10 ms, at most 128 B a pass | yes |
 | `UartWrite` | `src/link.cpp` | 384 w | HIGH | blocks on `uartWriteQueue` | yes |
 | `UsbWrite` | `src/link.cpp` | 384 w | HIGH | blocks on `usbWriteQueue` | yes |
-| `Mavlink` | `src/mavlink.cpp` | 384 w | HIGH | blocks on `linkReadQueue`, wakes at least once a second for each port's schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
+| `Mavlink` | `src/mavlink.cpp` | 384 w | HIGH | blocks on `linkReadQueue`, wakes at least once a second for each port's schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `SYS_STATUS` at 1 Hz, 750 ms behind `HEARTBEAT`; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
 | `TaskLogger` | `src/logger.cpp` | 160 w | LOW | every 1 s | no, and not with no SD card either |
 | `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
 
@@ -291,8 +291,8 @@ transport (`src/link.cpp`) now does the final packing step.
 
 Their storage is `depth x sizeof(item)`, entirely in `.bss`, and none of them
 touches the FreeRTOS heap: `linkReadQueueStorage` is 8 x 292 = 2336 B, and each of
-`uartWriteQueueStorage` and `usbWriteQueueStorage` is 6 x 64 = 384 B — depth 6 since
-`improve-clock-synchronisation` added a second boot text and an event-driven one, whose
+`uartWriteQueueStorage` and `usbWriteQueueStorage` is 7 x 64 = 448 B — depth 7 since
+`emit-sys-status` added a fifth independently-clocked schedule entry, whose
 derivation is in `src/main.cpp` beside the storage. There is no producer/consumer margin
 to add on top — with a by-value queue, an item "held before send" or "held after
 receive" is simply a local on that task's own stack, not a shared block, so the
@@ -398,8 +398,13 @@ silently select the per-byte fallback.
   the wire, exactly as when they alternated on their own `vTaskDelayUntil`.
   `BATTERY_STATUS` fires every 2000 ms, reading `lib/Battery`, and its schedule
   entry is the one disabled in the reduced configuration — the withholding is a
-  table flag now, not a task `setup()` chooses not to create.
-- A fourth entry publishes housekeeping — free heap, minimum-ever-free heap, and
+  table flag now, not a task `setup()` chooses not to create. `SYS_STATUS` fires
+  every 1000 ms too (`emit-sys-status`), unconditional like `HEARTBEAT` and
+  `SYSTEM_TIME` rather than withheld like `BATTERY_STATUS` — the reduced
+  configuration is exactly when its sensor-health bitmap and error counters
+  matter most — with its own 750 ms offset from `HEARTBEAT` so the two are not
+  due on the same pass every single second.
+- A fifth entry publishes housekeeping — free heap, minimum-ever-free heap, and
   each live task's stack high-water mark — as one `NAMED_VALUE_INT` (252) per
   pass, round-robin, cycling back to the start after the last live value. It
   starts disabled **on each port independently**: nothing is sent on a port unless
@@ -408,7 +413,7 @@ silently select the per-byte fallback.
   interval (microseconds on the wire, converted to milliseconds here) is floored
   at 1000 ms — a faster request is answered `COMMAND_ACK` / `MAV_RESULT_DENIED`,
   not silently clamped. The floor holds the cadence guarantee above and bounds
-  how often this entry can coincide with the other three on one pass, which is
+  how often this entry can coincide with the other four on one pass, which is
   what each write queue's depth (§4) is sized against. Each port keeps its own
   armed flag, interval and position in the cycle, so arming one leaves the other
   alone. The armed state is session-scoped, not persisted: a reset returns every

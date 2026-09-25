@@ -51,6 +51,7 @@ constexpr uint64_t kCapabilityMavlink2 = 8192;
 extern SystemTime systemTime;
 
 extern bool reducedConfiguration;
+extern bool sdCardAvailable;
 extern Recovery::ResetReason previousResetReason;
 extern Recovery::BootPhase previousBootPhase;
 
@@ -91,10 +92,25 @@ static uint32_t packCustomMode()
         | ((uint32_t)cumulative << 24);
 }
 
+// Per port, saturating rather than wrapping: a wrapped counter would read as
+// 0 -- "healthy" -- right after the port with the most drops accumulated the
+// most of them (specs/mavlink-link/spec.md, "SYS_STATUS reports..."). Written
+// and read only from TaskMavlink, so no cross-task access to guard.
+static uint16_t writeDropCount[kPortCount] = {0, 0};
+
+static void enqueueWrite(uint8_t port, const LinkMsg &intent)
+{
+    if (xQueueSend(linkPorts[port].writeQueue, &intent, 0) != pdPASS) {
+        if (writeDropCount[port] < UINT16_MAX) {
+            writeDropCount[port]++;
+        }
+    }
+}
+
 static void sendHeartbeat(uint8_t port) {
     LinkMsg intent;
     intent.kind = LinkMsgKind::Heartbeat;
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 static void sendSystemTime(uint8_t port)
@@ -109,7 +125,7 @@ static void sendSystemTime(uint8_t port)
     intent.system_time.unix_usec =
         systemTime.source() == SystemTime::Source::None ? 0 : systemTime.getUnixTimeUsec();
     intent.system_time.boot_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 static void sendStatusText(uint8_t port, const char* text, uint8_t severity)
@@ -119,7 +135,7 @@ static void sendStatusText(uint8_t port, const char* text, uint8_t severity)
     intent.statustext.severity = severity;
     strncpy(intent.statustext.text, text, sizeof(intent.statustext.text) - 1);
     intent.statustext.text[sizeof(intent.statustext.text) - 1] = '\0';
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 static const char* resetReasonText(Recovery::ResetReason reason)
@@ -212,14 +228,14 @@ static void sendCommandAck(uint8_t port, uint16_t command, uint8_t result)
     intent.kind = LinkMsgKind::CommandAck;
     intent.command_ack.command = command;
     intent.command_ack.result = result;
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 static void sendAutopilotVersion(uint8_t port)
 {
     LinkMsg intent;
     intent.kind = LinkMsgKind::AutopilotVersion;
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 extern Battery battery;
@@ -293,7 +309,45 @@ static void sendBatteryStatus(uint8_t port)
     intent.kind = LinkMsgKind::BatteryStatus;
     intent.battery.millivolts = battery.millivolts();
     intent.battery.remaining = battery.remaining();
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
+}
+
+// sensors carries the one bitmap value this firmware reports for
+// present/enabled/health alike (specs/mavlink-link/spec.md, "SYS_STATUS
+// reports sensor presence..."). Battery is read here, in TaskMavlink, not in
+// mavlinkPack() -- see the comment on the `battery` extern above: a second
+// task reading lib/Battery would make its unguarded cache shared state.
+// Reduced configuration SHALL NOT depend on the battery sense
+// (specs/fault-recovery/spec.md, "The reduced configuration stays reachable
+// and commandable") -- the same reason sendBatteryStatus's own schedule entry
+// is disabled there. SYS_STATUS itself stays unconditional (the sensor bitmap
+// and error counters matter most exactly when degraded), but its battery
+// fields do not: reduced configuration reports the protocol's "not sent"
+// sentinel and clears MAV_SYS_STATUS_SENSOR_BATTERY instead of calling
+// Battery::.
+static void sendSysStatus(uint8_t port)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::SysStatus;
+    intent.sys_status.sensors = sdCardAvailable ? MAV_SYS_STATUS_LOGGING : 0;
+    if (reducedConfiguration) {
+        intent.sys_status.voltage_mv = UINT16_MAX;
+        intent.sys_status.battery_remaining = -1;
+    } else {
+        intent.sys_status.sensors |= MAV_SYS_STATUS_SENSOR_BATTERY;
+        intent.sys_status.voltage_mv = battery.millivolts();
+        intent.sys_status.battery_remaining = battery.remaining();
+    }
+    // linkPorts[port].rxDropCount, not rxstatus.packet_rx_drop_count directly:
+    // the latter is the MAVLink library's own per-call value, which
+    // src/link.cpp's TaskLinkRead resets to 0 on every mavlink_parse_char call
+    // whether or not that call erred -- reading it here, from a different
+    // task's independent 1 Hz schedule, would see zero except in the
+    // microsecond window right after an erroring byte. rxDropCount is
+    // TaskLinkRead's own running total of the same field, read here instead.
+    intent.sys_status.errors_comm = linkPorts[port].rxDropCount;
+    intent.sys_status.errors_count1 = writeDropCount[port];
+    enqueueWrite(port, intent);
 }
 
 // Housekeeping telemetry -- free heap, minimum-ever-free heap, and each live
@@ -418,7 +472,7 @@ static void sendHousekeeping(uint8_t port)
     intent.kind = LinkMsgKind::NamedValueInt;
     intent.named_value_int.name = name;
     intent.named_value_int.value = value;
-    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+    enqueueWrite(port, intent);
 }
 
 // The only function in the firmware outside this file that may call a
@@ -524,6 +578,37 @@ void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
             break;
         }
 
+        case LinkMsgKind::SysStatus:
+            // load, drop_rate_comm and errors_count2..4 are always 0: this
+            // firmware has no CPU-load measurement and no source for the
+            // other three (specs/mavlink-link/spec.md). current_battery is
+            // the protocol's "not sent" sentinel: no current sensor exists,
+            // only the voltage ADC. The *_extended bitmaps are always 0:
+            // nothing this firmware reports needs the extended sensor set.
+            mavlink_msg_sys_status_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                intent.sys_status.sensors,
+                intent.sys_status.sensors,
+                intent.sys_status.sensors,
+                0, // load
+                intent.sys_status.voltage_mv,
+                -1, // current_battery
+                intent.sys_status.battery_remaining,
+                0, // drop_rate_comm
+                intent.sys_status.errors_comm,
+                intent.sys_status.errors_count1,
+                0, // errors_count2
+                0, // errors_count3
+                0, // errors_count4
+                0, // onboard_control_sensors_present_extended
+                0, // onboard_control_sensors_enabled_extended
+                0  // onboard_control_sensors_health_extended
+            );
+            break;
+
         case LinkMsgKind::TimesyncReply:
             mavlink_msg_timesync_pack_chan(
                 1,
@@ -612,6 +697,18 @@ extern RTC_DS1307 rtc;
 // the two keep leaving 500 ms apart, exactly as when they alternated on one
 // vTaskDelayUntil.
 //
+// sendSysStatus is unconditional too, unlike sendBatteryStatus: the reduced
+// configuration is exactly when a ground station most needs the sensor-health
+// bitmap and the error counters, not less (specs/mavlink-link/spec.md).
+// Seeded 250 ms behind sendSystemTime (750 ms behind sendHeartbeat) rather
+// than sharing sendHeartbeat's own seed, so the two do not become due on the
+// same pass every single second -- the same reasoning sendSystemTime's own
+// 500 ms offset already follows. This is about spreading routine traffic
+// evenly, not about the write queue's worst-case depth: nothing in this
+// schedule stops any of its entries coinciding regardless of nominal offset,
+// which is what depth 7 in src/main.cpp is sized against (re-derived there,
+// not assumed, for this change).
+//
 // One schedule per port, not one shared. Each port is an independent stream,
 // so each keeps its own last_ms and its own housekeeping arming -- a shared
 // table would make arming one port arm both and the cadences interlock
@@ -639,18 +736,20 @@ struct ScheduleEntry {
     // and enabled flag are both overwritten by MAV_CMD_SET_MESSAGE_INTERVAL
     // below; these are placeholder values for a disabled entry, not a rate
     // anything sends at. See specs/mavlink-link/spec.md, "off by default".
-    ScheduleEntry schedule[kPortCount][4] = {
+    ScheduleEntry schedule[kPortCount][5] = {
         {
             { sendHeartbeat,     1000, startMs - 1000u, true },
             { sendSystemTime,    1000, startMs - 500u,  true },
             { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
             { sendHousekeeping,  1000, startMs,         false },
+            { sendSysStatus,     1000, startMs - 250u,  true },
         },
         {
             { sendHeartbeat,     1000, startMs - 1000u, true },
             { sendSystemTime,    1000, startMs - 500u,  true },
             { sendBatteryStatus, 2000, startMs - 2000u, !reducedConfiguration },
             { sendHousekeeping,  1000, startMs,         false },
+            { sendSysStatus,     1000, startMs - 250u,  true },
         },
     };
     constexpr uint8_t kHousekeepingScheduleIndex = 3;
@@ -904,7 +1003,7 @@ struct ScheduleEntry {
                         intent.timesync.ts1 = timesync.ts1;
                         intent.timesync.target_system = timesync.target_system;
                         intent.timesync.target_component = timesync.target_component;
-                        xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+                        enqueueWrite(port, intent);
                     }
 
                     break;

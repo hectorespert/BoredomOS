@@ -859,39 +859,6 @@ To decide:
   *[Implement the MAVLink parameter protocol]*.
 
 
-### Emit `SYS_STATUS`
-
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `include/SdRecord.h`
-
-`SYS_STATUS` (1) is the most conspicuous absence in the current telemetry. It
-carries the `onboard_control_sensors_present`, `_enabled` and `_health` bitmasks,
-CPU load, battery voltage and percentage, and communication error counters. Every
-GCS shows it front and centre; today the satellite sends none of it.
-
-It fits with two things the firmware already has half done:
-
-- The health bitmasks are the place to express "the SD card failed", "the RTC was
-  lost", "the IMU does not answer".
-  `openspec/changes/archive/2026-09-13-add-degraded-mode` (which consumed *Report the
-  satellite's real state in the heartbeat*) already spends `custom_mode`'s four bytes
-  on the reset reason, the boot phase and two fault counters, and its own design notes
-  that a *continuing* indicator for a missing SD card has nowhere left to go in that
-  field — `SYS_STATUS`'s sensor bitmap is exactly the candidate it points at without
-  adopting it. Both entries share the same source: a centralised health state, which
-  does not exist today.
-- `errors_count1..4` is where to keep the count of sends dropped by a full queue,
-  which are silently lost today. This used to name failed run-time allocations as the
-  other candidate; there are none left to count, and the one that would matter now
-  halts the board through the malloc-failed hook rather than returning to a caller
-  that could tally it.
-
-To decide: which subsystems are declared in `present`/`enabled` (the
-`MAV_SYS_STATUS_SENSOR` enumeration has no entries for "SD card" or "RTC", so the
-closest ones have to be chosen or it has to be accepted that some things are only
-reported through `STATUSTEXT`), and at what rate it is emitted.
-
-
 ### Implement the MAVLink parameter protocol
 
 **Status:** proposed
@@ -1180,9 +1147,12 @@ covers boot; a card that fails or is unmounted later still goes unnoticed.
 
 To decide: having `begin()`/`write()` return a result and `TaskSdWrite` propagate
 it; and how the ground finds out — a `STATUSTEXT`, a field in the heartbeat (whose
-`custom_mode` bytes `add-degraded-mode` already spent on the boot-time state — see
-*Emit `SYS_STATUS`* above), or both. Be careful not to flood the link by repeating
-the warning at 1 Hz.
+`custom_mode` bytes `add-degraded-mode` already spent on the boot-time state), or
+both. `openspec/changes/emit-sys-status` added a sensor-health bitmap to
+`SYS_STATUS`, but it only reports boot-time SD-card presence (`sdCardAvailable`,
+set once in `setup()`) — a card that fails or is unmounted later is not reflected
+there, so it does not close this entry either. Be careful not to flood the link by
+repeating the warning at 1 Hz.
 
 Note that `openspec/changes/make-sddata-begin-idempotent/` is touching `begin()` now and
 deliberately does **not** change its `void` return — it says so in its own Non-Goals. So
