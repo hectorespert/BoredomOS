@@ -66,7 +66,11 @@ change to any existing rate. The identity triple (system `1`, `MAV_COMP_ID_AUTOP
   for. Estimated from those figures, not read from a build: the two write queues go from
   2 × 7 × 64 = 896 B to 2 × 9 × 112 = 2016 B, **+1120 B**; `sdWriteQueue` goes from depth 4
   to 6, +64 B; each queue keeps its one `StaticQueue_t`, unchanged in number. That leaves
-  roughly 1850 B of headroom before stacks. Every task that holds a `LinkMsg` local also
+  roughly 1850 B of headroom before stacks. **Measured once built: `committed 31260 B`,
+  `headroom 1508 B`** — the queues and the `TaskSdWrite` stack grown to 320 words cost 1440 B
+  (task 2.1), and the download's own state 92 B more (task 3.2). That leaves 484 B above the
+  1024 B floor for everything after this change; the user chose this design over the mailbox
+  alternative knowing the figure was at the edge. Every task that holds a `LinkMsg` local also
   grows by 48 B of stack, and `TaskSdWrite` gains a read path of unknown depth on a stack
   with 73 words free. The first code task measures all of this; a stack that has to grow is
   more RAM on top.

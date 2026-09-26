@@ -406,7 +406,12 @@ because each needs something the implementing session did not have. Until they r
 read as contract in `openspec/specs/mavlink-link/spec.md` and are unproven. Numbers below are
 that change's own `tasks.md`.
 
-- **3.4, reduced configuration — `BATTERY_STATUS` requested with no battery reading, and
+- **3.4, reduced configuration — done 2026-09-26.** Run while applying
+  `download-the-flight-log`, with the board latched into the reduced configuration by three
+  quick flashes: `test_battery_status_requested_in_the_reduced_configuration` passed
+  (`TEMPORARILY_REJECTED`, no `BATTERY_STATUS`, `interval_us` -1). Kept here only until the
+  two-port cases below run; what follows is the original note.
+- **(was) 3.4, reduced configuration — `BATTERY_STATUS` requested with no battery reading, and
   `GET_MESSAGE_INTERVAL` for id 147 reporting `-1` there.** The case is
   `test_battery_status_requested_in_the_reduced_configuration`. It needs the board latched
   into the reduced configuration (remove the SD card and reset, as
@@ -429,6 +434,33 @@ host slept mid-run, and those cases pass run alone. Worth running the suite unde
 `caffeinate -i` from the start, or keeping the machine awake, so that a real regression is
 not read as that.
 
+### Finish what download-the-flight-log left open
+
+**Status:** defined
+**Scope:** hands at the board, a way to read the card, and time
+
+`openspec/changes/archive/2026-09-26-download-the-flight-log/` shipped the MAVLink log
+protocol and 16 of its 20 tasks. Verified on the board: MAVProxy's `log list` and
+`log download latest` against the active file, `DFReader` parsing the result, two downloads
+agreeing byte for byte, no gap in the log's 1 Hz record during a download, the reduced
+configuration answering "no logs", and the HIL suite (67 cases, 54 pass, 13 skip, 0 fail).
+What is open, numbered as in that change's `tasks.md`:
+
+- **4.2, the closed-file half.** Download a closed file whole and check it parses. None
+  existed when the change was archived: the Unity suite had just emptied the card, and the
+  first rotation is about 8.6 h of logging away. Download times over the UART were not
+  measured either (no adapter); over USB, about 60 KB/s.
+- **1.4 and 4.3 — an independent read of the card.** Pull it, run a filesystem check, parse
+  every `data*.BIN`, and compare 4.2's downloads byte for byte with the files. Until then the
+  claim that reading the active file never damages it rests on the SD library's own reads (a
+  CRC of what was written against what was read, 89 passes, and a remount).
+- **4.6 — a rotation during a download of the oldest file.** The spec says that download ends
+  early rather than serving bytes of the new file. Implemented, never exercised: it needs a
+  rotation, which a download of about a minute over the UART is unlikely to meet by chance.
+
+RAM after this change: headroom 1508 B, 484 B above the floor — the figure the next change
+that adds a task will meet first.
+
 ### Finish what persist-the-log-ring-position left open
 
 **Status:** defined
@@ -444,8 +476,7 @@ flight firmware:
 - **2.2 — a real rotation, then restarts.** Let the flight firmware fill a file and move on to
   the next (about 8.6 h of logging at the default ring), restart it twice, and confirm the file
   written before the restarts keeps growing and no other file changed. It needs the card read:
-  pulled, which was not possible when the change was archived, or downloaded once
-  `download-the-flight-log` lands.
+  pulled, or — now that `download-the-flight-log` has landed — downloaded over the link.
 
 Cards written before the fix carry a stale first index; the first boot on the fixed firmware
 repeats the fault once and is correct from then on. Nothing works around that.

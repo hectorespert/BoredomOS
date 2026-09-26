@@ -114,9 +114,11 @@ rest of this design is unchanged.
 
 ### One read handle at a time, opened per request
 
-At most one `File` for reading is open at once, across both ports: a second port's request waits
-until the first stream ends or is replaced. That bounds the newlib allocation to one `SdFile` at a
-time, of the same size every time, which does not fragment. It is closed when its stream ends.
+At most one `File` for reading is **held** across passes, for both ports: a second port's request
+waits until the first stream ends or is replaced. A listing, and each new request, opens a second
+handle for as long as it takes to read a size or the 16-byte head `TIME` record, and closes it
+before returning. So the newlib allocation for reading is bounded at two `SdFile`s at once, of the
+same size every time, which does not fragment. The held one is closed when its stream ends.
 
 ### No card, no `TaskSdWrite`
 
@@ -132,9 +134,10 @@ both ports. `src/mavlink.cpp` owns the protocol decisions and touches neither.
 
 ## Risks / Trade-offs
 
-- **RAM: about 1.2 KB of 3 KB headroom, estimated.** → Measured first (task 2.1); if what is left
-  after stacks is too thin to leave room for anything else, switch to the mailbox alternative
-  before writing the rest.
+- **RAM: 1532 B of 3040 B headroom, measured** (1440 B for the queues and the stack, 92 B for
+  the download's state), leaving 1508 B — 484 B above the floor. The mailbox alternative was put
+  back to the user at that point and declined; any later change that adds a task will meet this
+  figure first.
 - **`TaskSdWrite`'s stack.** It gains a 112-byte `LinkMsg` local and a read path through the SD
   library whose depth is unknown, on 73 free words. → Its high-water mark is read after a full
   download; growing it is expected and is more RAM.

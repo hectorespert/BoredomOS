@@ -41,12 +41,12 @@ flowchart LR
         BW["UsbWrite<br/>HIGH · 384 w"]
         MV["Mavlink<br/>HIGH · 384 w"]
         LG["TaskLogger<br/>LOW · 160 w"]
-        SDW["TaskSdWrite<br/>LOWEST · 256 w"]
+        SDW["TaskSdWrite<br/>LOWEST · 320 w"]
 
         RQ[["linkReadQueue<br/>8 × {chan, mavlink_message_t}"]]
-        UWQ[["uartWriteQueue<br/>7 × LinkMsg"]]
-        BWQ[["usbWriteQueue<br/>7 × LinkMsg"]]
-        DQ[["sdWriteQueue<br/>4 × SdRecord"]]
+        UWQ[["uartWriteQueue<br/>9 × LinkMsg"]]
+        BWQ[["usbWriteQueue<br/>9 × LinkMsg"]]
+        DQ[["sdWriteQueue<br/>6 × SdRecord"]]
 
         BAT["Battery<br/>(lib)"]
         ST["SystemTime<br/>(lib)"]
@@ -181,7 +181,7 @@ deleted `TaskCli`.
 | `UsbWrite` | `src/link.cpp` | 384 w | HIGH | blocks on `usbWriteQueue` | yes |
 | `Mavlink` | `src/mavlink.cpp` | 384 w | HIGH | blocks on `linkReadQueue`, wakes at least once a second for each port's schedule (`HEARTBEAT`/`SYSTEM_TIME` at 1 Hz, 500 ms apart; `SYS_STATUS` at 1 Hz, 750 ms behind `HEARTBEAT`; `BATTERY_STATUS` every 2 s, withheld in the reduced configuration) | yes, minus `BATTERY_STATUS` |
 | `TaskLogger` | `src/logger.cpp` | 160 w | LOW | every 1 s | no, and not with no SD card either |
-| `TaskSdWrite` | `src/sdwrite.cpp` | 256 w | LOWEST | blocks on `sdWriteQueue` | no, and not with no SD card either |
+| `TaskSdWrite` | `src/sdwrite.cpp` | 320 w | LOWEST | blocks on `sdWriteQueue`; while a log download is under way, looks every tick and sends one chunk per pass | no, and not with no SD card either |
 
 The two readers sit at different priorities and the reason is the hardware's, not
 a preference: D0/D1 has no flow control wired, so bytes not drained in time are
@@ -257,6 +257,13 @@ because the flight log's battery record has to come from `TaskMavlink`, the task
 already reads `lib/Battery`, and CI forbids run-time allocation in that file. A
 heap-pointer producer there was simply not available.
 
+One qualification, older than this section's claim and easy to miss: the SD library
+allocates each open `File`'s `SdFile` with `malloc`, from **newlib's** heap (the 8192 B
+`.heap` section), not FreeRTOS's. Every open of `index.bin` and of a log file does it,
+and so does a log download (§5.2), which holds at most two at once and frees each on
+close. "Nothing allocates" is true of this firmware's own code and of the FreeRTOS heap;
+it is not true of the SD library underneath.
+
 The consequence is worth stating plainly: **the FreeRTOS heap has no users.**
 `configTOTAL_HEAP_SIZE` is `0x0`, and the linker drops `ucHeap`, `prvHeapInit` and
 the allocator itself from the image because nothing references them. A run-time
@@ -279,10 +286,11 @@ asked. One queue serves both readers rather than one each — a second 8-deep
 message queue would cost 2328 B to distinguish what the tag distinguishes for 8.
 Two producers cost nothing extra here, because a by-value queue has no
 producer-held block to reserve.
-Each port's write queue element is `LinkMsg` (`include/LinkMsg.h`, 64 B) — a tagged
+Each port's write queue element is `LinkMsg` (`include/LinkMsg.h`, 112 B) — a tagged
 union of what a producer *means* (a `HEARTBEAT` needs no payload at all; a
-`STATUSTEXT` needs a severity and up to 50 characters, which is what sets the
-union's size) rather than a wire-ready frame. `src/mavlink.cpp`'s `mavlinkPack()`
+`LOG_DATA` carries 90 bytes of the flight log, which is what sets the union's size
+since `download-the-flight-log` — a `STATUSTEXT`'s 50 characters did before) rather
+than a wire-ready frame. `src/mavlink.cpp`'s `mavlinkPack()`
 is the only place that turns a `LinkMsg` into a `mavlink_message_t`, called by
 `TaskLinkWrite` just before it writes, with the channel it is about to leave by — this is also the only function outside
 `src/mavlink.cpp` allowed to call a `mavlink_msg_*_pack` function, which is what
@@ -291,9 +299,12 @@ transport (`src/link.cpp`) now does the final packing step.
 
 Their storage is `depth x sizeof(item)`, entirely in `.bss`, and none of them
 touches the FreeRTOS heap: `linkReadQueueStorage` is 8 x 292 = 2336 B, and each of
-`uartWriteQueueStorage` and `usbWriteQueueStorage` is 7 x 64 = 448 B — depth 7 since
-`emit-sys-status` added a fifth independently-clocked schedule entry, whose
-derivation is in `src/main.cpp` beside the storage. There is no producer/consumer margin
+`uartWriteQueueStorage` and `usbWriteQueueStorage` is 9 x 112 = 1008 B. Seven slots
+are the periodic worst case (`emit-sys-status` made it seven), and the other two are
+the log download's: `TaskSdWrite` posts a `LOG_ENTRY` or `LOG_DATA` only while the
+port's queue holds at most one item, so no more than two are ever queued. The
+derivation is in `src/main.cpp` beside the storage. This is the largest single
+reservation in `.bss` after the inbound queue, and it is paid for one message type. There is no producer/consumer margin
 to add on top — with a by-value queue, an item "held before send" or "held after
 receive" is simply a local on that task's own stack, not a shared block, so the
 depth alone is what the storage needs.
@@ -303,7 +314,7 @@ rest: storage is depth × item size in `.bss`, with no margin added on top.
 
 | Queue | Depth | Item | Bytes in `.bss` |
 |---|---|---|---|
-| `sdWriteQueue` | 4 | `SdRecord`, 32 B | 128 |
+| `sdWriteQueue` | 6 | `SdRecord`, 32 B | 192 |
 
 `SdRecord` (`include/SdRecord.h`) is a tagged union of what a producer *means* —
 `SYS`, `PWR` or `TIME` — in the same spirit as `LinkMsg`, and for the same reason: the
@@ -317,6 +328,11 @@ the timestamp is a `uint64_t`, so the union takes 8-byte alignment and the tag c
 **Two producers post to it** — `TaskLogger` for the 1 Hz `SYS` record, `TaskMavlink`
 for `PWR` on its battery cadence and `TIME` when a clock set is accepted — and that
 costs nothing extra, because a by-value queue has no producer-held block to reserve.
+Since `download-the-flight-log` `TaskMavlink` also forwards the log protocol's three
+requests on it, which are not records: `TaskSdWrite` answers them on the port's write
+queue and writes nothing. It forwards one only while two slots are free, so a burst of
+requests from the ground cannot crowd out the log; a dropped request is sent again by
+the ground, a dropped record is not. That is why the depth went from 4 to 6.
 
 **What a burst finds is now the same at every queue**: a full queue does not accept
 the item, `xQueueSend` says so, and the producer has nothing to release because it
@@ -399,7 +415,12 @@ silently select the per-byte fallback.
   rather than narrowed to 16 bits. The reply to either command is the `COMMAND_ACK` first
   and the message second, unlike `MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES`, which sends its
   data first. Anything else — a `msgid` this outer switch does not recognise at all — falls
-  to `default` and produces a `STATUSTEXT` warning.
+  to `default` and produces a `STATUSTEXT` warning. The log protocol
+  (`download-the-flight-log`) is not answered here: `LOG_REQUEST_LIST`,
+  `LOG_REQUEST_DATA` and `LOG_REQUEST_END` are forwarded to `TaskSdWrite`, which owns
+  the card (§5.2), unless there is no `TaskSdWrite` — no card, or the reduced
+  configuration — in which case this task answers "no logs" itself. `LOG_ERASE` has an
+  empty case of its own: no command from the ground erases the log.
 - The same task also carries the periodic telemetry that used to run as two
   separate tasks (folded in by `fold-periodic-telemetry-into-mavlink-task`, since
   both did nothing but pack a message and post it on a timer). A
@@ -585,6 +606,29 @@ The same figures reach the ground live as the `NAMED_VALUE_INT` housekeeping str
 above a 1000 ms interval. Reading both and finding they agree is the cheapest way to
 know neither is lying. `Heap` is in the record for historical continuity and reads 0 —
 see §4.
+
+#### Reading the log from the ground
+
+Since `download-the-flight-log` the log comes down the link through the MAVLink log
+protocol, which MAVProxy (`log list`, `log download`) and QGroundControl drive with no
+configuration. Everything that reads the card for it happens in `TaskSdWrite`, the
+card's owner; its answers go by value onto the requesting port's write queue.
+
+- **Ids are fixed by slot**: `data<N>.BIN` is id `N + 1` for as long as it exists, so a
+  rotation never renumbers a file under a download in progress. `time_utc` is the unix
+  time in the `TIME` record at offset 356 of the file, 0 when that record says there was
+  no wall clock. MAVProxy orders by `time_utc`, not by id.
+- **The file being written is offered too.** A download's end is the size the card held
+  for it when the request arrived — the last synced length, which is what a second,
+  read-only handle reports — so it ends cleanly while the file grows. The spike of that
+  change read the active file 89 times against a CRC of what was written with no mismatch.
+- **The log comes first.** Every pass drains `sdWriteQueue` before doing one piece of
+  download work, and a chunk is only posted while the port's queue has room (§4), so a
+  download costs neither a record nor a periodic message. Over USB it moves about
+  60 KB/s; over the UART the baud rate sets it.
+- **A rotation into the slot being downloaded ends that download** before another chunk
+  is read, since the rotation has just deleted it.
+- **One reading handle is held at a time**; a second port's download waits for it.
 
 ### 5.3 Time
 

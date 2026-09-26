@@ -85,6 +85,13 @@ public:
   // a cut loses at most the log written since the last sync.
   void write(const uint8_t *data, size_t length);
 
+  // Which slot of the ring is being written, and how many slots there are. A reader
+  // of the log (the download path in src/sdwrite.cpp) compares the first with the
+  // slot it is serving after every write(): a write that rotates into that slot has
+  // just deleted it.
+  int currentFile() const { return _fileIdx; }
+  int fileCount() const { return _files; }
+
 private:
   // How much is appended through write() before it syncs. A BYTE count, so it is a
   // duration only at a given write rate -- at the log's ~34 B/s this is about two

@@ -98,6 +98,8 @@ static uint32_t packCustomMode()
 // and read only from TaskMavlink, so no cross-task access to guard.
 static uint16_t writeDropCount[kPortCount] = {0, 0};
 
+extern QueueHandle_t sdWriteQueue;
+
 static void enqueueWrite(uint8_t port, const LinkMsg &intent)
 {
     if (xQueueSend(linkPorts[port].writeQueue, &intent, 0) != pdPASS) {
@@ -265,9 +267,56 @@ static void sendMissionCount(uint8_t port, uint8_t targetSystem, uint8_t targetC
     enqueueWrite(port, intent);
 }
 
+// The log protocol (download-the-flight-log). This task owns no card, so it never
+// answers a request itself while the card has an owner: it forwards the request to
+// TaskSdWrite, which reads the card and answers on the port's write queue.
+//
+// Forwarded only while sdWriteQueue has at least two free slots. The ground's gap
+// filling can send twenty requests at once, and the log's own records share this
+// queue: a dropped request is sent again by the ground within a second, a dropped
+// record is gone. The forwarded request replaces whatever that port was being sent.
+static void forwardLogRequest(SdRecordKind kind, uint8_t port, uint16_t start, uint16_t end,
+                              uint32_t ofs, uint32_t count)
+{
+    if (uxQueueSpacesAvailable(sdWriteQueue) < 2) return;
+    SdRecord request;
+    request.kind = kind;
+    request.log.port = port;
+    request.log.start = start;
+    request.log.end = end;
+    request.log.ofs = ofs;
+    request.log.count = count;
+    xQueueSend(sdWriteQueue, &request, 0);
+}
+
+// With no TaskSdWrite -- no card at boot, or the reduced configuration -- there is
+// no log this board can read, and the ground is told so instead of being left to
+// retry: an entry with num_logs 0, and a data request ended at once with count 0.
+static void sendNoLogs(uint8_t port)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::LogEntry;
+    intent.log_entry.id = 0;
+    intent.log_entry.num_logs = 0;
+    intent.log_entry.last_log_num = 0;
+    intent.log_entry.time_utc = 0;
+    intent.log_entry.size = 0;
+    enqueueWrite(port, intent);
+}
+
+static void sendNoLogData(uint8_t port, uint16_t id, uint32_t ofs)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::LogData;
+    intent.log_data.id = id;
+    intent.log_data.ofs = ofs;
+    intent.log_data.count = 0;
+    memset(intent.log_data.data, 0, sizeof(intent.log_data.data));
+    enqueueWrite(port, intent);
+}
+
 extern Battery battery;
 
-extern QueueHandle_t sdWriteQueue;
 
 // The flight log's battery record. It comes from THIS task and not from TaskLogger
 // because this is the task that already reads lib/Battery: reading it from a second
@@ -595,6 +644,33 @@ void mavlinkPack(uint8_t chan, const LinkMsg &intent, mavlink_message_t *out)
                 out,
                 intent.message_interval.message_id,
                 intent.message_interval.interval_us
+            );
+            break;
+
+        case LinkMsgKind::LogEntry:
+            mavlink_msg_log_entry_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                intent.log_entry.id,
+                intent.log_entry.num_logs,
+                intent.log_entry.last_log_num,
+                intent.log_entry.time_utc,
+                intent.log_entry.size
+            );
+            break;
+
+        case LinkMsgKind::LogData:
+            mavlink_msg_log_data_pack_chan(
+                1,
+                MAV_COMP_ID_AUTOPILOT1,
+                chan,
+                out,
+                intent.log_data.id,
+                intent.log_data.ofs,
+                intent.log_data.count,
+                intent.log_data.data
             );
             break;
 
@@ -1167,6 +1243,41 @@ static bool messageIdFromParam(float param, uint16_t *id)
                     sendMissionCount(port, msg.sysid, msg.compid, request.mission_type);
                     break;
                 }
+
+                case MAVLINK_MSG_ID_LOG_REQUEST_LIST: {
+                    mavlink_log_request_list_t request;
+                    mavlink_msg_log_request_list_decode(&msg, &request);
+                    if (taskSdWriteHandler == NULL) {
+                        sendNoLogs(port);
+                    } else {
+                        forwardLogRequest(SdRecordKind::LogList, port, request.start, request.end, 0, 0);
+                    }
+                    break;
+                }
+
+                case MAVLINK_MSG_ID_LOG_REQUEST_DATA: {
+                    mavlink_log_request_data_t request;
+                    mavlink_msg_log_request_data_decode(&msg, &request);
+                    if (taskSdWriteHandler == NULL) {
+                        sendNoLogData(port, request.id, request.ofs);
+                    } else {
+                        forwardLogRequest(SdRecordKind::LogRead, port, request.id, 0, request.ofs, request.count);
+                    }
+                    break;
+                }
+
+                case MAVLINK_MSG_ID_LOG_REQUEST_END:
+                    if (taskSdWriteHandler != NULL) {
+                        forwardLogRequest(SdRecordKind::LogEnd, port, 0, 0, 0, 0);
+                    }
+                    break;
+
+                case MAVLINK_MSG_ID_LOG_ERASE:
+                    // Deliberately nothing, and nothing sent: it would delete the only
+                    // record of the mission with no confirmation and no reply
+                    // (specs/flight-log/spec.md, "No command from the ground erases
+                    // the log"). Its own case so it does not reach default's text.
+                    break;
 
                 case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
                     break;
