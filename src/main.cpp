@@ -132,7 +132,10 @@ StaticTask_t mavlinkTcb;
 StackType_t loggerStack[160];
 StaticTask_t loggerTcb;
 
-StackType_t sdWriteStack[256];
+// 320 since download-the-flight-log: reading the card for a download goes deeper
+// into the SD library than writing does, and the task holds a 112 B LinkMsg while
+// it reads a chunk. The spike measured 227 words used at 384 with the read path.
+StackType_t sdWriteStack[320];
 StaticTask_t sdWriteTcb;
 
 // Queue structures and item storage. EVERY queue now carries its items by value,
@@ -141,8 +144,12 @@ StaticTask_t sdWriteTcb;
 // has no users left at all. There is no producer/consumer margin to add on top of
 // the depth: with a by-value queue an item held before a send or after a receive
 // is a local on that task's own stack, not a shared block.
+// Depth 6 (was 4) since download-the-flight-log: the log protocol's requests share
+// this queue with the log's records. TaskMavlink forwards a request only while at
+// least two slots are free, so a burst of requests cannot fill it with records
+// waiting -- a dropped request is sent again by the ground; a dropped record is not.
 StaticQueue_t sdWriteQueueBuffer;
-uint8_t sdWriteQueueStorage[4 * sizeof(SdRecord)];
+uint8_t sdWriteQueueStorage[6 * sizeof(SdRecord)];
 
 StaticQueue_t linkReadQueueBuffer;
 uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
@@ -169,16 +176,22 @@ uint8_t linkReadQueueStorage[8 * sizeof(InboundMsg)];
 // prevented. Found while writing this change's own tasks.md documentation
 // step, not by a separate review pass.
 //
-// Costs 2 * sizeof(LinkMsg) = 128 B of .bss across the two ports, against the
-// headroom scripts/ram_budget.py prints. Re-derived, not assumed, per CLAUDE.md's
+// Depth 9 since download-the-flight-log: the two more slots are the log protocol's.
+// TaskSdWrite posts a LOG_ENTRY or LOG_DATA only while the port's queue holds at
+// most one item, so at most two of them are ever queued, and the seven the
+// periodic worst case above needs are always left free. The items grew with it:
+// LinkMsg carries a LOG_DATA's 90 bytes by value, 112 B, so each queue is
+// 9 * 112 = 1008 B.
+//
+// Costed at the time against the headroom scripts/ram_budget.py prints. Re-derived, not assumed, per CLAUDE.md's
 // rule on changing a queue's backing. Each port gets its own queue at this depth.
 // This depth and the housekeeping cycle length both follow the task count in this
 // file -- a new task needs both re-checked.
 StaticQueue_t uartWriteQueueBuffer;
-uint8_t uartWriteQueueStorage[7 * sizeof(LinkMsg)];
+uint8_t uartWriteQueueStorage[9 * sizeof(LinkMsg)];
 
 StaticQueue_t usbWriteQueueBuffer;
-uint8_t usbWriteQueueStorage[7 * sizeof(LinkMsg)];
+uint8_t usbWriteQueueStorage[9 * sizeof(LinkMsg)];
 
 QueueHandle_t sdWriteQueue = NULL;
 
@@ -395,16 +408,16 @@ void setup()
   sdCardAvailable = SD.begin(9);
   Recovery::setPhase(Recovery::BootPhase::CardDone);
 
-  sdWriteQueue = xQueueCreateStatic(4, sizeof(SdRecord), sdWriteQueueStorage, &sdWriteQueueBuffer);
+  sdWriteQueue = xQueueCreateStatic(6, sizeof(SdRecord), sdWriteQueueStorage, &sdWriteQueueBuffer);
   configASSERT(sdWriteQueue != NULL);
 
   linkReadQueue = xQueueCreateStatic(8, sizeof(InboundMsg), linkReadQueueStorage, &linkReadQueueBuffer);
   configASSERT(linkReadQueue != NULL);
 
-  uartWriteQueue = xQueueCreateStatic(7, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
+  uartWriteQueue = xQueueCreateStatic(9, sizeof(LinkMsg), uartWriteQueueStorage, &uartWriteQueueBuffer);
   configASSERT(uartWriteQueue != NULL);
 
-  usbWriteQueue = xQueueCreateStatic(7, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
+  usbWriteQueue = xQueueCreateStatic(9, sizeof(LinkMsg), usbWriteQueueStorage, &usbWriteQueueBuffer);
   configASSERT(usbWriteQueue != NULL);
 
   // Binds each descriptor to its concrete port and its write queue. Must run
@@ -461,7 +474,7 @@ void setup()
       taskLoggerHandler = xTaskCreateStatic(TaskLogger, "Logger", 160, NULL, PRIORITY_LOW, loggerStack, &loggerTcb);
       configASSERT(taskLoggerHandler != NULL);
 
-      taskSdWriteHandler = xTaskCreateStatic(TaskSdWrite, "SdWrite", 256, NULL, PRIORITY_LOWEST, sdWriteStack, &sdWriteTcb);
+      taskSdWriteHandler = xTaskCreateStatic(TaskSdWrite, "SdWrite", 320, NULL, PRIORITY_LOWEST, sdWriteStack, &sdWriteTcb);
       configASSERT(taskSdWriteHandler != NULL);
     }
   }

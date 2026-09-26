@@ -22,6 +22,12 @@ enum class SdRecordKind : uint8_t
     Sys = 0,   // free heap and every task's stack headroom, 1 Hz
     Pwr = 1,   // battery, at the rate the battery is actually read
     Time = 2,  // wall clock and its origin, on file open and on a clock set
+    // The log protocol's requests, forwarded by TaskMavlink to the card's owner
+    // (download-the-flight-log). They are not log records: TaskSdWrite answers them
+    // on the requesting port's write queue and writes nothing to the card.
+    LogList = 3,
+    LogRead = 4,
+    LogEnd = 5,
 };
 
 // Seven per-task stack marks, in the order SYS's labels declare them:
@@ -49,6 +55,15 @@ struct SdTimePayload
     uint8_t source;  // SystemTime::Source, not a second enumeration
 };
 
+struct SdLogRequestPayload
+{
+    uint32_t ofs;
+    uint32_t count;
+    uint16_t start;  // LogList: first id; LogRead: the id
+    uint16_t end;    // LogList: last id
+    uint8_t port;    // the port the request arrived on, and the one the answer leaves by
+};
+
 struct SdRecord
 {
     SdRecordKind kind;
@@ -57,6 +72,7 @@ struct SdRecord
         SdSysPayload sys;
         SdPwrPayload pwr;
         SdTimePayload time;
+        SdLogRequestPayload log;
     };
 };
 

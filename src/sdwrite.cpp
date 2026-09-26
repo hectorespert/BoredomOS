@@ -4,6 +4,8 @@
 #include <SD.h>
 #include <SdData.h>
 #include <SystemTime.h>
+#include <LinkMsg.h>
+#include <LinkPort.h>
 
 extern QueueHandle_t sdWriteQueue;
 extern SystemTime systemTime;
@@ -129,6 +131,316 @@ static void writeLogPreamble(SdData &sd)
     sd.writeRaw(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
 }
 
+// ---------------------------------------------------------------------------
+// Downloading the log over MAVLink (download-the-flight-log).
+//
+// This task reads the card for the link because it owns the card: nothing else
+// may touch it. TaskMavlink forwards the log protocol's requests on sdWriteQueue,
+// and the answers go straight onto the requesting port's write queue as LinkMsgs,
+// which src/link.cpp's writers pack and send -- so each port still has one owner.
+//
+// The log comes first. Every pass drains sdWriteQueue before doing any download
+// work, and does at most one piece of it, so a download never delays a record.
+// ---------------------------------------------------------------------------
+
+extern LinkPort linkPorts[2];
+
+// A DataFlash TIME record sits right after the four FMT records of the preamble
+// every file starts with; its unix time is what LOG_ENTRY reports as time_utc.
+static constexpr uint32_t kHeadTimeOffset = sizeof(kPreamble);
+static_assert(sizeof(kPreamble) == 356, "the head TIME record is expected at offset 356");
+
+static constexpr uint8_t kLogDataChunk = 90;  // LOG_DATA's payload, and MAVProxy's stride
+
+struct LogListing {
+    bool active;
+    uint16_t start;
+    uint16_t end;
+    uint8_t nextSlot;
+};
+
+struct LogStream {
+    bool active;
+    bool absent;       // the id names no file: answer with count 0 and stop
+    int8_t slot;
+    uint16_t id;
+    uint32_t pos;
+    uint32_t end;      // exclusive
+    bool toFileEnd;    // end is the end of the file, not the end of the requested range
+    bool sentAny;
+    uint8_t lastCount;
+};
+
+static LogListing listings[2];
+static LogStream streams[2];
+
+// At most one handle held across passes, bounding newlib's allocation for reading
+// to one SdFile. A listing or a new request opens a second one for as long as it
+// takes to read a size or 16 bytes, and closes it before returning.
+static File reader;
+static int8_t readerPort = -1;
+
+static String slotFileName(int slot)
+{
+    return String("data") + slot + ".BIN";
+}
+
+// The port's queue is paced so the log protocol can never hold more than two of
+// its slots: the depth in src/main.cpp keeps the other seven for the periodic
+// worst case.
+static bool portHasRoom(uint8_t port)
+{
+    return uxQueueMessagesWaiting(linkPorts[port].writeQueue) <= 1;
+}
+
+static void closeReader()
+{
+    if (reader) {
+        reader.close();
+    }
+    readerPort = -1;
+}
+
+// The length a download of this slot would deliver now: the synced size, which is
+// what a reading handle sees. 0 when the file does not exist.
+static uint32_t slotSize(int slot)
+{
+    String name = slotFileName(slot);
+    if (!SD.exists(name.c_str())) {
+        return 0;
+    }
+    File f = SD.open(name.c_str(), FILE_READ);
+    if (!f) {
+        return 0;
+    }
+    uint32_t size = f.size();
+    f.close();
+    return size;
+}
+
+static uint32_t slotTimeUtc(int slot)
+{
+    String name = slotFileName(slot);
+    File f = SD.open(name.c_str(), FILE_READ);
+    if (!f) {
+        return 0;
+    }
+    LogTime head;
+    bool ok = f.seek(kHeadTimeOffset) &&
+              f.read(reinterpret_cast<uint8_t *>(&head), sizeof(head)) == (int)sizeof(head);
+    f.close();
+    // 0 is the field's "not available": the head record is not a TIME record, or it
+    // says the board held no wall clock when the file was opened.
+    if (!ok || head.head1 != kHead1 || head.head2 != kHead2 || head.msgid != kMsgTime ||
+        head.source == (uint8_t)SystemTime::Source::None) {
+        return 0;
+    }
+    return head.unixtime;
+}
+
+static void startListing(const SdRecord &request)
+{
+    LogListing &listing = listings[request.log.port];
+    listing.active = true;
+    listing.start = request.log.start;
+    listing.end = request.log.end;
+    listing.nextSlot = 0;
+}
+
+static void endStream(uint8_t port)
+{
+    streams[port].active = false;
+    if (readerPort == (int8_t)port) {
+        closeReader();
+    }
+}
+
+static void startStream(const SdRecord &request)
+{
+    uint8_t port = request.log.port;
+    endStream(port);  // a new request replaces the download on that port
+
+    LogStream &stream = streams[port];
+    stream.active = true;
+    stream.id = request.log.start;
+    stream.pos = request.log.ofs;
+    stream.sentAny = false;
+    stream.lastCount = 0;
+
+    int slot = (int)stream.id - 1;
+    uint32_t size = (slot >= 0 && slot < sdData.fileCount()) ? slotSize(slot) : 0;
+    stream.absent = (size == 0);
+    stream.slot = (int8_t)slot;
+
+    // The end is fixed here, when the request arrives: what is logged afterwards comes
+    // with a later request. count is often 0xFFFFFFFF, so the sum is not formed.
+    uint32_t available = (stream.pos < size) ? size - stream.pos : 0;
+    if (request.log.count >= available) {
+        stream.end = size;
+        stream.toFileEnd = true;
+    } else {
+        stream.end = stream.pos + request.log.count;
+        stream.toFileEnd = false;
+    }
+}
+
+static void postLogData(uint8_t port, uint16_t id, uint32_t ofs, const uint8_t *data, uint8_t count)
+{
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::LogData;
+    intent.log_data.id = id;
+    intent.log_data.ofs = ofs;
+    intent.log_data.count = count;
+    memset(intent.log_data.data, 0, sizeof(intent.log_data.data));
+    if (count > 0) {
+        memcpy(intent.log_data.data, data, count);
+    }
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+}
+
+// One LOG_ENTRY. Returns false when the listing is finished.
+static bool serviceListing(uint8_t port)
+{
+    LogListing &listing = listings[port];
+
+    uint16_t numLogs = 0;
+    uint16_t lastLogNum = 0;
+    for (int slot = 0; slot < sdData.fileCount(); ++slot) {
+        if (SD.exists(slotFileName(slot).c_str())) {
+            numLogs++;
+            lastLogNum = (uint16_t)(slot + 1);
+        }
+    }
+
+    while (listing.nextSlot < sdData.fileCount()) {
+        int slot = listing.nextSlot++;
+        uint16_t id = (uint16_t)(slot + 1);
+        if (id < listing.start || id > listing.end) continue;
+        uint32_t size = slotSize(slot);
+        if (size == 0) continue;
+
+        LinkMsg intent;
+        intent.kind = LinkMsgKind::LogEntry;
+        intent.log_entry.id = id;
+        intent.log_entry.num_logs = numLogs;
+        intent.log_entry.last_log_num = lastLogNum;
+        intent.log_entry.time_utc = slotTimeUtc(slot);
+        intent.log_entry.size = size;
+        xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+        return true;
+    }
+    listing.active = false;
+    return false;
+}
+
+// One LOG_DATA, or nothing when another port's download holds the reading handle.
+static void serviceStream(uint8_t port)
+{
+    LogStream &stream = streams[port];
+
+    if (stream.absent) {
+        postLogData(port, stream.id, stream.pos, nullptr, 0);
+        stream.active = false;
+        return;
+    }
+
+    if (stream.pos >= stream.end) {
+        // A file whose end falls on a multiple of 90 has not signalled its end yet: an
+        // empty chunk does. A range that stops short of the file end is not the end
+        // of the log, and must not say so -- MAVProxy closes a download on count 0.
+        if (stream.toFileEnd && (!stream.sentAny || stream.lastCount == kLogDataChunk)) {
+            postLogData(port, stream.id, stream.pos, nullptr, 0);
+        }
+        endStream(port);
+        return;
+    }
+
+    if (readerPort != (int8_t)port) {
+        if (readerPort >= 0) return;  // one handle at a time; the other port waits
+        reader = SD.open(slotFileName(stream.slot).c_str(), FILE_READ);
+        if (!reader) {
+            endStream(port);
+            return;
+        }
+        readerPort = (int8_t)port;
+        reader.seek(stream.pos);
+    }
+
+    uint32_t want = stream.end - stream.pos;
+    if (want > kLogDataChunk) want = kLogDataChunk;
+
+    LinkMsg intent;
+    intent.kind = LinkMsgKind::LogData;
+    intent.log_data.id = stream.id;
+    intent.log_data.ofs = stream.pos;
+    memset(intent.log_data.data, 0, sizeof(intent.log_data.data));
+    int n = reader.read(intent.log_data.data, want);
+    if (n <= 0) {
+        endStream(port);
+        return;
+    }
+    intent.log_data.count = (uint8_t)n;
+    xQueueSend(linkPorts[port].writeQueue, &intent, 0);
+
+    stream.pos += (uint32_t)n;
+    stream.sentAny = true;
+    stream.lastCount = (uint8_t)n;
+}
+
+static bool downloadWorkPending()
+{
+    for (uint8_t p = 0; p < 2; ++p) {
+        if (listings[p].active || streams[p].active) return true;
+    }
+    return false;
+}
+
+static void writeRecord(const SdRecord &incoming)
+{
+    int before = sdData.currentFile();
+
+    switch (incoming.kind) {
+    case SdRecordKind::Sys: {
+        LogSys record = {kHead1, kHead2, kMsgSys,
+                         incoming.sys.timeUs, incoming.sys.heapFree, {0}};
+        for (uint8_t i = 0; i < SD_RECORD_TASK_COUNT; i++) {
+            record.stacks[i] = incoming.sys.stacks[i];
+        }
+        sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+        break;
+    }
+    case SdRecordKind::Pwr: {
+        LogPwr record = {kHead1, kHead2, kMsgPwr,
+                         incoming.pwr.timeUs, incoming.pwr.millivolts,
+                         incoming.pwr.remaining};
+        sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+        break;
+    }
+    case SdRecordKind::Time: {
+        LogTime record = {kHead1, kHead2, kMsgTime,
+                          incoming.time.timeUs, incoming.time.unixtime,
+                          incoming.time.source};
+        sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+        break;
+    }
+    default:
+        return;
+    }
+
+    // A write that rotated has just deleted the slot it moved into. A download of
+    // that slot ends here, before another chunk is read: those bytes would belong
+    // to the new file, not the one the id named when the download began.
+    int after = sdData.currentFile();
+    if (after != before) {
+        for (uint8_t p = 0; p < 2; ++p) {
+            if (streams[p].active && !streams[p].absent && streams[p].slot == after) {
+                postLogData(p, streams[p].id, streams[p].pos, nullptr, 0);
+                endStream(p);
+            }
+        }
+    }
+}
+
 [[noreturn]] void TaskSdWrite(void *pvParameters)
 {
     (void) pvParameters;
@@ -137,35 +449,44 @@ static void writeLogPreamble(SdData &sd)
     sdData.setOnOpen(writeLogPreamble);
     sdData.begin();
 
+    uint8_t nextPort = 0;
+
     for (;;)
     {
+        // Idle: block until something arrives. Download work pending: look without
+        // waiting, or yield one tick when every port with work is paced.
+        TickType_t wait = downloadWorkPending() ? 1 : portMAX_DELAY;
+
         SdRecord incoming;
-        if (xQueueReceive(sdWriteQueue, &incoming, portMAX_DELAY) == pdPASS) {
+        while (xQueueReceive(sdWriteQueue, &incoming, wait) == pdPASS) {
+            wait = 0;
             switch (incoming.kind) {
-            case SdRecordKind::Sys: {
-                LogSys record = {kHead1, kHead2, kMsgSys,
-                                 incoming.sys.timeUs, incoming.sys.heapFree, {0}};
-                for (uint8_t i = 0; i < SD_RECORD_TASK_COUNT; i++) {
-                    record.stacks[i] = incoming.sys.stacks[i];
-                }
-                sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+            case SdRecordKind::LogList:
+                startListing(incoming);
+                break;
+            case SdRecordKind::LogRead:
+                startStream(incoming);
+                break;
+            case SdRecordKind::LogEnd:
+                endStream(incoming.log.port);
+                break;
+            default:
+                writeRecord(incoming);
                 break;
             }
-            case SdRecordKind::Pwr: {
-                LogPwr record = {kHead1, kHead2, kMsgPwr,
-                                 incoming.pwr.timeUs, incoming.pwr.millivolts,
-                                 incoming.pwr.remaining};
-                sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
-                break;
+        }
+
+        // At most one piece of download work per pass, alternating ports.
+        for (uint8_t i = 0; i < 2; ++i) {
+            uint8_t port = (uint8_t)((nextPort + i) % 2);
+            if (!(listings[port].active || streams[port].active) || !portHasRoom(port)) continue;
+            if (listings[port].active) {
+                serviceListing(port);
+            } else {
+                serviceStream(port);
             }
-            case SdRecordKind::Time: {
-                LogTime record = {kHead1, kHead2, kMsgTime,
-                                  incoming.time.timeUs, incoming.time.unixtime,
-                                  incoming.time.source};
-                sdData.write(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
-                break;
-            }
-            }
+            nextPort = (uint8_t)(port + 1) % 2;
+            break;
         }
     }
 }

@@ -30,6 +30,10 @@ enum class LinkMsgKind : uint8_t {
     // Carries no payload, like AutopilotVersion: every PROTOCOL_VERSION field
     // is a constant.
     ProtocolVersion,
+    // Both posted by TaskSdWrite, the card's owner, in answer to the log
+    // protocol (download-the-flight-log). LogData carries its 90 bytes by value.
+    LogEntry,
+    LogData,
 };
 
 struct LinkMsg {
@@ -61,13 +65,15 @@ struct LinkMsg {
         struct { uint32_t sensors; uint16_t voltage_mv; int8_t battery_remaining; uint16_t errors_comm; uint16_t errors_count1; } sys_status;
         struct { int32_t interval_us; uint16_t message_id; } message_interval;
         struct { uint8_t target_system; uint8_t target_component; uint8_t mission_type; } mission_count;
+        struct { uint32_t time_utc; uint32_t size; uint16_t id; uint16_t num_logs; uint16_t last_log_num; } log_entry;
+        struct { uint32_t ofs; uint16_t id; uint8_t count; uint8_t data[90]; } log_data;
     };
 };
 
-// STATUSTEXT (severity + a 50-byte text field) sets this size. A future
-// variant that grows past it must grow this assertion deliberately, not
-// silently invalidate the RAM math this change and the USB-link backlog
-// entry (TODO.md) both depend on.
-static_assert(sizeof(LinkMsg) <= 64, "LinkMsg grew past the size the RAM budget assumes");
+// LOG_DATA (90 bytes of log plus offset, id and count) sets this size since
+// download-the-flight-log; STATUSTEXT set it before. Every write queue's storage
+// is depth x this, and every task that holds a LinkMsg local pays it on its
+// stack, so it must grow deliberately, never silently.
+static_assert(sizeof(LinkMsg) <= 112, "LinkMsg grew past the size the RAM budget assumes");
 
 #endif //BOREDOMOS_LINKMSG_H
