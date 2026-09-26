@@ -70,8 +70,16 @@ void SdData::end()
     }
 }
 
+// Opened WITHOUT O_APPEND, which FILE_WRITE includes: with it, the library moves the
+// offset to the end before every write, the seek(0) below is lost, and each index is
+// appended. readLogIndex() reads the first four bytes, so every restart after a second
+// rotation reopened the first full file, rotated on its first write, and deleted the file
+// the previous boot had been logging into. No O_TRUNC either: truncating frees the cluster
+// and the write reallocates it, and a power cut between the two would leave an empty index
+// and restart the ring at file 0. Bytes a card may still carry past offset 4 from the old
+// behaviour are never read.
 void SdData::writeLogIndex() {
-    File idxFile = SD.open(LOG_INDEX_FILE, FILE_WRITE);
+    File idxFile = SD.open(LOG_INDEX_FILE, O_WRITE | O_CREAT);
     if (!idxFile) {
         return;
     }
