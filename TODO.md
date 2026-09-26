@@ -83,8 +83,8 @@ but **against bytes built in Python, not bytes the firmware emitted**. Nobody ha
 read a file the board wrote.
 
 All six need the card physically pulled and read on another machine; nothing over the
-link reads the card, which is what *[Download the flight log over the MAVLink log
-protocol]* and *[Serve the SD card over MAVLink FTP]* would change. Numbers below are
+link reads the card, which is what `download-the-flight-log` and *[Serve the SD card
+over MAVLink FTP]* would change. Numbers below are
 that change's own `tasks.md`.
 
 - **9.2 — parse a real `data0.BIN` with a general-purpose tool.** The whole point of
@@ -429,6 +429,27 @@ host slept mid-run, and those cases pass run alone. Worth running the suite unde
 `caffeinate -i` from the start, or keeping the machine awake, so that a real regression is
 not read as that.
 
+### Finish what persist-the-log-ring-position left open
+
+**Status:** defined
+**Scope:** hands at the board, and a way to read the card
+
+`openspec/changes/archive/2026-09-26-persist-the-log-ring-position/` fixed `index.bin` being
+appended instead of overwritten, which made every restart after a second rotation delete the
+file the previous boot had been writing. The fix is proven on the real card and library by a
+Unity case that failed for exactly that reason before it and passes after it (21/21), and the
+HIL suite shows no regression. What is left is its own task 2.2, the end-to-end check on the
+flight firmware:
+
+- **2.2 — a real rotation, then restarts.** Let the flight firmware fill a file and move on to
+  the next (about 8.6 h of logging at the default ring), restart it twice, and confirm the file
+  written before the restarts keeps growing and no other file changed. It needs the card read:
+  pulled, which was not possible when the change was archived, or downloaded once
+  `download-the-flight-log` lands.
+
+Cards written before the fix carry a stale first index; the first boot on the fixed firmware
+repeats the fault once and is correct from then on. Nothing works around that.
+
 ### Add the GY-87 IMU
 
 **Status:** proposed
@@ -603,85 +624,6 @@ Implementation points:
 - Check in `test/test_libs/test_main.cpp`, which runs on real hardware and can
   therefore validate the state with the board plugged in (charging) and unplugged.
 
-### Download the flight log over the MAVLink log protocol
-
-**Status:** proposed
-**Scope:** `src/mavlink.cpp`, `lib/SdData`, `src/sdwrite.cpp`, `src/main.cpp`
-
-Today the housekeeping log can only be recovered by pulling the card out of the
-board: nothing exposes it over the link, which is not a realistic way of reading it
-with the satellite assembled.
-
-Read *[Serve the SD card as USB mass storage]* before starting this one. It moves the same
-bytes far more cheaply, and if it works it may retire this entry and its FTP sibling — but
-only for an operator holding the board. This path is the only one that works from orbit, so
-the two are not substitutes; decide which problem is being solved.
-
-This entry is the **log protocol**: `LOG_REQUEST_LIST` / `LOG_ENTRY` /
-`LOG_REQUEST_DATA` / `LOG_DATA` / `LOG_REQUEST_END` / `LOG_ERASE`, ids 117–122. Its
-sibling is *[Serve the SD card over MAVLink FTP]*, and **the firmware wants both**:
-they are not alternatives and the two ground tools this project targets drive each of
-them for different things.
-
-| | log protocol | FTP |
-|---|---|---|
-| what it exposes | the flight logs, as an enumerated list | the filesystem, by path |
-| the GCS finds them | by itself, from `LOG_ENTRY` | only if told the filename |
-| QGroundControl | *Analyze → Log Download* | parameter and mission files, component metadata |
-| MAVProxy | `module load log`, `log list` / `log download` | `module load ftp`, `ftp list` / `ftp get` |
-| can write | no (`LOG_ERASE` only) | yes, which is the dangerous part |
-| reaches `index.bin` | no | yes |
-
-So this one is the path an operator uses to pull a flight log without knowing anything
-about the card's layout, and FTP is the one that reaches everything else. All six
-messages here are already in `common/` in the dialect this project compiles, so no
-dialect change is needed.
-
-Whichever lands first settles the card-access design for the other — see the
-concurrency point below.
-
-**Unblocked by `replace-messagepack-log-with-dataflash`, archived 2026-09-20.**
-Downloading `.mpk` files would have accomplished little, since nothing on the ground
-opens one. The log is DataFlash `.BIN` now and `pymavlink` reads it, which is what
-makes this feature worth having.
-
-Points to resolve before implementing:
-
-- **Mapping the ring onto log ids.** `LOG_ENTRY` carries `id`, `num_logs`,
-  `last_log_num`, `time_utc` and `size`. Decide how `data0..N.BIN` map onto ids given
-  that the ring overwrites in place, and where `time_utc` comes from — the `TIME`
-  record at the head of each file is the natural source.
-- **Concurrency with `TaskSdWrite`.** `lib/SdData` keeps `_dataFile` open for writing
-  while the logger dumps at 1 Hz, and the SD card hangs off SPI with `CS` on pin 9.
-  Two tasks touching the card at once is corruption: either a mutex is needed, or
-  access goes through `TaskSdWrite`, which already owns the medium. This is the main
-  design decision of this feature, and it is **shared with *[Serve the SD card over
-  MAVLink FTP]***: both need a reader alongside the writer, so solve it once, in
-  whichever lands first, and let the other reuse it. Solving it twice, differently, is
-  the way this ends up with two paths to the card and a corruption bug that only
-  appears when both are in use.
-- **RAM.** The usual constraint: `mavlink_message_t` alone is ~290 bytes and the
-  stacks are tight, between 96 and 256 words. A download path with its read buffer
-  does not fit without measuring; the log high-water marks have to be checked before
-  and after.
-- **Download time.** `LOG_DATA` moves 90 useful bytes in a 111-byte frame, ~4,6 KB/s
-  at `LINK_BAUD`. Whether a whole file is viable is set by the ring default, which is
-  where the size criterion lives — `openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/`
-  derives it from download time and sets the default to 4 x 1 MiB, which is what makes a
-  whole file viable here at all. Serving by offset is supported by the protocol (`LOG_REQUEST_DATA` takes
-  `ofs` and `count`) and is worth implementing regardless.
-- **Consistency of what is downloaded.** The active file is being written while it is
-  read. Define whether it is served as is — the DataFlash `0xA3 0x95` header means a
-  half-written record at the end is survivable rather than fatal, which FTP over
-  MessagePack was not — or whether only the closed files of the ring are offered.
-- **What QGroundControl calls the result.** QGC picks how to treat the downloaded
-  bytes from the autopilot type, and this firmware announces `MAV_AUTOPILOT_GENERIC`.
-  See the identity point in
-  `openspec/changes/archive/2026-09-20-replace-messagepack-log-with-dataflash/`, which
-  raised this and did not settle it.
-- Keep the identity triple of the rest of the firmware: system `1`,
-  `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
-
 ### Serve the SD card over MAVLink FTP
 
 **Status:** proposed
@@ -689,11 +631,11 @@ Points to resolve before implementing:
 
 MAVLink FTP (`FILE_TRANSFER_PROTOCOL`) exposes the card as a filesystem: listing a
 directory and reading a file by path, with the reference GCS (`ftp list` / `ftp get`
-in MAVProxy, and QGroundControl's own uses). It is the sibling of *[Download the
-flight log over the MAVLink log protocol]*, and the firmware wants both — that entry
-has the table of which tool drives which, and why one does not replace the other. Both
-should be read against *[Serve the SD card as USB mass storage]*, which does the same job
-over the USB cable for a fraction of the work, and only for someone holding the board.
+in MAVProxy, and QGroundControl's own uses). It is the sibling of the log protocol,
+which `download-the-flight-log` implements, and the firmware wants both: the log protocol
+serves the flight logs as an enumerated list the GCS finds by itself (QGroundControl's
+*Analyze → Log Download*, MAVProxy's `log list` / `log download`), while FTP reaches files
+by path, `index.bin` included, and is the only one of the two that can write.
 
 The short version: the log protocol is the one an operator reaches for to pull a
 flight log, because the GCS enumerates them without being told anything. FTP is what
@@ -713,13 +655,13 @@ Points to resolve before implementing:
   the minimum subset: listing and reading read-only covers the use case; writing and
   deleting from the ground is another discussion, and a dangerous one over the file
   the firmware holds open. Note that read-only is also what makes this strictly
-  additive to the log protocol rather than a second way to destroy the log —
-  `LOG_ERASE` is already the sanctioned way to do that.
-- **Concurrency with `TaskSdWrite`.** The same problem, with the same two answers — a
-  mutex, or routing through the task that owns the medium — as the concurrency point
-  of *[Download the flight log over the MAVLink log protocol]*. **Solve it once.** If
-  that entry lands first this one inherits its answer; if this one lands first, build
-  the access path so a second reader can use it.
+  additive to the log protocol rather than a way to destroy the log — and
+  `download-the-flight-log` deliberately makes `LOG_ERASE` do nothing, so no command from
+  the ground deletes it.
+- **Concurrency with `TaskSdWrite`.** Settled by `download-the-flight-log`: every read
+  happens in `TaskSdWrite`, which owns the card, and its replies go by value onto the
+  port's write queue, paced by that queue's occupancy. Reuse that path rather than
+  building a second one.
 - **RAM.** The usual constraint: `mavlink_message_t` alone is ~290 bytes and the
   stacks are tight, between 96 and 256 words. An FTP task with its session buffer
   does not fit without measuring; the log high-water marks have to be checked before
@@ -736,59 +678,6 @@ Points to resolve before implementing:
   `index.bin` has no such property and a torn read of it is simply wrong.
 - Keep the identity triple of the rest of the firmware: system `1`,
   `MAV_COMP_ID_AUTOPILOT1`, `MAV_TYPE_ROCKET`.
-
-### Serve the SD card as USB mass storage
-
-**Status:** defined
-**Scope:** `src/link.cpp`, `src/sdwrite.cpp`, `lib/SdData`, `src/logger.cpp`,
-`src/mavlink.cpp`, `src/main.cpp`, `platformio.ini`, `ARCHITECTURE.md`
-
-Both existing download paths are expensive: *[Download the flight log over the MAVLink log
-protocol]* and *[Serve the SD card over MAVLink FTP]* each implement a protocol to move
-bytes the host could read directly. madflight does neither — it exposes the card as a USB
-mass storage device:
-
-```c
-usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
-// msc_read_cb -> sd.card()->readSectors(lba, buffer, bufsize/512)
-```
-
-Plug the board in, a disk appears, copy the file. No protocol, no rate limit, no partial
-transfers to resume.
-
-**The open question is whether it can coexist with the MAVLink CDC.** USB already carries
-MAVLink as a CDC endpoint and `src/link.cpp` owns it, so this needs a composite CDC+MSC
-device. The Renesas core does ship TinyUSB — it is named in *[The toolchain and uploader
-are x86_64-only]* as the part GCC 14 rejects — but whether a composite descriptor is
-reachable from this core, and what it costs in flash and RAM, is unknown and is the first
-thing to find out.
-
-**It breaks the ownership rule, and that is the blocking design question, not a detail.**
-`ARCHITECTURE.md` §3 and §6 say `src/sdwrite.cpp` via `lib/SdData` is the only code that
-touches the card, and that single rule is what makes the absence of mutexes safe. MSC
-callbacks read and write raw sectors from the USB side — a second owner, on another task, at
-another priority. So this entry cannot be implemented as "add MSC callbacks"; it has to say
-who owns the card in each state and how the handoff happens, and that design does not exist
-yet. Until it does, the entry is a sketch and not something to pick up.
-
-**`SdData::end()` is not the handoff, and it is important not to mistake it for one.**
-Closing the file does not stop logging. `TaskLogger` keeps posting `SdRecord`s once a second
-and `TaskMavlink` keeps posting `PWR`, `TaskSdWrite` keeps receiving them, and
-`SdData::write()` **silently returns without doing anything** when no file is open — so
-enabling MSC on the strength of `end()` alone would race the producers and discard every
-sample for as long as the host held the card. What is actually needed is a state transition:
-stop the producers, drain `sdWriteQueue`, have `TaskSdWrite` stop consuming, *then* `end()`,
-serve MSC, and reverse it on eject — with `begin()` reopening at the far side, which is why
-`openspec/changes/make-sddata-begin-idempotent/` is a prerequisite rather than the answer.
-That transition is the bulk of the work here and none of it exists.
-
-Betaflight and madflight sidestep all of this by only enabling MSC when disarmed, which is a
-state this firmware does not have.
-
-If this works it may retire both protocol entries, which is a large saving — but it serves
-only an operator holding the board, never a ground station on a radio link. The MAVLink
-paths are the only ones that work from orbit, so this is a convenience for development, not
-a replacement for them. Decide which problem is actually being solved before picking.
 
 ### Debug and release builds, with MAVLink tracing on the console
 
@@ -900,8 +789,8 @@ To decide:
   which is deprecated, `MAV_CMD_SET_MESSAGE_INTERVAL` (511) with `MESSAGE_INTERVAL`
   (244) is the current mechanism; `answer-message-requests` lets the ground *read* an
   interval back, but `SET` still accepts only message id 252. It matters over a narrow
-  radio link, and even more so once *[Download the flight log over the MAVLink log
-  protocol]* or *[Serve the SD card over MAVLink FTP]* lands and competes for it.
+  radio link, and even more so once `download-the-flight-log` or *[Serve the SD card
+  over MAVLink FTP]* lands and competes for it.
 - The parameter protocol has its own entry:
   *[Implement the MAVLink parameter protocol]*.
 

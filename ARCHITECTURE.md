@@ -516,7 +516,11 @@ calls it, and the Unity suite does, before it deletes the log files.
 the log can ever occupy. It writes to `data<i>.BIN` until the file reaches its size
 limit, then closes it, advances `i` modulo the file count, deletes whatever was
 there and opens the next one. The current index is persisted in `index.bin`, so a
-power cycle resumes where it left off instead of overwriting from zero. The
+power cycle resumes where it left off instead of overwriting from zero. It is
+overwritten in place at offset 0, opened without `O_APPEND`: `FILE_WRITE` includes it,
+and until `persist-the-log-ring-position` that made every index an append, so every
+restart after a second rotation reopened the first full file and deleted the one the
+previous boot had been writing. The
 footprint is fixed by the two constructor arguments — file count and size per file,
 defaulting to **4 files of 1 MiB**, so 4 MiB of card in total. At ~34 B/s a file
 covers about 8.6 h and the whole ring about 34 h, which puts rotation several times a

@@ -494,6 +494,47 @@ void test_sddata_begin_reopens_the_file_the_index_names(void) {
                               "writes still went to the file begin() left behind");
 }
 
+// A restart after the ring has rotated at least twice, which is the only situation in
+// which index.bin has been written more than once. cleanSdFiles() removes it before every
+// case, so no other case ever gets there -- and that is how writeLogIndex() appending
+// instead of overwriting went unnoticed: readLogIndex() reads the FIRST index written, so
+// every restart reopened the first full file, rotated on its first write, and deleted the
+// file the previous boot had been logging into.
+void test_sddata_resumes_the_file_it_was_writing_after_a_restart(void) {
+    sdData.setOnOpen(nullptr);
+
+    uint8_t payload[32];
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)i;
+    }
+    // setUp()'s begin() holds data0.BIN. Two files' worth plus a little: rotates into
+    // data1 and then data2, writing index.bin twice, and leaves data2 part-filled.
+    const int records = (int)(2 * TEST_FILE_SIZE_BYTES / sizeof(payload)) + 4;
+    for (int i = 0; i < records; ++i) {
+        sdData.write(payload, sizeof(payload));
+    }
+    sdData.end();
+
+    uint32_t size0 = fileSizeOf("data0.BIN");
+    uint32_t size1 = fileSizeOf("data1.BIN");
+    uint32_t size2 = fileSizeOf("data2.BIN");
+    TEST_ASSERT_TRUE_MESSAGE(size2 > 0, "the ring never reached data2.BIN");
+
+    // What a reboot does to the object: reopen from what the card says.
+    sdData.begin();
+    sdData.write(payload, sizeof(payload));
+    sdData.end();
+
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(int), fileSizeOf("index.bin"),
+                              "index.bin grew: each index was appended, not overwritten");
+    TEST_ASSERT_TRUE_MESSAGE(fileSizeOf("data2.BIN") > size2,
+                             "the restart did not resume in the file being written");
+    TEST_ASSERT_EQUAL_MESSAGE(size1, fileSizeOf("data1.BIN"),
+                              "the restart changed a file it was not writing");
+    TEST_ASSERT_EQUAL_MESSAGE(size0, fileSizeOf("data0.BIN"),
+                              "the restart changed a file it was not writing");
+}
+
 // write() accumulates and syncs once per FLUSH_INTERVAL_BYTES instead of syncing every
 // record. What a reader sees is the DIRECTORY ENTRY, which only a sync updates, so the
 // observable consequence is that a file reports less than what has been handed to it
@@ -721,6 +762,7 @@ int runUnityTests(void) {
     RUN_TEST(test_sddata_on_open_fires_on_rotation_without_re_entering);
     RUN_TEST(test_sddata_on_open_fires_on_begin);
     RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
+    RUN_TEST(test_sddata_resumes_the_file_it_was_writing_after_a_restart);
     RUN_TEST(test_sddata_write_batches_its_flushes);
     RUN_TEST(test_sddata_rotation_does_not_lose_unsynced_bytes);
     RUN_TEST(test_report_sd_volume_geometry);
