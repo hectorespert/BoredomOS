@@ -64,6 +64,16 @@ jobs:
           echo "::error::src/ carries queue items by value and must not allocate at run time"
           exit 1
         fi
+    - name: No environment injects a fault
+      # INJECT_FAULT compiles a deliberate stack overflow or allocation failure into
+      # the firmware (report-the-faulting-task). It is meant to be passed by hand,
+      # through PLATFORMIO_BUILD_FLAGS, for one HIL run; set in platformio.ini it
+      # would become the flight build.
+      run: |
+        if grep -nE 'INJECT_FAULT' platformio.ini; then
+          echo "::error::INJECT_FAULT must never be set in platformio.ini"
+          exit 1
+        fi
     - name: Run PlatformIO
       # All three environments, not just the default. The RAM budget is only
       # policed in the configurations that are actually built, and

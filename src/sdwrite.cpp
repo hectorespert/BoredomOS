@@ -6,9 +6,18 @@
 #include <SystemTime.h>
 #include <LinkMsg.h>
 #include <LinkPort.h>
+#include <Recovery.h>
 
 extern QueueHandle_t sdWriteQueue;
 extern SystemTime systemTime;
+
+// The previous boot, as src/main.cpp captured it before this boot overwrote the
+// recovery block -- read here, never from the registers themselves.
+extern Recovery::ResetReason previousResetReason;
+extern Recovery::BootPhase previousBootPhase;
+extern char previousFaultTask[];
+extern uint8_t bootConsecutiveCount;
+extern uint8_t bootCumulativeCount;
 
 SdData sdData;
 
@@ -37,6 +46,7 @@ static constexpr uint8_t kMsgFmt = 128;
 static constexpr uint8_t kMsgTime = 129;
 static constexpr uint8_t kMsgSys = 130;
 static constexpr uint8_t kMsgPwr = 131;
+static constexpr uint8_t kMsgRst = 132;
 
 // DataFlash's own field widths: name is char[4], format char[16], labels char[64].
 // Every definition below fits with room to spare -- the longest label string is
@@ -87,10 +97,28 @@ struct __attribute__((packed)) LogPwr
 // plausible-looking WRONG numbers on the ground rather than a parse error, which is
 // the one failure mode of this format that nothing would catch. These cost nothing
 // and catch the whole class.
+// Why the running boot began (report-the-faulting-task). Rsn and Phase are the
+// Recovery enums' own values, the numbers the heartbeat's custom_mode packs; Cons and
+// Cum are the counts as this boot set them. Task names the task a fault hook was
+// reached in, and is empty unless Phase is one of the two fault phases.
+struct __attribute__((packed)) LogRst
+{
+    uint8_t head1;
+    uint8_t head2;
+    uint8_t msgid;
+    uint64_t timeUs;
+    uint8_t reason;
+    uint8_t phase;
+    uint8_t consecutive;
+    uint8_t cumulative;
+    char task[16];
+};
+
 static_assert(sizeof(LogFormat) == 89, "FMT record must be 89 bytes on disk");
 static_assert(sizeof(LogTime) == 16, "TIME record must be 16 bytes on disk");
 static_assert(sizeof(LogSys) == 27, "SYS record must be 27 bytes on disk");
 static_assert(sizeof(LogPwr) == 14, "PWR record must be 14 bytes on disk");
+static_assert(sizeof(LogRst) == 31, "RST record must be 31 bytes on disk");
 
 // The preamble is CONSTANT -- format definitions never vary at run time -- so it
 // lives in flash and costs no RAM. It is re-emitted on every file open, which is
@@ -109,7 +137,18 @@ static const LogFormat kPreamble[] = {
      "PWR", "QHb", "TimeUS,mV,Pct"},
 };
 
-// Called by lib/SdData after it opens a file, at boot and on every rotation.
+// RST's definition is NOT in kPreamble: it follows the head TIME record instead.
+// LOG_ENTRY reads each file's time_utc from a TIME at the fixed offset
+// sizeof(kPreamble), and the files already on the card were written with this
+// four-record preamble -- growing it would move that offset for new files only and
+// make every older file report a wrong time. DataFlash needs a definition before the
+// first record of its type, not at the head of the file.
+static const LogFormat kRstFormat =
+    {kHead1, kHead2, kMsgFmt, kMsgRst, sizeof(LogRst),
+     "RST", "QBBBBN", "TimeUS,Rsn,Phase,Cons,Cum,Task"};
+
+// Called by lib/SdData after it opens a file, at boot and on every rotation. Writes
+// the constant preamble, the head TIME, then RST.
 //
 // It writes through writeRaw(), which does not check the size limit and therefore
 // cannot rotate -- that split is what stops this callback from re-entering the
@@ -129,6 +168,25 @@ static void writeLogPreamble(SdData &sd)
         (uint8_t)systemTime.source(),
     };
     sd.writeRaw(reinterpret_cast<const uint8_t *>(&record), sizeof(record));
+
+    // Why this boot began, after TIME and never before it (see kRstFormat). Written
+    // on every opening, rotations included, so each file says it on its own; two RST
+    // records with the same Cum describe the same boot.
+    sd.writeRaw(reinterpret_cast<const uint8_t *>(&kRstFormat), sizeof(kRstFormat));
+    LogRst reset = {
+        kHead1, kHead2, kMsgRst,
+        systemTime.sinceBootUsec(),
+        (uint8_t)previousResetReason,
+        (uint8_t)previousBootPhase,
+        bootConsecutiveCount,
+        bootCumulativeCount,
+        {},
+    };
+    if (previousBootPhase == Recovery::BootPhase::StackOverflowFault
+        || previousBootPhase == Recovery::BootPhase::MallocFailedFault) {
+        strncpy(reset.task, previousFaultTask, sizeof(reset.task));
+    }
+    sd.writeRaw(reinterpret_cast<const uint8_t *>(&reset), sizeof(reset));
 }
 
 // ---------------------------------------------------------------------------

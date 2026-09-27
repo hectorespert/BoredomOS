@@ -52,6 +52,35 @@ they read the board's CDC port themselves and take `HIL_UART_PORT` for the
 other. Without an adapter they self-skip, and a green run has not exercised
 them.
 
+## Injecting a fault
+
+`check_faults.py` checks what the board reports after a stack overflow or an
+allocation failure. The flight firmware has neither, so it needs a build with one
+compiled in. `INJECT_FAULT` is never set in `platformio.ini` (CI fails if it is), so
+pass it by hand:
+
+```bash
+PLATFORMIO_BUILD_FLAGS='-D INJECT_FAULT=1' pio run -t upload
+HIL_FAULT_INJECTED=1 python run.py --filter injected_fault
+```
+
+| `INJECT_FAULT` | Fault | Expected boot statement |
+|---|---|---|
+| 1 | `TaskLogger` overwrites the guard words at the end of its own stack, about 10 s into the boot | `Reset: software, overflow Logger` |
+| 2 | `TaskLogger` calls the allocation-failure hook, about 10 s into the boot | `Reset: software, malloc Logger` |
+| 3 | `setup()` calls the allocation-failure hook before any task exists | `Reset: software, malloc setup` |
+
+Each variant fires only on a boot that started with the consecutive fault count at
+0. The case arranges that itself, by sending `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`,
+and the boot after the fault runs clean so it can report it. Variants 1 and 2 need
+the SD card in, since `TaskLogger` runs only with one.
+
+**Put the board back afterwards**, or the next plain run will fail in ways that look
+like a regression. First reflash the flight build with `pio run -t upload`, with no
+`PLATFORMIO_BUILD_FLAGS` set. Then send `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, for
+example `long MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 1` in MAVProxy, so the counts the
+injection left behind do not push the board into the reduced configuration.
+
 ## Output
 
 Unity's line format — `file:line:name:PASS|FAIL|IGNORE[: message]` — so `pio test`

@@ -230,18 +230,25 @@ provenance rather than as numbers this design still stands behind. An independen
 refreshed only from the idle hook, turns a task that stops yielding into a
 watchdog reset within `WDT_TIMEOUT_MS`. `include/Recovery.h` and `src/recovery.cpp`
 own the register layout and the `PRCR`-unlocked access to it; `src/main.cpp` is
-the only file that reads or writes the reset reason, the phase marker and the
-counters, and `src/mavlink.cpp` reads them back for the heartbeat and the boot
-`STATUSTEXT`. A byte written at each milestone of `setup()` — link, clock, card,
-queues, tasks, scheduler-started, or one of the two fault hooks — is what makes a
-halt during initialisation nameable at the next boot instead of a silent hang.
+the only file that reads or writes the reset reason and the counters, and it writes
+the phase marker at each milestone of `setup()` — link, clock, card, queues, tasks,
+scheduler-started. That is what makes a halt during initialisation nameable at the
+next boot instead of a silent hang.
 
-The reduced configuration and the watchdog are not finished: `vApplicationStackOverflowHook`
-and `vApplicationMallocFailedHook` still rely on the watchdog eventually
-underflowing to reset the board rather than resetting themselves, and a hang
-during `setup()` before the idle hook first runs is caught only if it occurs
-after the watchdog is opened. Both are open items, not this document's claim
-about current behaviour.
+The two fault hooks in `src/hooks.cpp` are the other writers of the phase marker.
+`vApplicationStackOverflowHook` and `vApplicationMallocFailedHook` each mask
+interrupts, call `Recovery::recordFault()` to store their fault phase together with
+the name of the task they were reached in (`VBTBKR[12..26]`, inside the checksum), and
+reset the board at once with `NVIC_SystemReset()`. They do not wait for the watchdog,
+drive the LED or touch a port. `setup()` copies the previous boot's phase, task name
+and counts into globals before overwriting anything, and three things report them:
+the heartbeat's `custom_mode` (phase only), the boot `STATUSTEXT` —
+`Reset: <reason>, overflow <task>` or `malloc <task>` after a fault, which a ground
+station can also ask for with `MAV_CMD_REQUEST_MESSAGE` 253 at any time — and an
+`RST` record at the head of every log file (§5.2).
+
+One gap remains: a hang during `setup()` before the watchdog is opened is not caught
+by anything.
 
 ## 4. Queue memory ownership protocol
 
@@ -267,8 +274,8 @@ it is not true of the SD library underneath.
 The consequence is worth stating plainly: **the FreeRTOS heap has no users.**
 `configTOTAL_HEAP_SIZE` is `0x0`, and the linker drops `ucHeap`, `prvHeapInit` and
 the allocator itself from the image because nothing references them. A run-time
-allocation reintroduced anywhere in `src/` now fails on its first call and halts the
-board through the malloc-failed hook, which is the behaviour `openspec/specs/memory-
+allocation reintroduced anywhere in `src/` now fails on its first call and resets the
+board through the malloc-failed hook, naming the task that asked, which is the behaviour `openspec/specs/memory-
 budget/spec.md` prescribes — and CI greps all of `src/` to stop it reaching the board
 at all. That grep is textual, so the files that discuss this rule describe it rather
 than naming the function.
@@ -484,7 +491,7 @@ the file; and the `FMT` records make schema evolution additive, so a new sensor
 declares a new record type instead of widening an existing one and old logs stay
 readable.
 
-Four record types, none of them a wide combined record:
+Five record types, none of them a wide combined record:
 
 | id | name | format | labels | bytes | when |
 |---|---|---|---|---|---|
@@ -492,6 +499,7 @@ Four record types, none of them a wide combined record:
 | 129 | `TIME` | `QIB` | `TimeUS,Unix,Src` | 16 | file open, and on an accepted clock set |
 | 130 | `SYS` | `QHHHHHHHH` | `TimeUS,Heap,Log,SdW,Mav,SRd,SWr,URd,UWr` | 27 | 1 Hz |
 | 131 | `PWR` | `QHb` | `TimeUS,mV,Pct` | 14 | with the battery's own read cadence |
+| 132 | `RST` | `QBBBBN` | `TimeUS,Rsn,Phase,Cons,Cum,Task` | 31 | file open, right after the head `TIME` |
 
 ~34 B/s, against the ~251 B/s of the MessagePack records this replaced, 87 % of which
 were field-name strings rewritten 86 400 times a day.
@@ -519,6 +527,16 @@ therefore cannot rotate. That split is the whole reason the callback cannot re-e
 the rotation that invoked it. The preamble itself is constant and lives in flash, so it
 costs no RAM; the `TIME` record that follows it carries a live value and is built by
 `TaskSdWrite`, which has to be able to do so because rotation happens inside it.
+
+`RST` records why the running boot began: the previous reset's reason and the phase it
+reached, as the heartbeat packs them, both counts as this boot set them, and — after a
+fault hook — the task it was reached in (§3). Its `FMT` and the record itself come
+**after** the head `TIME`, not in the constant preamble: `LOG_ENTRY` reads `time_utc` at
+the fixed offset 356, and files written before `RST` existed have `TIME` there, so the
+preamble cannot grow without making every older file report a wrong time. Every
+opening writes one, rotations included; two `RST` records with the same `Cum` describe
+the same boot. The heartbeat and the boot `STATUSTEXT` say only what the last reset
+was — `RST` is the history.
 
 `begin()` opens unconditionally: it closes whatever the object was holding, reads the
 index and opens the file that index names. The callback is invoked on **every successful
@@ -695,26 +713,17 @@ Wiring is hardcoded, not configurable. Changing a pin means changing the code.
 | Resource | Where | Owned by |
 |---|---|---|
 | MAVLink link, `LINK_BAUD` | `LINK_UART` — `Serial1` on **D0** (`RX`) / **D1** (`TX`) | `src/link.cpp` |
-| MAVLink link, USB CDC | `LINK_USB` (`Serial` by default) | `src/link.cpp` — the one exception is `src/hooks.cpp`, which writes from the stack-overflow hook after the scheduler has stopped |
-| microSD card | SPI, CS on pin **9** | `src/sdwrite.cpp` via `lib/SdData` |
+| MAVLink link, USB CDC | `LINK_USB` (`Serial` by default) | `src/link.cpp` |
+| microSD card | SPI, CS on pin **9**; SCK is **D13**, which is also `LED_BUILTIN` | `src/sdwrite.cpp` via `lib/SdData` |
 | Battery / solar charger sense | **A0** | `lib/Battery` |
 | DS1307 real-time clock | I2C, address `0x68` | `lib/SystemTime` |
 | Internal RTC | on-chip | `lib/SystemTime` |
-| Status LED | `LED_BUILTIN` | `src/hooks.cpp` |
 | Independent watchdog (WDT) | on-chip, opened in `setup()` | `src/main.cpp` opens it; `src/hooks.cpp`'s idle hook refreshes it |
-| Backup registers (`R_SYSTEM->VBTBKR`) | on-chip, `[0..3]` the bootloader's, `[4..11]` this firmware's | `include/Recovery.h` / `src/recovery.cpp` own the layout and access; `src/main.cpp` is the only writer of its content |
+| Backup registers (`R_SYSTEM->VBTBKR`) | on-chip, `[0..3]` the bootloader's, `[4..26]` this firmware's | `include/Recovery.h` / `src/recovery.cpp` own the layout and access; `src/main.cpp` writes its content, except the fault phase and task name the two fault hooks store through `Recovery::recordFault()` |
 
-The status LED carries the two faults that stop the board, and the patterns are
-chosen to be told apart with nothing attached — which is the case they exist for:
-
-| Pattern | Means |
-|---|---|
-| Slow symmetric blink, 2 s on and 2 s off | A task overflowed its stack |
-| Two rapid blinks, then a pause of about a second | An allocation could not be satisfied |
-
-Both hooks mask interrupts and never return, so neither pattern can be produced by a
-board that is still running. Neither uses `delay()` or the serial port: the tick and
-the USB interrupt are gone by the time they blink, so both busy-wait instead.
+There is no status LED. `LED_BUILTIN` is the SD card's clock pin, so it flickers with
+card traffic and nothing else may drive it. The faults that used to blink it are
+reported to the ground at the next boot instead (§3).
 
 "Owned by" is the operative column: each of these has exactly one owner, and code
 outside that owner reaches the resource through a queue or through the library
@@ -747,12 +756,11 @@ library or a task is a decision rather than a detail — but it is now a decisio
 build can refuse.
 
 **Stack sizes are in words, not bytes**, and they are tuned tight — 96 to 384 words,
-384 to 1536 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled and
-`src/hooks.cpp` traps an overflow into a slow `LED_BUILTIN` blink with interrupts
-disabled, and an allocation failure into a fast double blink. **A blinking board means
-a stack is too small or memory ran out, not a wiring fault** — the two patterns are in
-section 6. After changing any task body, check that task's high-water mark in the SD
-log before assuming it still fits.
+384 to 1536 bytes. `configCHECK_FOR_STACK_OVERFLOW=2` is enabled, and an overflow or an
+allocation failure resets the board through `src/hooks.cpp` (§3). **A board that keeps
+resetting with `overflow <task>` or `malloc <task>` in its boot `STATUSTEXT` means a
+stack is too small or memory ran out, not a wiring fault.** After changing any task
+body, check that task's high-water mark in the SD log before assuming it still fits.
 
 **Four priority levels**, from `include/Priority.h`, never raw numbers. FreeRTOS is
 configured with `configMAX_PRIORITIES` of 5 and a 1000 Hz tick.
@@ -799,9 +807,6 @@ immediately, with every task at once, from any terminal. The housekeeping stream
 needs `pymavlink`, an arming command, and about eight seconds to cycle the whole
 set at the 1000 ms floor — and it travels through the subsystem you are most
 likely to be debugging.
-
-The stack-overflow hook in `src/hooks.cpp` still writes text to the USB port
-directly, after the scheduler has stopped. Nothing else does.
 
 **There is no host test environment.** `test/` holds two suites, and they test
 different things:

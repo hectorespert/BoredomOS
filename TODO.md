@@ -248,11 +248,14 @@ being no command at all.
 ### Finish what add-degraded-mode left open
 
 **Status:** defined
-**Scope:** `src/hooks.cpp`, `lib/SystemTime`, `platformio.ini`, `test/test_hil/`
+**Scope:** `lib/SystemTime`, `platformio.ini`, `test/test_hil/`
 
 `openspec/changes/archive/2026-09-13-add-degraded-mode/` shipped 35 of its 44 tasks,
-board-verified against the recovered board. Seven remain, each already scoped in that
-change's own `tasks.md` (numbers below refer to it). **6.1 and 6.4 are no longer here**:
+board-verified against the recovered board. Five remain, each already scoped in that
+change's own `tasks.md` (numbers below refer to it). **3.2 and 3.3 are no longer here**:
+the unsafe fault hooks (review finding 9) are fixed by
+`openspec/changes/archive/2026-09-27-report-the-faulting-task/`, which also replaces 3.3's
+card-pull verification with its own fault injection. **6.1 and 6.4 are no longer here**:
 6.1's short-circuit fix belongs to
 `openspec/changes/archive/2026-09-19-improve-clock-synchronisation/`, which cannot read
 the RTC's sub-second counter without it, and 6.4 moved there as a task. It is still
@@ -260,15 +263,6 @@ unclosed for the same reason it always was — the DS1307 cannot be disconnected
 assembly, which is now known to be a standing property rather than one session's bad
 luck, and which blocks 6.6 below as well.
 
-- **3.2 / 3.3 — the fault hooks are still unsafe (review finding 9).**
-  `vApplicationStackOverflowHook` in `src/hooks.cpp` writes the new phase marker
-  correctly, but still does `taskDISABLE_INTERRUPTS()` then `while (!Serial) {}` then
-  two `delay(2000)` calls — `delay()` cannot work with interrupts disabled, and the
-  wait never completes with no host attached, which is the normal case in flight. Fix:
-  marker first (already true), then `NVIC_SystemReset()` immediately, no blink. Once
-  fixed, 3.3 needs rescoping too: it assumed pulling the SD card would produce a reset
-  at the card phase, but task 6.2 (shipped) makes a missing card a degradation instead,
-  so that act no longer reaches this hook at all.
 - **4.6 — `WDT_TIMEOUT_MS` is still the placeholder value (1398 ms), not a measured one.**
   Needs `TaskSdWrite`'s worst case measured on the board, including a forced ring
   rollover (`lib/SdData/SdData.cpp`'s rotation can delete a file up to 1 GiB inside one
@@ -480,6 +474,28 @@ flight firmware:
 
 Cards written before the fix carry a stale first index; the first boot on the fixed firmware
 repeats the fault once and is correct from then on. Nothing works around that.
+
+### Finish what report-the-faulting-task left open
+
+**Status:** defined
+**Scope:** `test/test_hil/`, hands at the board
+
+`openspec/changes/archive/2026-09-27-report-the-faulting-task/` makes both fault hooks
+record the faulting task and reset. The task is reported three ways: the boot
+`STATUSTEXT`, the same statement served on `MAV_CMD_REQUEST_MESSAGE` 253, and an `RST`
+record in every log file. All three fault-injection variants pass over USB, as does the
+full HIL suite. Two of its tasks were not run (numbers refer to its `tasks.md`):
+
+- **4.6 — the unsolicited boot `STATUSTEXT` over the UART.** Flash
+  `INJECT_FAULT=1`, attach a USB-TTL adapter to D0/D1, and confirm that the text emitted
+  at boot reads `Reset: software, overflow Logger`. USB cannot observe it across a reset.
+  Only the requested copy has been seen.
+- **5.5 — `RST` after a rotation.** Let the log fill a file and move on, then confirm
+  the new file carries an `RST` with the same `Cum` as the file before it, and read
+  `SdWrite`'s high-water mark after the rotation. Rotation calls the same preamble
+  callback as boot, but this has not been observed. This can share the session with
+  *Finish what persist-the-log-ring-position left open*, which needs the same
+  rotation.
 
 ### Add the GY-87 IMU
 
@@ -767,7 +783,8 @@ Points still to resolve before implementing:
   nothing unless spoken to.
 - **Stacks.** Formatting text consumes stack, and they are tight, between 96 and 256
   words. When enabling the debug profile the log high-water marks have to be checked
-  again: this is exactly the case that triggers the slow blink of `src/hooks.cpp`.
+  again: this is exactly the case that triggers the stack overflow hook in
+  `src/hooks.cpp` (a reset naming the task, since `report-the-faulting-task`).
 - **What else goes into the debug profile.** A configurable detail level (headers
   only, or a hex dump), and whether it is reused for other subsystems' traces or
   stays MAVLink-only.
@@ -1066,36 +1083,6 @@ Worth reviewing together with *[Debug and release builds...]*: if the protocol t
 ends up printing the `msgid` to the console, formatting the number should be solved
 once and not in two places.
 
-### The stack overflow hook hangs before it warns
-
-**Status:** defined
-**Scope:** `src/hooks.cpp`, `ARCHITECTURE.md`
-
-`vApplicationStackOverflowHook()` calls `taskDISABLE_INTERRUPTS()` and then
-`while (!Serial) {}`. The USB CDC needs interrupts to enumerate: with no host
-connected — that is, in flight — that loop never ends and the board is dead
-**without blinking**. The `delay(2000)` that follows has the same problem, because
-it depends on the tick, which has also just lost its interrupts.
-
-So the documented diagnostic only works if a PC was already plugged in, which is
-exactly the case where it is least needed.
-
-The blink is also 2000 ms on and 2000 ms off: a 4 s period, 0.25 Hz.
-
-To decide: whether the visual warning should come first and the serial message
-after (only if the port was already up), or whether the blink should move to direct
-pin register manipulation and a busy-wait delay, depending on nothing that needs
-interrupts. `ARCHITECTURE.md` describes this hook as trapping an overflow into a slow
-blink; once the behaviour is fixed, state the real period there.
-
-Overlaps with `openspec/changes/archive/2026-09-13-add-degraded-mode` (formerly *Add a
-watchdog* and *`setup()` asserts on the RTC before the console exists*, both consumed
-by that change): with a watchdog, sitting here blinking forever stops being the obvious
-answer to an overflow, and that change's own review (`review.md` finding 9)
-already names the fix this entry describes — writing the phase marker first and
-resetting immediately, no blink — as not yet folded in.
-
-
 ### SD logging failure is silent
 
 **Status:** proposed
@@ -1292,7 +1279,7 @@ misleading fields. No new hardware is needed to fix a good part of it:
 ### Minor leftovers cleanup
 
 **Status:** defined
-**Scope:** `src/mavlink.cpp`, `src/hooks.cpp`, `test/test_libs/test_main.cpp`
+**Scope:** `src/mavlink.cpp`, `test/test_libs/test_main.cpp`
 
 Small, unrelated things worth getting out of the way in one go:
 
@@ -1303,7 +1290,6 @@ Small, unrelated things worth getting out of the way in one go:
   the switch. It compiles because it has no initialiser. Note that cppcheck does
   **not** flag it: the `add-static-analysis-to-ci` change measured what the checker
   actually reports, and this is not in it.
-- A space is missing in `"Overflow on" + String(pcTaskName)` in `src/hooks.cpp`.
 
 Two items left this list on 2026-09-20 without anyone doing them:
 `src/logger.cpp`'s GNU label initialiser (`unixtime: ...`) and the test's
@@ -1558,6 +1544,10 @@ which needs the boot report and therefore cannot be closed over USB. That change
 the limitation rather than working around it (its tasks 1.2 and 5.5 are marked as needing
 an adapter on D0/D1), so the `survived` clock source ships unexecuted until either an
 adapter is attached or this is fixed.
+
+The reset statement is no longer part of this: `openspec/changes/archive/2026-09-27-report-the-faulting-task/`
+serves it on `MAV_CMD_REQUEST_MESSAGE` for `STATUSTEXT` (253), so it can be read over USB
+after a reset. What is left is the clock report, which that change does not touch.
 
 To decide: whether to re-emit the boot texts a bounded number of times early after boot
 (cheap, no new surface, but ad hoc), to answer them on request (needs a command that does

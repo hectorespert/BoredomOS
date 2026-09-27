@@ -4,7 +4,8 @@ Covers the flight-log spec requirements "The log can be listed from the ground",
 listed log can be downloaded, including the one being written", "Downloading costs
 neither the log nor the link's cadence", "The ground is told when there is nothing to
 download" and "No command from the ground erases the log"
-(openspec/changes/download-the-flight-log/specs/flight-log/spec.md).
+(openspec/changes/download-the-flight-log/specs/flight-log/spec.md), and "The reset that
+started the board is recorded in the log" (openspec/changes/archive/2026-09-27-report-the-faulting-task/).
 
 What these cases cannot see: that the bytes downloaded are the bytes on the card, and
 that no log record is lost while a download runs. Both need the card read by some other
@@ -167,6 +168,52 @@ def test_the_log_being_written_downloads_whole_and_parses(link):
     finally:
         os.remove(path)
     assert {"FMT", "TIME", "SYS"} <= types, f"the downloaded log does not parse as expected: {types}"
+
+
+def test_the_log_records_the_boot_that_opened_it(link):
+    """flight-log: "The reset that started the board is recorded in the log"
+    (openspec/changes/archive/2026-09-27-report-the-faulting-task/). The newest file's last RST is this
+    boot's, since the file is reopened on every boot, and it sits right after the head
+    TIME and RST's own FMT, and agrees with what the heartbeat reports."""
+    hb = link.mav.recv_match(type="HEARTBEAT", blocking=True, timeout=15.0)
+    if hb is None:
+        raise NoLinkError("no HEARTBEAT seen")
+    reason = hb.custom_mode & 0xFF
+    phase = (hb.custom_mode >> 8) & 0xFF
+
+    by_id = _require_logs(link)
+    log_id = max(by_id)
+    chunks, last, _ = _download(link, log_id, by_id[log_id].size)
+    assert last is not None, "no LOG_DATA arrived"
+    blob = b"".join(chunks[o] for o in sorted(chunks))
+
+    from pymavlink import DFReader
+
+    fd, path = tempfile.mkstemp(suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(blob)
+        reader = DFReader.DFReader_binary(path)
+        sequence = []
+        while True:
+            msg = reader.recv_msg()
+            if msg is None:
+                break
+            sequence.append(msg)
+    finally:
+        os.remove(path)
+
+    rst = [i for i, m in enumerate(sequence) if m.get_type() == "RST"]
+    assert rst, "the newest log carries no RST record"
+    i = rst[-1]
+    before = [m.get_type() for m in sequence[max(0, i - 2):i]]
+    assert before == ["TIME", "FMT"], f"the last RST follows {before}, expected TIME then its FMT"
+    record = sequence[i]
+    assert record.Rsn == reason, f"RST Rsn {record.Rsn}, heartbeat reason {reason}"
+    assert record.Phase == phase, f"RST Phase {record.Phase}, heartbeat phase {phase}"
+    # The heartbeat clamps the cumulative count to its threshold (10); RST does not.
+    cumulative = (hb.custom_mode >> 24) & 0xFF
+    assert min(record.Cum, 10) == cumulative, f"RST Cum {record.Cum}, heartbeat {cumulative}"
 
 
 def test_an_id_that_does_not_exist(link):
