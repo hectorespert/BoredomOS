@@ -33,6 +33,7 @@ import time
 from hil import NoLinkError
 
 PROTOCOL_VERSION_ID = 300
+STATUSTEXT_ID = 253
 BURST = 5
 BURST_SPACING = 0.15
 
@@ -148,7 +149,10 @@ def test_every_served_id_is_sent_once_per_request(link):
     mav = _mavlink()
 
     problems = []
-    for msgid in (0, 1, 2, 147, 148, 300):
+    # 253 is STATUSTEXT, served as the boot reset statement (report-the-faulting-task).
+    # Another STATUSTEXT sent unasked inside the window only adds to the count, so it
+    # cannot make the case pass for the wrong reason.
+    for msgid in (0, 1, 2, 147, 148, 253, 300):
         msgs = _burst(link, msgid)
         acks = _acks(msgs, mav.MAV_CMD_REQUEST_MESSAGE)
         got = len(_of(msgs, _name_of(msgid)))
@@ -180,6 +184,32 @@ def test_requests_do_not_disturb_the_periodic_cadences(link):
         assert low <= n <= high, (
             f"{n} {name} in {elapsed:.1f} s of REQUEST_MESSAGE traffic, expected {low}-{high}"
         )
+
+
+# Recovery::ResetReason, in the order src/mavlink.cpp's resetReasonText() names them.
+REASON_TEXT = ("power-on", "low voltage", "watchdog", "software", "external/unknown",
+               "backup state invalid")
+
+
+def test_requested_statustext_is_the_boot_reset_statement(link):
+    """fault-recovery: the boot statement can be obtained on request, on either
+    port and in either configuration, and names the reason the heartbeat carries."""
+    mav = _mavlink()
+    hb = link.mav.recv_match(type="HEARTBEAT", blocking=True, timeout=15.0)
+    if hb is None:
+        raise NoLinkError("no HEARTBEAT seen")
+    reason = hb.custom_mode & 0xFF
+
+    msgs = _exchange(link, mav.MAV_CMD_REQUEST_MESSAGE, float(STATUSTEXT_ID))
+    acks = _acks(msgs, mav.MAV_CMD_REQUEST_MESSAGE)
+    assert acks and acks[0].result == mav.MAV_RESULT_ACCEPTED, (
+        f"expected ACCEPTED for STATUSTEXT, got {[a.result for a in acks]}"
+    )
+    texts = [m.text for m in _of(msgs, "STATUSTEXT") if m.text.startswith("Reset: ")]
+    assert texts, f"no reset statement among {[m.text for m in _of(msgs, 'STATUSTEXT')]}"
+    assert texts[0].startswith(f"Reset: {REASON_TEXT[reason]}, "), (
+        f"statement {texts[0]!r} does not name the heartbeat's reason {REASON_TEXT[reason]!r}"
+    )
 
 
 def test_unserved_ids_are_denied_and_send_nothing(link):
@@ -234,9 +264,9 @@ def test_get_interval_reports_the_periodic_rates(link):
 
 def test_get_interval_of_on_request_and_unavailable_messages(link):
     mav = _mavlink()
-    # 148 and 300 are served on request but never stream: off. 244 is only ever a
-    # reply, 24 and 65535 are never sent: not available.
-    for msgid, expected in ((148, -1), (300, -1), (244, 0), (24, 0), (65535, 0)):
+    # 148, 253 and 300 are served on request but never stream: off. 244 is only ever
+    # a reply, 24 and 65535 are never sent: not available.
+    for msgid, expected in ((148, -1), (253, -1), (300, -1), (244, 0), (24, 0), (65535, 0)):
         acks, intervals, _ = _interval_of(link, msgid)
         assert acks and acks[0].result == mav.MAV_RESULT_ACCEPTED, (
             f"id {msgid}: no ACCEPTED COMMAND_ACK"

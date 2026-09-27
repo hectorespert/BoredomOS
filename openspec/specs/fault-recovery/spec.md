@@ -48,6 +48,12 @@ before it is implemented, not left to whichever behaviour the clear happens to p
 The firmware SHALL also record how far the previous boot progressed, in enough detail to
 name which initialisation step was in progress when it stopped.
 
+When the previous boot ended in a fault handler — a task overflowing its stack, or an
+allocation that could not be satisfied — the firmware SHALL additionally know which of
+the two it was and the name of the task that was running, as that task was named when it
+was created. A name that cannot be read back intact SHALL be reported as far as it is
+legible rather than as arbitrary bytes.
+
 #### Scenario: The board resets after a hang
 
 - **WHEN** the watchdog resets the board
@@ -76,6 +82,19 @@ name which initialisation step was in progress when it stopped.
   low-voltage cause present
 - **THEN** the next boot identifies the cause as external or unknown, rather than as one
   of the other four
+
+#### Scenario: A task overflows its stack
+
+- **WHEN** a task overflows its stack and the board resets
+- **THEN** the next boot reports a stack overflow
+- **AND** it names the task that overflowed
+
+#### Scenario: A fault is followed by an ordinary reset
+
+- **WHEN** a boot that followed a fault-handler reset runs, and the board is then reset
+  for an unrelated reason
+- **THEN** the boot after that reports its own cause and does not repeat the earlier
+  fault or its task
 
 ### Requirement: Repeated failure selects a reduced configuration
 
@@ -187,8 +206,12 @@ configuration, the cause of the last reset, how far the last boot progressed, an
 counts — so that a ground station that connects at any time learns the state from the
 next heartbeat, without issuing a request.
 
-The firmware SHALL additionally report, once per boot, a human-readable statement naming
-the suspected cause.
+The firmware SHALL additionally report, once per boot and unasked, a human-readable
+statement naming the suspected cause. When the previous boot ended in a fault handler,
+the statement SHALL name which fault it was and the task it occurred in. The same
+statement SHALL be obtainable on request at any time during the boot, on the port the
+request arrives on, in every configuration, so that a ground station that was not
+listening when the boot began can still read it.
 
 This SHALL NOT change the vehicle identity, the message set, or the stream rates that
 the `mavlink-link` capability defines.
@@ -207,6 +230,19 @@ the `mavlink-link` capability defines.
 - **THEN** the heartbeat reports it as operational
 - **AND** the identity, message set and rates are those the `mavlink-link` capability
   defines
+
+#### Scenario: The boot statement names the faulting task
+
+- **WHEN** a ground station is listening on the UART when the board boots after a stack
+  overflow in a task
+- **THEN** it receives a human-readable statement naming the reset cause, the stack
+  overflow and that task
+
+#### Scenario: The boot statement is requested after the boot
+
+- **WHEN** a ground station attaches to either port after the boot, including over USB
+  after a reset, and requests the boot statement
+- **THEN** it receives the same statement the boot emitted, on that port only
 
 ### Requirement: The reduced configuration can be left
 

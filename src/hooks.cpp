@@ -63,59 +63,49 @@ extern "C" void vApplicationIdleHook(void)
     (void) xTaskResumeAll();
 }
 
+// Both fault hooks below do the same three things and nothing else: mask interrupts,
+// record which fault and in which task, and reset. Each runs when the firmware can no
+// longer be trusted -- next to a stack that has just overrun its neighbours, or with
+// memory exhausted -- so neither touches the serial port, the LED, the tick or an
+// allocation. The record is read back at the next boot, which reports it on the link
+// and in the log (report-the-faulting-task). LED_BUILTIN is the SD card's SPI clock
+// besides, so no indication on it could outlast the reset anyway.
+//
+// NVIC_SystemReset() rather than letting the watchdog underflow: the reset then
+// happens at once instead of up to one watchdog period later, and it is recorded as a
+// software reset with no deliberate-reset marker, which advances the consecutive fault
+// count just as the watchdog reset used to. The phase byte is what tells it apart.
+
+// Called from the context switch, in the PendSV handler on the main stack, not on the
+// task stack that overflowed. pcTaskName points into that task's TCB, which a long
+// enough overrun could have damaged; Recovery::recordFault bounds the copy, and every
+// reader filters what it reads back.
+// The signature is FreeRTOS's (task.h declares pcTaskName non-const), so it stays.
+// cppcheck-suppress constParameterPointer
 extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
-    // First statement, ahead of even taskDISABLE_INTERRUPTS() -- review.md
-    // finding 9's ordering concern is noted for a future pass (this hook still
-    // relies on the watchdog underflowing to reset the board, not on an
-    // explicit NVIC_SystemReset() here), but writing the marker before
-    // anything else at least makes it survive whichever comes first.
-    Recovery::setPhase(Recovery::BootPhase::StackOverflowFault);
+    (void) xTask;
     taskDISABLE_INTERRUPTS();
-    while (!Serial) {}
-    Serial.println("Overflow on" + String(pcTaskName) + " task!");
-    pinMode(LED_BUILTIN, OUTPUT);
-    while (1) {
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(2000);
-        digitalWrite(LED_BUILTIN, LOW);
-        delay(2000);
-    }
+    Recovery::recordFault(Recovery::BootPhase::StackOverflowFault, pcTaskName);
+    NVIC_SystemReset();
 }
 
-// Spins for roughly the requested number of milliseconds without the scheduler tick.
-// delay() cannot be used from a fault hook: it waits on a tick that has stopped along
-// with the interrupts. The constant is approximate -- 48 MHz, and the loop is a few
-// cycles per iteration -- because the blink only has to be legible, not accurate.
-static void spinMilliseconds(uint32_t ms)
-{
-    for (uint32_t outer = 0; outer < ms; outer++) {
-        for (volatile uint32_t inner = 0; inner < 6000; inner++) {
-        }
-    }
-}
-
-// heap_4 calls this at the point of failure, after xTaskResumeAll() and in the context
-// of whichever task asked for the memory -- so the scheduler is still running and the
-// other tasks are still runnable. Signalling without stopping them would leave the
-// higher-priority tasks transmitting telemetry from a firmware that is out of memory,
-// which from the ground is indistinguishable from one that works. So interrupts go
-// first, and this never returns.
+// Runs at the point of failure, in the context of whichever task asked for the memory
+// -- so the scheduler is still running and the other tasks are still runnable.
+// Signalling without stopping them would leave the higher-priority tasks transmitting
+// telemetry from a firmware that is out of memory, which from the ground is
+// indistinguishable from one that works. So interrupts go first.
 //
-// Two rapid blinks and a long pause, to be told apart from the stack-overflow hook's
-// slow symmetric 0.25 Hz. Both patterns are recorded in ARCHITECTURE.md section 6.
+// Before the scheduler starts there is no calling task to name, and pcTaskGetName(NULL)
+// would not say so: once the first xTaskCreateStatic has run, pxCurrentTCB points at a
+// created task even though none is running. The scheduler state is what tells the two
+// apart, so an allocation from setup() is recorded as "setup".
 extern "C" void vApplicationMallocFailedHook()
 {
-    Recovery::setPhase(Recovery::BootPhase::MallocFailedFault);
     taskDISABLE_INTERRUPTS();
-    pinMode(LED_BUILTIN, OUTPUT);
-    while (1) {
-        for (uint8_t blink = 0; blink < 2; blink++) {
-            digitalWrite(LED_BUILTIN, HIGH);
-            spinMilliseconds(120);
-            digitalWrite(LED_BUILTIN, LOW);
-            spinMilliseconds(120);
-        }
-        spinMilliseconds(1000);
-    }
+    const char *taskName = (xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED)
+        ? "setup"
+        : pcTaskGetName(NULL);
+    Recovery::recordFault(Recovery::BootPhase::MallocFailedFault, taskName);
+    NVIC_SystemReset();
 }

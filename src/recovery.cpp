@@ -1,7 +1,7 @@
 #include <Recovery.h>
 #include <Arduino.h>
 
-// PRCR-unlocked access to R_SYSTEM->VBTBKR[4..11]. This is the only file that
+// PRCR-unlocked access to R_SYSTEM->VBTBKR[4..26]. This is the only file that
 // writes those bytes; cores/arduino/boot.cpp's own PRCR unlock for VBTBKR[0..3]
 // is a separate, unrelated critical section over the same register -- see
 // design.md finding 7 for why every write here has to be one.
@@ -20,7 +20,7 @@ inline volatile uint8_t &vbtbkr(uint8_t offset)
 uint8_t computeChecksum()
 {
     uint8_t sum = 0;
-    for (uint8_t offset = Recovery::OFFSET_CONSECUTIVE_COUNT; offset <= Recovery::OFFSET_DELIBERATE; offset++) {
+    for (uint8_t offset = Recovery::OFFSET_CONSECUTIVE_COUNT; offset <= Recovery::OFFSET_LAST; offset++) {
         sum += vbtbkr(offset);
     }
     return sum;
@@ -37,7 +37,7 @@ bool Recovery::isValid()
 void Recovery::reinitialise()
 {
     R_SYSTEM->PRCR = kPrcrUnlockPrc1;
-    for (uint8_t offset = OFFSET_CONSECUTIVE_COUNT; offset <= OFFSET_DELIBERATE; offset++) {
+    for (uint8_t offset = OFFSET_CONSECUTIVE_COUNT; offset <= OFFSET_LAST; offset++) {
         vbtbkr(offset) = 0;
     }
     vbtbkr(OFFSET_CHECKSUM) = computeChecksum();
@@ -102,6 +102,34 @@ Recovery::BootPhase Recovery::getPhase()
 void Recovery::setPhase(BootPhase phase)
 {
     writeByte(OFFSET_PHASE, static_cast<uint8_t>(phase));
+}
+
+void Recovery::recordFault(BootPhase phase, const char *taskName)
+{
+    R_SYSTEM->PRCR = kPrcrUnlockPrc1;
+    bool ended = (taskName == nullptr);
+    for (uint8_t i = 0; i < FAULT_TASK_LEN; i++) {
+        char c = ended ? '\0' : taskName[i];
+        if (c == '\0') ended = true;
+        vbtbkr(OFFSET_FAULT_TASK + i) = static_cast<uint8_t>(c);
+    }
+    vbtbkr(OFFSET_PHASE) = static_cast<uint8_t>(phase);
+    vbtbkr(OFFSET_CHECKSUM) = computeChecksum();
+    vbtbkr(OFFSET_VALIDITY_MAGIC) = VALIDITY_MAGIC;
+    R_SYSTEM->PRCR = kPrcrLock;
+}
+
+void Recovery::getFaultTask(char *out)
+{
+    uint8_t length = 0;
+    if (isValid()) {
+        while (length < FAULT_TASK_LEN) {
+            uint8_t c = vbtbkr(OFFSET_FAULT_TASK + length);
+            if (c == 0) break;
+            out[length++] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?';
+        }
+    }
+    out[length] = '\0';
 }
 
 Recovery::ResetReason Recovery::getReason()

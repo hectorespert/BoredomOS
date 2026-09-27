@@ -54,6 +54,7 @@ extern bool reducedConfiguration;
 extern bool sdCardAvailable;
 extern Recovery::ResetReason previousResetReason;
 extern Recovery::BootPhase previousBootPhase;
+extern char previousFaultTask[];
 
 // Set once in setup(), before the scheduler starts (src/main.cpp:335-357), and
 // never reassigned after -- safe to read directly from the housekeeping table
@@ -135,8 +136,9 @@ static void sendStatusText(uint8_t port, const char* text, uint8_t severity)
     LinkMsg intent;
     intent.kind = LinkMsgKind::StatusText;
     intent.statustext.severity = severity;
-    strncpy(intent.statustext.text, text, sizeof(intent.statustext.text) - 1);
-    intent.statustext.text[sizeof(intent.statustext.text) - 1] = '\0';
+    // All 50 bytes: the MAVLink field carries no terminator when the text fills it,
+    // and strncpy NUL-pads a shorter one.
+    strncpy(intent.statustext.text, text, sizeof(intent.statustext.text));
     enqueueWrite(port, intent);
 }
 
@@ -169,25 +171,54 @@ static const char* bootPhaseText(Recovery::BootPhase phase)
     return "unknown";
 }
 
-// Longest combination is 48 characters ("Reset: backup state invalid, phase
-// malloc failed"), under the 50-byte STATUSTEXT text field -- no printf family
-// involved, per review.md's note that newlib-nano's vsnprintf costs stack this
-// task's 128 words does not have to spare.
+// No printf family involved, per review.md's note that newlib-nano's vsnprintf costs
+// stack this task does not have to spare.
 //
+// "Reset: <reason>, phase <phase>", or after a fault hook "Reset: <reason>, overflow
+// <task>" / "malloc <task>" (report-the-faulting-task). The longest possible is 49
+// characters -- "external/unknown" plus "overflow " plus a 15-character task name --
+// inside the 50-byte field. "backup state invalid" is longer but never meets a fault
+// phase: it means the block was just reinitialised, so the phase reads Start.
+// Every append is bounded all the same, so an impossible combination truncates.
+//
+// Rebuilt from the previous-boot globals each time rather than stored: they do not
+// change during a boot, so the text sent on request is the one sent at boot.
+static void buildBootStatement(char (&text)[51])
+{
+    text[0] = '\0';
+    strncat(text, "Reset: ", sizeof(text) - 1);
+    strncat(text, resetReasonText(previousResetReason), sizeof(text) - 1 - strlen(text));
+
+    const char *fault = nullptr;
+    if (previousBootPhase == Recovery::BootPhase::StackOverflowFault) fault = ", overflow ";
+    if (previousBootPhase == Recovery::BootPhase::MallocFailedFault) fault = ", malloc ";
+
+    if (fault != nullptr) {
+        strncat(text, fault, sizeof(text) - 1 - strlen(text));
+        strncat(text, previousFaultTask, sizeof(text) - 1 - strlen(text));
+    } else {
+        strncat(text, ", phase ", sizeof(text) - 1 - strlen(text));
+        strncat(text, bootPhaseText(previousBootPhase), sizeof(text) - 1 - strlen(text));
+    }
+}
+
+// Served on MAV_CMD_REQUEST_MESSAGE for STATUSTEXT, on the requesting port only --
+// which is how a ground station that was not listening at boot reads it, including
+// over USB, whose port drops across the reset that preceded this boot.
+static void sendBootStatement(uint8_t port)
+{
+    char text[51];
+    buildBootStatement(text);
+    sendStatusText(port, text, MAV_SEVERITY_CRITICAL);
+}
+
 // Goes out both ports rather than one: it answers "why did you reset", and
 // which port a ground station happens to be on at boot is not something the
 // firmware knows. Unlike a reply, it has no originating port to route back to.
 static void sendBootStatusText()
 {
-    char text[50];
-    text[0] = '\0';
-    strncat(text, "Reset: ", sizeof(text) - 1);
-    strncat(text, resetReasonText(previousResetReason), sizeof(text) - 1 - strlen(text));
-    strncat(text, ", phase ", sizeof(text) - 1 - strlen(text));
-    strncat(text, bootPhaseText(previousBootPhase), sizeof(text) - 1 - strlen(text));
-
     for (uint8_t port = 0; port < kPortCount; ++port) {
-        sendStatusText(port, text, MAV_SEVERITY_CRITICAL);
+        sendBootStatement(port);
     }
 }
 
@@ -896,6 +927,10 @@ constexpr uint8_t kNoScheduleRow              = 0xFF;
 // the same because GET_MESSAGE_INTERVAL has to be able to report its armed
 // state.
 //
+// STATUSTEXT is served as the boot reset statement, not as whatever text went
+// out last: that is the one STATUSTEXT a late ground station has a reason to ask
+// for (report-the-faulting-task).
+//
 // `const` with function pointers to static functions: the linker keeps the
 // whole table in flash, which is what lets this cost no RAM.
 struct MessageEntry {
@@ -911,6 +946,7 @@ static const MessageEntry kMessages[] = {
     { MAVLINK_MSG_ID_BATTERY_STATUS,    sendBatteryStatus,    kBatteryScheduleIndex      },
     { MAVLINK_MSG_ID_AUTOPILOT_VERSION, sendAutopilotVersion, kNoScheduleRow             },
     { MAVLINK_MSG_ID_PROTOCOL_VERSION,  sendProtocolVersion,  kNoScheduleRow             },
+    { MAVLINK_MSG_ID_STATUSTEXT,        sendBootStatement,    kNoScheduleRow             },
     { MAVLINK_MSG_ID_NAMED_VALUE_INT,   nullptr,              kHousekeepingScheduleIndex },
 };
 

@@ -40,6 +40,17 @@ bool reducedConfiguration = false;
 Recovery::BootPhase previousBootPhase = Recovery::BootPhase::Start;
 Recovery::ResetReason previousResetReason = Recovery::ResetReason::PowerOn;
 
+// The task a fault hook was reached in, when previousBootPhase is one of the two
+// fault phases; filtered to printable ASCII by Recovery::getFaultTask(). Captured
+// beside previousBootPhase for the same reason.
+char previousFaultTask[Recovery::FAULT_TASK_LEN + 1] = "";
+
+// Both counts as this boot set them. The consecutive count is cleared once the boot
+// is declared stable, but what the log's RST record describes is the boot as it
+// began, however late the file carrying it is opened.
+uint8_t bootConsecutiveCount = 0;
+uint8_t bootCumulativeCount = 0;
+
 TaskHandle_t taskUartWriteHandler = NULL;
 
 TaskHandle_t taskUartReadHandler = NULL;
@@ -214,6 +225,10 @@ extern void linkPortsInit(QueueHandle_t uartWriteQueue, QueueHandle_t usbWriteQu
 
 [[noreturn]] extern void TaskMavlink(void *pvParameters);
 
+#if defined(INJECT_FAULT) && INJECT_FAULT == 3
+extern "C" void vApplicationMallocFailedHook();
+#endif
+
 namespace {
 
 constexpr uint16_t kPrcrUnlockPrc1 = 0xA502;
@@ -362,6 +377,7 @@ void setup()
   // Captured before anything below overwrites it with this boot's own
   // progress -- see the previousBootPhase declaration above.
   previousBootPhase = Recovery::getPhase();
+  Recovery::getFaultTask(previousFaultTask);
 
   // The backup-register block is self-healing on its very first successful
   // write (Recovery::writeByte always refreshes the magic and checksum), but
@@ -384,6 +400,8 @@ void setup()
   Recovery::setReason(reason);
 
   reducedConfiguration = updateCountersAndDecideConfiguration(reason);
+  bootConsecutiveCount = Recovery::getConsecutiveCount();
+  bootCumulativeCount = Recovery::getCumulativeCount();
 
   Recovery::setPhase(Recovery::BootPhase::Start);
 
@@ -426,6 +444,15 @@ void setup()
   linkPortsInit(uartWriteQueue, usbWriteQueue);
 
   Recovery::setPhase(Recovery::BootPhase::QueuesDone);
+
+#if defined(INJECT_FAULT) && INJECT_FAULT == 3
+  // Fault injection, passed by hand and never set in platformio.ini (CI checks):
+  // see test/test_hil/README.md. Fires only on a boot that started with no
+  // consecutive fault, so the boot after it runs clean and can report it.
+  if (bootConsecutiveCount == 0) {
+    vApplicationMallocFailedHook();
+  }
+#endif
 
   // With static storage these cannot fail for want of memory, so a NULL handle means
   // an argument is wrong -- a programming error, and worth trapping at boot.

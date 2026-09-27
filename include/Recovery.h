@@ -16,8 +16,8 @@
 // include/SdRecord.h are shared without owning behaviour.
 namespace Recovery {
 
-// Marks [OFFSET_CONSECUTIVE_COUNT..OFFSET_DELIBERATE] as this firmware's own
-// content rather than whatever a power event or an SEU left behind.
+// Marks [OFFSET_CONSECUTIVE_COUNT..OFFSET_LAST] as this firmware's own content
+// rather than whatever a power event or an SEU left behind.
 constexpr uint8_t VALIDITY_MAGIC = 0xB5;
 
 enum class ResetReason : uint8_t {
@@ -35,7 +35,7 @@ enum class ResetReason : uint8_t {
 // MallocFailedFault name a fault hook instead.
 //
 // LinkDone comes before ClockDone: both the heartbeat and the boot STATUSTEXT
-// need LINK_SERIAL.begin() to have run, so main.cpp brings the link up first --
+// need LINK_UART.begin() to have run, so main.cpp brings the link up first --
 // see design.md's phase-marker decision (review.md finding 13). The numeric
 // values below follow that order; do not reorder them to match an earlier
 // draft without also fixing every setPhase() call site in main.cpp.
@@ -70,18 +70,26 @@ constexpr uint8_t OFFSET_CUMULATIVE_SNAPSHOT = 8;
 constexpr uint8_t OFFSET_PHASE = 9;
 constexpr uint8_t OFFSET_REASON = 10;
 constexpr uint8_t OFFSET_DELIBERATE = 11;
+// The name of the task a fault hook was reached in, zero-padded. Meaningful only
+// while OFFSET_PHASE holds StackOverflowFault or MallocFailedFault: nothing clears
+// it, because every boot overwrites the phase from Start onwards and a stale name
+// is then never read. Fifteen bytes is configMAX_TASK_NAME_LEN - 1, and the most
+// the boot STATUSTEXT has room for (see src/mavlink.cpp).
+constexpr uint8_t OFFSET_FAULT_TASK = 12;
+constexpr uint8_t FAULT_TASK_LEN = 15;
+constexpr uint8_t OFFSET_LAST = OFFSET_FAULT_TASK + FAULT_TASK_LEN - 1;
 
 constexpr uint8_t CONSECUTIVE_THRESHOLD = 3;
 constexpr uint8_t CUMULATIVE_THRESHOLD = 10;
 
 // True when the validity magic and the checksum over
-// [OFFSET_CONSECUTIVE_COUNT..OFFSET_DELIBERATE] both match what is stored. False
+// [OFFSET_CONSECUTIVE_COUNT..OFFSET_LAST] both match what is stored. False
 // means the block is uninitialised (the first boot after flashing this firmware)
 // or was corrupted in place (an SEU, or a brownout interrupting a write) and its
 // content must not be trusted as counters.
 bool isValid();
 
-// Zeroes [OFFSET_CONSECUTIVE_COUNT..OFFSET_DELIBERATE] and writes a fresh magic
+// Zeroes [OFFSET_CONSECUTIVE_COUNT..OFFSET_LAST] and writes a fresh magic
 // and checksum over that all-zero content, without touching [0..3]. Called once,
 // at the top of setup(), when isValid() is false -- see main.cpp. Also used by
 // the ground-commanded return to normal (task 8.1) and by commissioning (9.8) to
@@ -114,6 +122,18 @@ void setCumulativeSnapshot(uint8_t value);
 
 BootPhase getPhase();
 void setPhase(BootPhase phase);
+
+// Called from the two fault hooks only, with interrupts already masked. Writes the
+// task name (up to FAULT_TASK_LEN bytes, stopping at a NUL, zero-padding the rest)
+// and then the phase, under one PRCR unlock with one checksum -- name first, so a
+// reset landing in between leaves a phase that does not claim a fault. taskName may
+// point into a TCB an overflow has damaged; the copy is bounded either way.
+void recordFault(BootPhase phase, const char *taskName);
+
+// Copies the stored task name into out, NUL-terminated, replacing any byte outside
+// printable ASCII with '?' and stopping at the first NUL. out must hold
+// FAULT_TASK_LEN + 1 bytes. Empty when !isValid().
+void getFaultTask(char *out);
 
 ResetReason getReason();
 void setReason(ResetReason reason);
