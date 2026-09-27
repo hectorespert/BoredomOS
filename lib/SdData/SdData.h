@@ -33,14 +33,17 @@ public:
   // silent write failure.
   explicit SdData(int files = 4, size_t size = 1024UL * 1024UL);
 
-  // Opens the file the persisted index names, closing whatever this object was
-  // already holding. Opening always opens: calling this twice reopens, and the
-  // second call lands on the file the index names rather than keeping the first.
+  // Opens the file the ring was writing, closing whatever this object was already
+  // holding. The persisted index names it, but is checked against the card first: if
+  // it is missing, out of range, or names a full file, the ring is walked on from it
+  // to the first slot that is absent or not full, and the index is rewritten. If every
+  // slot is full it rotates, as write() would -- it never appends to a full file.
+  // Opening always opens: calling this twice reopens, and the second call lands
+  // wherever the card now says rather than keeping the file already held.
   // It used to open only when nothing was held, which made a second call a
   // silent no-op that kept a file the index had moved away from -- and the object
-  // cannot detect that for itself, because getLogFileName() derives the name from
-  // _fileIdx, which readLogIndex() has just overwritten. Closing first is what
-  // removes the question.
+  // cannot detect that for itself, because the file name is derived from _fileIdx,
+  // which begin() has just overwritten. Closing first is what removes the question.
   void begin();
 
   // Closes the open file, and nothing else: the index is not reset, the callback
@@ -70,8 +73,9 @@ public:
   void writeRaw(const uint8_t *data, size_t length);
 
   // Appends bytes, then checks the size limit and rotates if it has been reached:
-  // close, advance the index modulo the file count, persist the index, delete
-  // whatever occupied the next slot, open it, and invoke onOpen. The record that
+  // close, advance modulo the file count, delete whatever occupied the next slot,
+  // persist the index, open it, and invoke onOpen. Deleting before persisting is what
+  // keeps the index from ever naming a file from a previous lap. The record that
   // tripped the limit stays in the file it was written to.
   //
   // Unlike writeRaw(), this does NOT sync on every call. It accumulates and syncs
@@ -116,7 +120,9 @@ private:
   SdDataOnOpen _onOpen = nullptr;
   int readLogIndex();
   void writeLogIndex();
-  String getLogFileName();
+  String getLogFileName(int idx);
+  bool slotIsFull(int idx);
+  void openNextSlot();
   void notifyOpened();
 };
 
