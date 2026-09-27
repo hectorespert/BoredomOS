@@ -535,6 +535,126 @@ void test_sddata_resumes_the_file_it_was_writing_after_a_restart(void) {
                               "the restart changed a file it was not writing");
 }
 
+// Replaces a log file with `size` bytes of `fill`, so a case can build the card a power
+// cut or a lost index would leave behind. size 0 removes the file instead: that is an
+// absent slot, which the ring treats differently from an empty one.
+static void writeFileByHand(const char *name, uint32_t size, uint8_t fill) {
+    if (SD.exists(name)) {
+        SD.remove(name);
+    }
+    if (size == 0) {
+        return;
+    }
+    File f = SD.open(name, FILE_WRITE);
+    if (!f) {
+        return;
+    }
+    uint8_t chunk[64];
+    memset(chunk, fill, sizeof(chunk));
+    uint32_t left = size;
+    while (left > 0) {
+        size_t n = left < sizeof(chunk) ? left : sizeof(chunk);
+        f.write(chunk, n);
+        left -= n;
+    }
+    f.flush();
+    f.close();
+}
+
+// Reads index.bin the way SdData::readLogIndex() does. -1 when it is absent.
+static int readLogIndexByHand() {
+    File f = SD.open("index.bin", FILE_READ);
+    if (!f) {
+        return -1;
+    }
+    int idx = -1;
+    f.readBytes(reinterpret_cast<char *>(&idx), sizeof(idx));
+    f.close();
+    return idx;
+}
+
+// Lays out the four slots by size (0 = absent), calls begin() the way a boot does, writes
+// one record and closes. What each case then asserts is where that record went.
+static void bootOnCard(const uint32_t sizes[TEST_FILE_COUNT], int index) {
+    // setUp()'s begin() holds data0.BIN; release it before the card changes underneath.
+    sdData.end();
+    sdData.setOnOpen(nullptr);
+    for (int i = 0; i < TEST_FILE_COUNT; ++i) {
+        String name = "data" + String(i) + ".BIN";
+        writeFileByHand(name.c_str(), sizes[i], (uint8_t)('A' + i));
+    }
+    if (index < 0) {
+        if (SD.exists("index.bin")) {
+            SD.remove("index.bin");
+        }
+    } else {
+        writeLogIndexByHand(index);
+    }
+
+    uint8_t payload[32];
+    memset(payload, 0x5A, sizeof(payload));
+    sdData.begin();
+    sdData.write(payload, sizeof(payload));
+    sdData.end();
+}
+
+static void assertSlotSizes(const uint32_t expected[TEST_FILE_COUNT]) {
+    for (int i = 0; i < TEST_FILE_COUNT; ++i) {
+        String name = "data" + String(i) + ".BIN";
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(expected[i], fileSizeOf(name.c_str()), name.c_str());
+    }
+}
+
+// A cut after rotation closed a full file but before it removed the next one: the index
+// still names the file just closed, and every slot is full -- the next one with the
+// previous lap. Before this change begin() appended to the indexed full file; had the
+// index already moved (the old order persisted it before the remove), it appended to the
+// previous lap's file, which is how one file came to hold two laps. Either way a full file
+// was written to. Now the ring moves on, and the old lap's file is replaced, not extended.
+void test_sddata_begin_moves_on_when_every_slot_is_full(void) {
+    const uint32_t full = TEST_FILE_SIZE_BYTES;
+    const uint32_t before[TEST_FILE_COUNT] = {full, full, full, full};
+    bootOnCard(before, 1);
+
+    const uint32_t after[TEST_FILE_COUNT] = {full, full, 32, full};
+    assertSlotSizes(after);
+    TEST_ASSERT_EQUAL_MESSAGE(2, readLogIndexByHand(), "index.bin did not follow the move");
+}
+
+// A cut after the next file was removed but before the index moved to it.
+void test_sddata_begin_walks_past_an_indexed_full_file_to_an_absent_slot(void) {
+    const uint32_t full = TEST_FILE_SIZE_BYTES;
+    const uint32_t before[TEST_FILE_COUNT] = {full, full, 0, full};
+    bootOnCard(before, 1);
+
+    const uint32_t after[TEST_FILE_COUNT] = {full, full, 32, full};
+    assertSlotSizes(after);
+    TEST_ASSERT_EQUAL_MESSAGE(2, readLogIndexByHand(), "index.bin was not repaired");
+}
+
+// index.bin lost on a ring that has wrapped. Without the check, readLogIndex()'s 0 sent
+// the boot to the full data0.BIN, whose first write rotated and deleted data1.BIN.
+void test_sddata_begin_finds_the_partial_file_when_the_index_is_missing(void) {
+    const uint32_t full = TEST_FILE_SIZE_BYTES;
+    const uint32_t before[TEST_FILE_COUNT] = {full, full, 1000, full};
+    bootOnCard(before, -1);
+
+    const uint32_t after[TEST_FILE_COUNT] = {full, full, 1032, full};
+    assertSlotSizes(after);
+    TEST_ASSERT_EQUAL_MESSAGE(2, readLogIndexByHand(), "index.bin was not rewritten");
+}
+
+// index.bin present and in range, but naming a finished file.
+void test_sddata_begin_finds_the_partial_file_when_the_index_names_a_full_one(void) {
+    const uint32_t full = TEST_FILE_SIZE_BYTES;
+    const uint32_t before[TEST_FILE_COUNT] = {full, full, 1000, full};
+    bootOnCard(before, 3);
+
+    const uint32_t after[TEST_FILE_COUNT] = {full, full, 1032, full};
+    assertSlotSizes(after);
+    TEST_ASSERT_EQUAL_MESSAGE(2, readLogIndexByHand(), "index.bin was not rewritten");
+}
+
 // write() accumulates and syncs once per FLUSH_INTERVAL_BYTES instead of syncing every
 // record. What a reader sees is the DIRECTORY ENTRY, which only a sync updates, so the
 // observable consequence is that a file reports less than what has been handed to it
@@ -763,6 +883,10 @@ int runUnityTests(void) {
     RUN_TEST(test_sddata_on_open_fires_on_begin);
     RUN_TEST(test_sddata_begin_reopens_the_file_the_index_names);
     RUN_TEST(test_sddata_resumes_the_file_it_was_writing_after_a_restart);
+    RUN_TEST(test_sddata_begin_moves_on_when_every_slot_is_full);
+    RUN_TEST(test_sddata_begin_walks_past_an_indexed_full_file_to_an_absent_slot);
+    RUN_TEST(test_sddata_begin_finds_the_partial_file_when_the_index_is_missing);
+    RUN_TEST(test_sddata_begin_finds_the_partial_file_when_the_index_names_a_full_one);
     RUN_TEST(test_sddata_write_batches_its_flushes);
     RUN_TEST(test_sddata_rotation_does_not_lose_unsynced_bytes);
     RUN_TEST(test_report_sd_volume_geometry);

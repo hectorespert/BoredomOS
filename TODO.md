@@ -497,6 +497,28 @@ full HIL suite. Two of its tasks were not run (numbers refer to its `tasks.md`):
   *Finish what persist-the-log-ring-position left open*, which needs the same
   rotation.
 
+### Finish what harden-the-ring-index left open
+
+**Status:** defined
+**Scope:** hands at the board, and a card whose ring has wrapped
+
+`openspec/changes/archive/2026-09-27-harden-the-ring-index/` makes rotation delete the next
+file before it persists `index.bin`, and makes `begin()` check the index against the file
+sizes instead of trusting it. It is proven on the real card by four Unity cases that build
+each card state by hand (25/25), and the HIL suite shows no regression. Two of its tasks
+were not closed (numbers refer to its `tasks.md`):
+
+- **3.4 — a lost `index.bin` on a real wrapped ring.** Let the flight firmware wrap the ring
+  (about 34 h at the default size), delete `index.bin` from the card, restart, and confirm
+  over the log download that the partial file grew and no other file's `LOG_ENTRY` size or
+  `time_utc` changed. It can share the session with *Finish what
+  persist-the-log-ring-position left open* and task 5.5 of *Finish what
+  report-the-faulting-task left open*, which need a rotation too.
+- **3.5 — nothing can close this one, and it is recorded so that it is not mistaken for
+  proven.** The claim that the new rotation order leaves only the card states the Unity
+  cases exercise rests on the SD library making `remove()` and the index write single
+  directory updates. No available test cuts power at a chosen instruction.
+
 ### Add the GY-87 IMU
 
 **Status:** proposed
@@ -961,54 +983,6 @@ useful configuration costs. If it does not fit, this entry closes as "does not f
 `openspec/changes/archive/2026-09-22-size-the-log-ring-and-batch-its-flushes/` stands on
 its own, which it can: batching the flush gets about 36x without any new dependency, and
 pre-allocation is what would take the directory writes to zero.
-
-### Put the ring's position in the log data instead of `index.bin`
-
-**Status:** defined
-**Scope:** `lib/SdData`, `src/sdwrite.cpp`, `include/SdRecord.h`,
-`openspec/specs/flight-log/spec.md`
-
-`index.bin` is a second file that has to stay in agreement with the data, and it is
-written from the rotation path with its own `open`/`seek`/`write`/`flush`/`close`. If it is
-lost or torn the ring does not know where it is. It also evicts the single `SdVolume` cache
-block every time it is touched.
-
-ArduPilot's `AP_Logger_Block` — the backend for raw flash chips, with no filesystem at all
-— does not have this piece, because the information lives in the data. Every page carries a
-header with `FileNumber` and `FilePage`, and at startup `find_last_page()` runs a **binary
-search** for where the pair stops increasing:
-
-```c
-while (top - bottom > 1) {
-  look = (top + bottom) / 2;
-  StartRead(look);
-  look_hash = (int64_t)GetFileNumber() << 32 | df_FilePage;
-  if (look_hash < bottom_hash) { top = look; }
-  else { bottom = look; bottom_hash = look_hash; }
-}
-```
-
-A new log is `FileNumber + 1`. The end of the ring is where the counter goes backwards.
-
-Adapted to a ring of *files* rather than raw flash, the equivalent is a monotonically
-increasing lap or session counter written into each file when it is opened — a record type
-with its own `FMT`, so it stays `DFReader`-visible — and a boot that reads the four
-counters and picks the highest. That satisfies the existing requirement (*The log occupies
-a bounded amount of the card*: "The position within that set SHALL survive a power cycle")
-without a side-car file that can desynchronise.
-
-**That side-car argument is the whole case, and it is a thin one.** This entry first
-claimed a second benefit — that a counter in the file is also how a reader finds the end of
-a file written over on a later lap — and that benefit does not exist. Rotation deletes the
-next slot before opening it, so a file never contains records from a previous lap and there
-is no end to find. Do not pick this up expecting it to solve a parsing problem; it solves
-exactly one thing, which is `index.bin` being a separate file that has to stay in agreement
-with the data and can be lost or torn on its own.
-
-Note also that ArduPilot's *file* backend does **not** do this — page headers exist because
-raw flash has no filesystem, where there is genuinely nothing else to hold the position. So
-this is a borrowed idea, not a copied one, and whether a side-car file is actually worse
-than a counter in every file is the thing to settle before writing any code.
 
 ### Decide whether `SYSTEM_TIME` deserves 1 Hz
 

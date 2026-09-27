@@ -554,12 +554,25 @@ calls it, and the Unity suite does, before it deletes the log files.
 `lib/SdData` is a fixed-footprint ring, which is what bounds how much of the card
 the log can ever occupy. It writes to `data<i>.BIN` until the file reaches its size
 limit, then closes it, advances `i` modulo the file count, deletes whatever was
-there and opens the next one. The current index is persisted in `index.bin`, so a
-power cycle resumes where it left off instead of overwriting from zero. It is
-overwritten in place at offset 0, opened without `O_APPEND`: `FILE_WRITE` includes it,
-and until `persist-the-log-ring-position` that made every index an append, so every
-restart after a second rotation reopened the first full file and deleted the one the
-previous boot had been writing. The
+there, persists `i` in `index.bin` and opens the next one. The delete comes before the
+persist so that the index never names a file from an earlier lap. Until
+`harden-the-ring-index` the order was the other way round, and a power cut between the
+two left the index on the previous lap's full file, which the next boot appended to.
+`index.bin` is overwritten in place at offset 0, opened without `O_APPEND`: `FILE_WRITE`
+includes it, and until `persist-the-log-ring-position` that made every index an append,
+so every restart after a second rotation reopened the first full file and deleted the
+one the previous boot had been writing.
+
+At boot `begin()` checks the index against the card rather than trusting it. It resumes
+in the slot the index names if that file is absent or not yet full. Otherwise — the
+index missing, out of range, or naming a full file — it walks the ring on from that
+slot to the first file that is absent or not full, and rewrites the index. If every file
+is full, it rotates exactly as a write would. So a lost `index.bin` costs nothing, and
+`begin()` never appends to a full file. What it cannot catch is an index damaged into a
+*different* slot that is absent or not full: on the first lap that sends the log ahead
+of where it was, leaving the slots in between empty until the ring comes round. The
+file sizes come from directory entries, one open at a time, and cost one lookup per
+slot at worst, once per boot. The
 footprint is fixed by the two constructor arguments — file count and size per file,
 defaulting to **4 files of 1 MiB**, so 4 MiB of card in total. At ~34 B/s a file
 covers about 8.6 h and the whole ring about 34 h, which puts rotation several times a
@@ -567,7 +580,10 @@ day and each file under four minutes down a 57 600 baud link.
 
 Note what the delete-then-open gives the reader: a file always starts empty, so it
 never holds records from an earlier lap after the write cursor, and the ambiguity a
-circular log usually has does not arise. The price is that the delete walks a FAT
+circular log usually has does not arise. That holds across power cuts only because of
+the two rules above — delete before persisting, and never append to a full file at
+boot. Without either, one badly-timed cut puts two laps in one file, under the older
+lap's head `TIME`. The price is that the delete walks a FAT
 chain proportional to the file size. On the card measured on 2026-09-21 — FAT32,
 32 KiB clusters, two FATs — deleting a megabyte is about 3 sector operations if the
 chain is contiguous and at most 96 if it is fully fragmented. At the 1 GiB default
